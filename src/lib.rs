@@ -1,5 +1,7 @@
 pub mod collect;
 pub mod entry;
+pub mod provenance;
+pub mod render;
 pub mod root;
 pub mod scan;
 pub mod users;

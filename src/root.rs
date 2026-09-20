@@ -361,3 +361,16 @@ mod tests {
         assert!(!is_hidden_path(Path::new("/usr/lib/systemd/system/x.service")));
     }
 }
+
+impl Root {
+    /// The inverse of `abs`: turn a reported source path back into the
+    /// root-relative form every Root operation takes.
+    pub fn rel(&self, abs: &Path) -> PathBuf {
+        let stripped = abs.strip_prefix(&self.base).unwrap_or(abs);
+        strip_leading_slash(stripped).to_path_buf()
+    }
+
+    pub fn base(&self) -> &Path {
+        &self.base
+    }
+}

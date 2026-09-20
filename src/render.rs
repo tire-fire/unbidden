@@ -1,0 +1,299 @@
+//! Output. Suppression and filtering live here and nowhere else.
+//!
+//! The category error worth avoiding: hiding entries is a rendering decision,
+//! never a scan decision. The scan always collects everything, --json always
+//! emits everything, and the human table always says how many rows it hid.
+
+use std::io::{self, IsTerminal, Write};
+
+use crate::entry::{Entry, Flag, Kind, Trigger};
+use crate::scan::{Scan, Status};
+
+#[derive(Default, Clone)]
+pub struct Filters {
+    pub kinds: Vec<Kind>,
+    pub triggers: Vec<Trigger>,
+    pub flags: Vec<Flag>,
+}
+
+impl Filters {
+    pub fn is_empty(&self) -> bool {
+        self.kinds.is_empty() && self.triggers.is_empty() && self.flags.is_empty()
+    }
+
+    /// Explicit filters are a deliberate act by the operator and apply to
+    /// every output form. Suppression is separate and applies only to the
+    /// human table.
+    pub fn keep(&self, e: &Entry) -> bool {
+        (self.kinds.is_empty() || self.kinds.contains(&e.kind))
+            && (self.triggers.is_empty() || self.triggers.contains(&e.trigger))
+            && (self.flags.is_empty() || self.flags.iter().any(|f| e.has_flag(*f)))
+    }
+}
+
+/// An entry is hidden by default when a package owns it and its contents
+/// still match the manifest. A PackagedModified entry lives inside that
+/// category and must never be suppressed — it is the highest-signal finding
+/// the tool produces.
+pub fn suppressed(e: &Entry) -> bool {
+    e.provenance.is_packaged_intact() && !e.has_flag(Flag::PackagedModified) && e.flags.is_empty()
+}
+
+/// Newline-delimited: the header on the first line, then one entry per line,
+/// so the stream survives truncation and can be tailed.
+pub fn ndjson(w: &mut impl Write, scan: &Scan, filters: &Filters) -> io::Result<()> {
+    serde_json::to_writer(&mut *w, &scan.header)?;
+    w.write_all(b"\n")?;
+    for e in scan.entries.iter().filter(|e| filters.keep(e)) {
+        serde_json::to_writer(&mut *w, e)?;
+        w.write_all(b"\n")?;
+    }
+    w.flush()
+}
+
+/// The array form, which is also the snapshot format of §9.
+pub fn json_array(w: &mut impl Write, scan: &Scan, filters: &Filters) -> io::Result<()> {
+    let filtered = Scan {
+        header: scan.header.clone(),
+        entries: scan.entries.iter().filter(|e| filters.keep(e)).cloned().collect(),
+    };
+    serde_json::to_writer_pretty(&mut *w, &filtered)?;
+    w.write_all(b"\n")?;
+    w.flush()
+}
+
+pub struct TableOpts {
+    pub all: bool,
+    pub width: usize,
+}
+
+pub fn table(w: &mut impl Write, scan: &Scan, filters: &Filters, opts: &TableOpts) -> io::Result<()> {
+    banners(w, scan)?;
+
+    let mut shown: Vec<&Entry> = Vec::new();
+    let mut hidden = 0usize;
+    for e in scan.entries.iter().filter(|e| filters.keep(e)) {
+        if !opts.all && suppressed(e) {
+            hidden += 1;
+        } else {
+            shown.push(e);
+        }
+    }
+
+    let kind_w = width_of(shown.iter().map(|e| e.kind.as_str().len()), 12, 20);
+    let name_w = width_of(shown.iter().map(|e| e.name.chars().count()), 12, 34);
+    let flag_w = width_of(shown.iter().map(|e| flags_text(e).chars().count()), 5, 28);
+    let fixed = 12 + 2 + kind_w + 2 + 8 + 2 + name_w + 2 + flag_w + 2;
+    let cmd_w = opts.width.saturating_sub(fixed).max(12);
+
+    writeln!(
+        w,
+        "{:<12}  {:<kind_w$}  {:<8}  {:<name_w$}  {:<flag_w$}  {}",
+        "ID", "KIND", "ENABLED", "NAME", "FLAGS", "COMMAND"
+    )?;
+
+    for e in &shown {
+        let command = match &e.command {
+            Some(c) => String::from_utf8_lossy(c).replace(['\n', '\t', '\r'], " "),
+            None => e
+                .target_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| e.source.to_string_lossy().into_owned()),
+        };
+        writeln!(
+            w,
+            "{:<12}  {:<kind_w$}  {:<8}  {:<name_w$}  {:<flag_w$}  {}",
+            e.short_id(),
+            clip(e.kind.as_str(), kind_w),
+            clip(e.enabled.as_str(), 8),
+            clip(&e.name, name_w),
+            clip(&flags_text(e), flag_w),
+            clip(&command, cmd_w),
+        )?;
+    }
+
+    writeln!(w)?;
+    writeln!(w, "{} entries shown, {} collectors ran.", shown.len(), scan.header.collectors.len())?;
+    if hidden > 0 {
+        writeln!(w, "{hidden} entries hidden (packaged, intact) — use --all")?;
+    }
+    w.flush()
+}
+
+/// What the operator must know before reading the table: that the scan could
+/// not see everything. Partial output that looks complete is worse than none.
+fn banners(w: &mut impl Write, scan: &Scan) -> io::Result<()> {
+    if !scan.header.privileged {
+        writeln!(
+            w,
+            "! Running unprivileged. Per-user and root-owned sources were not all readable; \
+             this scan is not comparable with one taken as root."
+        )?;
+    }
+    let mut partial = Vec::new();
+    let mut failed = Vec::new();
+    let mut skipped = Vec::new();
+    for c in &scan.header.collectors {
+        match &c.status {
+            Status::Partial { unreadable } => partial.push((&c.name, unreadable.len())),
+            Status::Failed { error } => failed.push((&c.name, error)),
+            Status::Skipped { reason } => skipped.push((&c.name, reason)),
+            Status::Complete => {}
+        }
+    }
+    for (name, error) in &failed {
+        writeln!(w, "! Collector {name} failed: {error}")?;
+    }
+    if !partial.is_empty() {
+        let list: Vec<String> = partial.iter().map(|(n, c)| format!("{n} ({c} paths)")).collect();
+        writeln!(w, "! Incomplete collectors: {}. See the JSON header for the paths.", list.join(", "))?;
+    }
+    if !skipped.is_empty() {
+        let list: Vec<String> = skipped.iter().map(|(n, r)| format!("{n} ({r})")).collect();
+        writeln!(w, "  Skipped: {}", list.join(", "))?;
+    }
+    if !failed.is_empty() || !partial.is_empty() || !scan.header.privileged {
+        writeln!(w)?;
+    }
+    Ok(())
+}
+
+fn flags_text(e: &Entry) -> String {
+    e.flags.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(",")
+}
+
+fn width_of(lens: impl Iterator<Item = usize>, min: usize, max: usize) -> usize {
+    lens.max().unwrap_or(min).clamp(min, max)
+}
+
+fn clip(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        return s.to_string();
+    }
+    let keep = w.saturating_sub(1);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push('~');
+    out
+}
+
+pub fn terminal_width() -> usize {
+    if let Ok(cols) = std::env::var("COLUMNS") {
+        if let Ok(n) = cols.parse::<usize>() {
+            if n >= 40 {
+                return n;
+            }
+        }
+    }
+    if io::stdout().is_terminal() {
+        if let Ok(size) = rustix::termios::tcgetwinsize(io::stdout()) {
+            if size.ws_col >= 40 {
+                return size.ws_col as usize;
+            }
+        }
+    }
+    160
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entry::{Integrity, Provenance};
+    use crate::scan::{Header, SCHEMA_VERSION};
+
+    fn entry(name: &str, prov: Provenance, flags: &[Flag]) -> Entry {
+        let mut e = Entry::new(Kind::SystemdUnit, format!("/usr/lib/systemd/system/{name}"), name);
+        e.provenance = prov;
+        for f in flags {
+            e.flag(*f);
+        }
+        e
+    }
+
+    fn packaged(i: Integrity) -> Provenance {
+        Provenance::Packaged { package: "openssh-server".into(), version: "9.6".into(), integrity: i }
+    }
+
+    fn scan_of(entries: Vec<Entry>) -> Scan {
+        Scan {
+            header: Header {
+                unbidden_version: "0.1.0".into(),
+                schema_version: SCHEMA_VERSION,
+                scan_time: 0,
+                hostname: "h".into(),
+                kernel: "k".into(),
+                distro_id: "debian".into(),
+                distro_version: "12".into(),
+                root: "/".into(),
+                live: true,
+                deep: false,
+                privileged: true,
+                collectors: Vec::new(),
+            },
+            entries,
+        }
+    }
+
+    #[test]
+    fn a_modified_package_file_is_never_suppressed() {
+        assert!(suppressed(&entry("ssh.service", packaged(Integrity::Intact), &[])));
+        assert!(!suppressed(&entry("ssh.service", packaged(Integrity::Modified), &[Flag::PackagedModified])));
+        assert!(!suppressed(&entry("ssh.service", packaged(Integrity::Unknown), &[])));
+        assert!(!suppressed(&entry("evil.service", Provenance::Unpackaged, &[Flag::Unpackaged])));
+        assert!(!suppressed(&entry("ssh.service", packaged(Integrity::Intact), &[Flag::WorldWritable])));
+    }
+
+    #[test]
+    fn json_output_is_never_suppressed_and_the_table_says_what_it_hid() {
+        let scan = scan_of(vec![
+            entry("a.service", packaged(Integrity::Intact), &[]),
+            entry("b.service", Provenance::Unpackaged, &[Flag::Unpackaged]),
+        ]);
+
+        let mut out = Vec::new();
+        ndjson(&mut out, &scan, &Filters::default()).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(text.lines().count(), 3, "header plus both entries");
+
+        let mut out = Vec::new();
+        table(&mut out, &scan, &Filters::default(), &TableOpts { all: false, width: 120 }).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("b.service"));
+        assert!(!text.contains("a.service"));
+        assert!(text.contains("1 entries hidden (packaged, intact) — use --all"));
+    }
+
+    #[test]
+    fn filters_compose_as_or_within_a_field_and_and_across_fields() {
+        let mut a = entry("a.service", Provenance::Unpackaged, &[Flag::Unpackaged]);
+        a.trigger = Trigger::Boot;
+        let mut b = entry("b.service", Provenance::Unpackaged, &[Flag::WorldWritable]);
+        b.trigger = Trigger::Login;
+
+        let f = Filters { flags: vec![Flag::Unpackaged, Flag::WorldWritable], ..Default::default() };
+        assert!(f.keep(&a) && f.keep(&b));
+
+        let f = Filters {
+            flags: vec![Flag::Unpackaged],
+            triggers: vec![Trigger::Login],
+            ..Default::default()
+        };
+        assert!(!f.keep(&a) && !f.keep(&b));
+    }
+
+    #[test]
+    fn an_unreadable_collector_is_announced_before_the_table() {
+        let mut scan = scan_of(vec![entry("a.service", Provenance::Unpackaged, &[Flag::Unpackaged])]);
+        scan.header.privileged = false;
+        scan.header.collectors.push(crate::scan::CollectorStatus {
+            name: "cron".into(),
+            entries: 0,
+            status: Status::Partial { unreadable: vec!["/var/spool/cron/crontabs: EACCES".into()] },
+        });
+        let mut out = Vec::new();
+        table(&mut out, &scan, &Filters::default(), &TableOpts { all: false, width: 120 }).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("Running unprivileged"));
+        assert!(text.contains("Incomplete collectors: cron (1 paths)"));
+    }
+}

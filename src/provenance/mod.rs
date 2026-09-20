@@ -1,0 +1,153 @@
+//! Which package shipped this file, and does it still match?
+//!
+//! This is the Linux answer to Autoruns' signature check, and a stronger
+//! signal: instead of asking whether a binary is signed, it asks whether any
+//! package claims the file and whether its bytes still match what was
+//! installed. "Is this supposed to be here?" stops being a judgement call.
+//!
+//! Resolution is targeted rather than exhaustive. A desktop carries half a
+//! million packaged files and a scan asks about a few thousand, so the
+//! backends stream their databases once and answer only the paths asked for.
+//! Building a full path index would be the most expensive part of a scan.
+
+pub mod dpkg;
+pub mod generated;
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use crate::entry::Provenance;
+use crate::root::Root;
+
+pub type Answers = BTreeMap<PathBuf, Provenance>;
+
+/// Paths are root-relative throughout, matching every other filesystem
+/// operation in the tool.
+pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Answers {
+    let mut out = generated::classify(root, wanted);
+
+    let remaining: BTreeSet<PathBuf> =
+        wanted.iter().filter(|p| !out.contains_key(*p)).cloned().collect();
+
+    // A backend returns None when its database is not on this root, which is
+    // a different fact from "the database says nothing owns that path".
+    let mut backend_ran = false;
+    for answers in [dpkg::resolve(root, &remaining)].into_iter().flatten() {
+        out.extend(answers);
+        backend_ran = true;
+    }
+
+    // A path no backend claimed is Unpackaged only if a backend actually ran.
+    // Without a package database the honest answer is Unknown — silently
+    // calling every file unpackaged would flag the whole system.
+    let verdict = if backend_ran { Provenance::Unpackaged } else { Provenance::Unknown };
+    for p in wanted {
+        out.entry(p.clone()).or_insert_with(|| verdict.clone());
+    }
+    out
+}
+
+/// Aliased paths under merged /usr. Every supported distribution ships
+/// /lib as a symlink to /usr/lib, and package databases are inconsistent
+/// about which spelling they record, so a lookup must try both.
+pub fn usr_aliases(rel: &Path) -> Vec<PathBuf> {
+    const ALIASED: [&str; 4] = ["bin", "sbin", "lib", "lib64"];
+    let mut out = vec![rel.to_path_buf()];
+    let text = rel.to_string_lossy();
+    for dir in ALIASED {
+        if let Some(rest) = text.strip_prefix(&format!("usr/{dir}/")) {
+            out.push(PathBuf::from(format!("{dir}/{rest}")));
+        } else if let Some(rest) = text.strip_prefix(&format!("{dir}/")) {
+            out.push(PathBuf::from(format!("usr/{dir}/{rest}")));
+        }
+    }
+    out
+}
+
+pub struct FileDigests {
+    pub sha256: String,
+    pub md5: String,
+    pub size: u64,
+}
+
+/// A file large enough that hashing it is not worth an incident responder's
+/// wall clock. Reported as an unknown digest rather than silently skipped.
+pub const HASH_SIZE_LIMIT: u64 = 256 << 20;
+
+/// One read, both digests: the reported sha256 of §4 and the md5 that dpkg
+/// manifests are written in.
+pub fn digests(root: &Root, rel: &Path) -> Option<FileDigests> {
+    use md5::Digest as _;
+
+    let meta = root.stat_follow(rel).ok()?;
+    if !meta.is_file || meta.size > HASH_SIZE_LIMIT {
+        return None;
+    }
+    let mut file = root.open(rel).ok()?;
+    let mut sha = <sha2::Sha256 as sha2::Digest>::new();
+    let mut md5 = md5::Md5::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut size = 0u64;
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                sha2::Digest::update(&mut sha, &buf[..n]);
+                md5.update(&buf[..n]);
+                size += n as u64;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+    Some(FileDigests {
+        sha256: crate::entry::hex(&sha2::Digest::finalize(sha)),
+        md5: crate::entry::hex(&md5.finalize()),
+        size,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merged_usr_lookups_try_both_spellings() {
+        let both = usr_aliases(Path::new("usr/lib/systemd/system/ssh.service"));
+        assert!(both.contains(&PathBuf::from("usr/lib/systemd/system/ssh.service")));
+        assert!(both.contains(&PathBuf::from("lib/systemd/system/ssh.service")));
+
+        let both = usr_aliases(Path::new("bin/sh"));
+        assert!(both.contains(&PathBuf::from("usr/bin/sh")));
+
+        assert_eq!(usr_aliases(Path::new("etc/crontab")), vec![PathBuf::from("etc/crontab")]);
+    }
+
+    #[test]
+    fn no_package_database_means_unknown_not_unpackaged() {
+        let dir = std::env::temp_dir().join(format!("unbidden-prov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc/crontab"), b"x").unwrap();
+        let root = Root::at(&dir).unwrap();
+
+        let wanted: BTreeSet<PathBuf> = [PathBuf::from("etc/crontab")].into_iter().collect();
+        assert_eq!(resolve(&root, &wanted)[Path::new("etc/crontab")], Provenance::Unknown);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn one_read_yields_both_digests() {
+        let dir = std::env::temp_dir().join(format!("unbidden-dig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f"), b"abc").unwrap();
+        let root = Root::at(&dir).unwrap();
+        let d = digests(&root, Path::new("f")).unwrap();
+        assert_eq!(d.sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(d.md5, "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(d.size, 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
