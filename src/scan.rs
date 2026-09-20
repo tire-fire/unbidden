@@ -38,6 +38,7 @@ pub struct Ctx<'a> {
     pub users: &'a [User],
     pub deep: bool,
     unreadable: Vec<String>,
+    truncated: Vec<String>,
 }
 
 impl<'a> Ctx<'a> {
@@ -53,8 +54,13 @@ impl<'a> Ctx<'a> {
         let rel = rel.as_ref();
         match self.root.read_capped(rel, cap) {
             Ok((bytes, truncated)) => {
+                // A read that hit its cap is not a read that failed. Folding
+                // the two together would demote a collector to Partial — and
+                // so declare the whole baseline incomparable — because one
+                // file was larger than the ceiling, which is the ceiling
+                // doing its job.
                 if truncated {
-                    self.unreadable.push(format!("{} (truncated at {cap} bytes)", rel.display()));
+                    self.truncated.push(format!("{} (read to {cap} bytes)", rel.display()));
                 }
                 Some(bytes)
             }
@@ -90,17 +96,34 @@ impl<'a> Ctx<'a> {
         let abs = self.root.abs(rel);
         let mut e = Entry::new(kind, &abs, name);
 
-        if let Ok(meta) = self.root.stat(rel) {
-            e.owner_uid = meta.uid;
-            e.mode = meta.perms();
-            e.mtime = meta.mtime;
-            if meta.world_writable() {
-                e.flag(Flag::WorldWritable);
-            }
-            if meta.is_symlink {
+        if let Ok(link) = self.root.stat(rel) {
+            // The link's own timestamp is the interesting one: for an
+            // /etc/rc2.d/S01foo symlink it records when the entry was
+            // enabled, not when the script behind it was written.
+            e.mtime = link.mtime;
+
+            let meta = if link.is_symlink {
                 if let Ok(t) = self.root.read_link(rel) {
                     e.note("symlink_target", t.to_string_lossy());
                 }
+                match self.root.stat_follow(rel) {
+                    Ok(target) => target,
+                    Err(_) => {
+                        e.note("dangling_symlink", "true");
+                        link
+                    }
+                }
+            } else {
+                link
+            };
+
+            e.owner_uid = meta.uid;
+            e.mode = meta.perms();
+            // Permissions come from what the path resolves to. A symlink's
+            // own bits are always 0777 and the kernel ignores them, so
+            // reading them would flag every SysV rc symlink on every host.
+            if !meta.is_symlink && meta.world_writable() {
+                e.flag(Flag::WorldWritable);
             }
             if let Some(owner) = self.home_owner(&abs) {
                 if owner != meta.uid {
@@ -156,6 +179,10 @@ pub struct CollectorStatus {
     #[serde(flatten)]
     pub status: Status,
     pub entries: usize,
+    /// Files read up to their cap. Deterministic, so it does not make two
+    /// baselines incomparable, but the operator should still see it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub truncated: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,7 +225,13 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
             .map(|c| {
                 let users = &users;
                 scope.spawn(move || {
-                    let mut cx = Ctx { root, users, deep: opts.deep, unreadable: Vec::new() };
+                    let mut cx = Ctx {
+                        root,
+                        users,
+                        deep: opts.deep,
+                        unreadable: Vec::new(),
+                        truncated: Vec::new(),
+                    };
                     if c.deep_only() && !opts.deep {
                         return (skipped(c.name(), "needs --deep"), Vec::new());
                     }
@@ -207,6 +240,7 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
                     }
                     let collected = catch_unwind(AssertUnwindSafe(|| c.collect(&mut cx)));
                     let unreadable = cx.unreadable;
+                    let truncated = cx.truncated;
                     match collected {
                         Ok(entries) => {
                             let status = if unreadable.is_empty() {
@@ -218,6 +252,7 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
                                 name: c.name().to_string(),
                                 entries: entries.len(),
                                 status,
+                                truncated,
                             };
                             (st, entries)
                         }
@@ -226,6 +261,7 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
                                 name: c.name().to_string(),
                                 entries: 0,
                                 status: Status::Failed { error: panic_message(payload) },
+                                truncated,
                             },
                             Vec::new(),
                         ),
@@ -244,6 +280,7 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
                         name: "unknown".into(),
                         entries: 0,
                         status: Status::Failed { error: panic_message(payload) },
+                        truncated: Vec::new(),
                     },
                     Vec::new(),
                 )),
@@ -268,6 +305,7 @@ fn skipped(name: &str, reason: &str) -> CollectorStatus {
         name: name.to_string(),
         entries: 0,
         status: Status::Skipped { reason: reason.to_string() },
+        truncated: Vec::new(),
     }
 }
 
@@ -395,9 +433,55 @@ mod tests {
 
         let root = Root::at(&dir).unwrap();
         let users: Vec<User> = Vec::new();
-        let mut cx = Ctx { root: &root, users: &users, deep: false, unreadable: Vec::new() };
+        let mut cx = Ctx {
+            root: &root,
+            users: &users,
+            deep: false,
+            unreadable: Vec::new(),
+            truncated: Vec::new(),
+        };
         let e = cx.entry(Kind::Cron, "etc/cron.d/job", "job");
         assert!(e.has_flag(Flag::WorldWritable));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_symlinked_entry_is_not_world_writable_just_for_being_a_symlink() {
+        // A symlink's own mode is always 0777 and the kernel ignores it.
+        // Reading it would flag every /etc/rc2.d/S01foo on every host.
+        let dir = std::env::temp_dir().join(format!("unbidden-symperm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc/init.d")).unwrap();
+        std::fs::create_dir_all(dir.join("etc/rc2.d")).unwrap();
+        std::fs::write(dir.join("etc/init.d/ssh"), "#!/bin/sh
+").unwrap();
+        std::fs::set_permissions(
+            dir.join("etc/init.d/ssh"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("../init.d/ssh", dir.join("etc/rc2.d/S01ssh")).unwrap();
+        std::os::unix::fs::symlink("../init.d/gone", dir.join("etc/rc2.d/S02gone")).unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let users: Vec<User> = Vec::new();
+        let mut cx = Ctx {
+            root: &root,
+            users: &users,
+            deep: false,
+            unreadable: Vec::new(),
+            truncated: Vec::new(),
+        };
+
+        let e = cx.entry(Kind::SysvInit, "etc/rc2.d/S01ssh", "S01ssh");
+        assert!(!e.has_flag(Flag::WorldWritable), "took permissions from the link, not its target");
+        assert_eq!(e.mode, 0o755);
+        assert_eq!(e.raw["symlink_target"], "../init.d/ssh");
+
+        let e = cx.entry(Kind::SysvInit, "etc/rc2.d/S02gone", "S02gone");
+        assert!(!e.has_flag(Flag::WorldWritable), "a dangling link is not world-writable either");
+        assert_eq!(e.raw["dangling_symlink"], "true");
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

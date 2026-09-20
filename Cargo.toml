@@ -14,6 +14,7 @@ keywords = ["security", "forensics", "dfir", "persistence", "autostart"]
 blake3 = "1.8"
 gvdb = "0.10.1"
 md-5 = "0.10"
+rusqlite = { version = "0.37", features = ["bundled", "serialize"] }
 clap = { version = "4", features = ["derive"] }
 rustix = { version = "1.1", features = ["fs", "process", "system", "termios"] }
 serde = { version = "1", features = ["derive"] }

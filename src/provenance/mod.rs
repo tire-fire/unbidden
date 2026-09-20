@@ -12,6 +12,7 @@
 
 pub mod dpkg;
 pub mod generated;
+pub mod rpm;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -33,7 +34,7 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Answers {
     // A backend returns None when its database is not on this root, which is
     // a different fact from "the database says nothing owns that path".
     let mut backend_ran = false;
-    for answers in [dpkg::resolve(root, &remaining)].into_iter().flatten() {
+    for answers in [dpkg::resolve(root, &remaining), rpm::resolve(root, &remaining)].into_iter().flatten() {
         out.extend(answers);
         backend_ran = true;
     }

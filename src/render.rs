@@ -289,6 +289,7 @@ mod tests {
             name: "cron".into(),
             entries: 0,
             status: Status::Partial { unreadable: vec!["/var/spool/cron/crontabs: EACCES".into()] },
+            truncated: Vec::new(),
         });
         let mut out = Vec::new();
         table(&mut out, &scan, &Filters::default(), &TableOpts { all: false, width: 120 }).unwrap();
