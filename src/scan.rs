@@ -1,0 +1,403 @@
+//! The three phases: collect, enrich, render. This module owns the first and
+//! the record of how well it went.
+//!
+//! Collectors are independent, run in parallel, and know nothing of each
+//! other. One that fails — or panics on hostile input — is recorded as a
+//! failed collector and the scan continues, because a scan that aborts on the
+//! one file the attacker crafted is a scan the attacker controls.
+
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use serde::{Deserialize, Serialize};
+
+use crate::entry::{Entry, Flag, Kind};
+use crate::root::{DirEnt, READ_CAP, Root, is_hidden_path};
+use crate::users::{self, User};
+
+pub trait Collector: Sync {
+    fn name(&self) -> &'static str;
+
+    /// Collectors reading /proc, /sys or a running daemon declare it, so an
+    /// offline root knows to skip them rather than report nothing.
+    fn requires_live(&self) -> bool {
+        false
+    }
+
+    /// True for the three collectors that need a whole-filesystem traversal.
+    fn deep_only(&self) -> bool {
+        false
+    }
+
+    fn collect(&self, cx: &mut Ctx) -> Vec<Entry>;
+}
+
+pub struct Ctx<'a> {
+    pub root: &'a Root,
+    pub users: &'a [User],
+    pub deep: bool,
+    unreadable: Vec<String>,
+}
+
+impl<'a> Ctx<'a> {
+    /// A bounded read that records what it could not open. Absent paths are
+    /// normal — most search paths do not exist on most hosts — but an
+    /// unreadable one is the difference between "nothing there" and "could
+    /// not look", and §7 of the spec makes that distinction load-bearing.
+    pub fn read(&mut self, rel: impl AsRef<Path>) -> Option<Vec<u8>> {
+        self.read_capped(rel, READ_CAP)
+    }
+
+    pub fn read_capped(&mut self, rel: impl AsRef<Path>, cap: usize) -> Option<Vec<u8>> {
+        let rel = rel.as_ref();
+        match self.root.read_capped(rel, cap) {
+            Ok((bytes, truncated)) => {
+                if truncated {
+                    self.unreadable.push(format!("{} (truncated at {cap} bytes)", rel.display()));
+                }
+                Some(bytes)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                self.unreadable.push(format!("{}: {e}", rel.display()));
+                None
+            }
+        }
+    }
+
+    pub fn dir(&mut self, rel: impl AsRef<Path>) -> Vec<DirEnt> {
+        let rel = rel.as_ref();
+        match self.root.read_dir(rel) {
+            Ok(v) => v,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => {
+                self.unreadable.push(format!("{}: {e}", rel.display()));
+                Vec::new()
+            }
+        }
+    }
+
+    pub fn note_unreadable(&mut self, what: impl std::fmt::Display) {
+        self.unreadable.push(what.to_string());
+    }
+
+    /// Builds an Entry with the facts about its backing file already filled
+    /// in. Every collector routes through here so that ownership, permissions
+    /// and the file-shaped flags are derived one way, once.
+    pub fn entry(&mut self, kind: Kind, rel: impl AsRef<Path>, name: impl Into<String>) -> Entry {
+        let rel = rel.as_ref();
+        let abs = self.root.abs(rel);
+        let mut e = Entry::new(kind, &abs, name);
+
+        if let Ok(meta) = self.root.stat(rel) {
+            e.owner_uid = meta.uid;
+            e.mode = meta.perms();
+            e.mtime = meta.mtime;
+            if meta.world_writable() {
+                e.flag(Flag::WorldWritable);
+            }
+            if meta.is_symlink {
+                if let Ok(t) = self.root.read_link(rel) {
+                    e.note("symlink_target", t.to_string_lossy());
+                }
+            }
+            if let Some(owner) = self.home_owner(&abs) {
+                if owner != meta.uid {
+                    e.flag(Flag::OwnerMismatch);
+                }
+            }
+        }
+
+        // A world-writable directory is as good as a world-writable file:
+        // anyone can replace what is inside it.
+        if let Some(parent) = rel.parent() {
+            if let Ok(meta) = self.root.stat(parent) {
+                if meta.world_writable() && !is_sticky(meta.mode) {
+                    e.flag(Flag::WorldWritable);
+                }
+            }
+        }
+
+        if is_hidden_path(&abs) {
+            e.flag(Flag::HiddenPath);
+        }
+        e
+    }
+
+    /// The uid of the user whose home contains this path, if any.
+    fn home_owner(&self, abs: &Path) -> Option<u32> {
+        self.users
+            .iter()
+            .filter(|u| u.uid.is_some() && abs.starts_with(&u.home) && u.home != Path::new("/"))
+            .max_by_key(|u| u.home.as_os_str().len())
+            .and_then(|u| u.uid)
+    }
+}
+
+fn is_sticky(mode: u32) -> bool {
+    mode & 0o1000 != 0
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum Status {
+    Complete,
+    /// Ran, but could not read everything it needed. A baseline taken this
+    /// way is not comparable with one that was complete.
+    Partial { unreadable: Vec<String> },
+    Skipped { reason: String },
+    Failed { error: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CollectorStatus {
+    pub name: String,
+    #[serde(flatten)]
+    pub status: Status,
+    pub entries: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Header {
+    pub unbidden_version: String,
+    pub schema_version: u32,
+    pub scan_time: i64,
+    pub hostname: String,
+    pub kernel: String,
+    pub distro_id: String,
+    pub distro_version: String,
+    pub root: PathBuf,
+    pub live: bool,
+    pub deep: bool,
+    pub privileged: bool,
+    pub collectors: Vec<CollectorStatus>,
+}
+
+/// The JSON contract of §10. Bump only for additive change; a reader must
+/// tolerate fields it does not know.
+pub const SCHEMA_VERSION: u32 = 1;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Scan {
+    pub header: Header,
+    pub entries: Vec<Entry>,
+}
+
+pub struct Options {
+    pub deep: bool,
+}
+
+pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Scan {
+    let users = users::discover(root);
+    let mut results: Vec<(CollectorStatus, Vec<Entry>)> = Vec::new();
+
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = collectors
+            .iter()
+            .map(|c| {
+                let users = &users;
+                scope.spawn(move || {
+                    let mut cx = Ctx { root, users, deep: opts.deep, unreadable: Vec::new() };
+                    if c.deep_only() && !opts.deep {
+                        return (skipped(c.name(), "needs --deep"), Vec::new());
+                    }
+                    if c.requires_live() && !root.is_live() {
+                        return (skipped(c.name(), "needs a live host"), Vec::new());
+                    }
+                    let collected = catch_unwind(AssertUnwindSafe(|| c.collect(&mut cx)));
+                    let unreadable = cx.unreadable;
+                    match collected {
+                        Ok(entries) => {
+                            let status = if unreadable.is_empty() {
+                                Status::Complete
+                            } else {
+                                Status::Partial { unreadable }
+                            };
+                            let st = CollectorStatus {
+                                name: c.name().to_string(),
+                                entries: entries.len(),
+                                status,
+                            };
+                            (st, entries)
+                        }
+                        Err(payload) => (
+                            CollectorStatus {
+                                name: c.name().to_string(),
+                                entries: 0,
+                                status: Status::Failed { error: panic_message(payload) },
+                            },
+                            Vec::new(),
+                        ),
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            match h.join() {
+                Ok(r) => results.push(r),
+                // catch_unwind already covers collector bodies; this is the
+                // belt to that suspenders.
+                Err(payload) => results.push((
+                    CollectorStatus {
+                        name: "unknown".into(),
+                        entries: 0,
+                        status: Status::Failed { error: panic_message(payload) },
+                    },
+                    Vec::new(),
+                )),
+            }
+        }
+    });
+
+    results.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+    let mut entries = Vec::new();
+    let mut statuses = Vec::new();
+    for (status, mut es) in results {
+        statuses.push(status);
+        entries.append(&mut es);
+    }
+    entries.sort_by(|a, b| (a.kind, &a.source, &a.name).cmp(&(b.kind, &b.source, &b.name)));
+
+    Scan { header: header(root, opts, statuses), entries }
+}
+
+fn skipped(name: &str, reason: &str) -> CollectorStatus {
+    CollectorStatus {
+        name: name.to_string(),
+        entries: 0,
+        status: Status::Skipped { reason: reason.to_string() },
+    }
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "collector panicked".to_string()
+    }
+}
+
+fn header(root: &Root, opts: &Options, collectors: Vec<CollectorStatus>) -> Header {
+    let uname = rustix::system::uname();
+    let (distro_id, distro_version) = os_release(root);
+    Header {
+        unbidden_version: env!("CARGO_PKG_VERSION").to_string(),
+        schema_version: SCHEMA_VERSION,
+        scan_time: SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+        // Live-only facts: on an offline root these describe the analyst's
+        // machine, so they come from the image where the image can answer.
+        hostname: root
+            .read_capped("etc/hostname", 4096)
+            .ok()
+            .map(|(b, _)| String::from_utf8_lossy(&b).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| uname.nodename().to_string_lossy().into_owned()),
+        kernel: if root.is_live() {
+            uname.release().to_string_lossy().into_owned()
+        } else {
+            String::new()
+        },
+        distro_id,
+        distro_version,
+        root: root.abs(""),
+        live: root.is_live(),
+        deep: opts.deep,
+        privileged: rustix::process::geteuid().is_root(),
+        collectors,
+    }
+}
+
+/// Distro detection reads the scan root, never the running system (§11).
+fn os_release(root: &Root) -> (String, String) {
+    let mut id = String::new();
+    let mut version = String::new();
+    for path in ["etc/os-release", "usr/lib/os-release"] {
+        let Ok((bytes, _)) = root.read_capped(path, 64 * 1024) else { continue };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let v = v.trim_matches('"').to_string();
+            match k {
+                "ID" if id.is_empty() => id = v,
+                "VERSION_ID" if version.is_empty() => version = v,
+                _ => {}
+            }
+        }
+        if !id.is_empty() {
+            break;
+        }
+    }
+    (id, version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entry::Trigger;
+
+    struct Panicky;
+    impl Collector for Panicky {
+        fn name(&self) -> &'static str {
+            "panicky"
+        }
+        fn collect(&self, _: &mut Ctx) -> Vec<Entry> {
+            panic!("hostile input, line 3");
+        }
+    }
+
+    struct Fine;
+    impl Collector for Fine {
+        fn name(&self) -> &'static str {
+            "fine"
+        }
+        fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
+            let mut e = cx.entry(Kind::RcLocal, "etc/rc.local", "rc.local");
+            e.trigger = Trigger::Boot;
+            vec![e]
+        }
+    }
+
+    #[test]
+    fn a_panicking_collector_does_not_take_the_scan_with_it() {
+        let dir = std::env::temp_dir().join(format!("unbidden-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc/rc.local"), "#!/bin/sh\n/tmp/x\n").unwrap();
+        std::fs::write(dir.join("etc/os-release"), "ID=debian\nVERSION_ID=\"12\"\n").unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Panicky), Box::new(Fine)];
+        let scan = run(&root, &Options { deep: false }, &collectors);
+
+        assert_eq!(scan.entries.len(), 1, "the healthy collector still reported");
+        assert_eq!(scan.header.distro_id, "debian");
+        let failed = scan.header.collectors.iter().find(|c| c.name == "panicky").unwrap();
+        match &failed.status {
+            Status::Failed { error } => assert!(error.contains("hostile input")),
+            other => panic!("expected a recorded failure, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn world_writable_parent_flags_the_entry() {
+        let dir = std::env::temp_dir().join(format!("unbidden-ww-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc/cron.d")).unwrap();
+        std::fs::write(dir.join("etc/cron.d/job"), "* * * * * root /tmp/x\n").unwrap();
+        std::fs::set_permissions(dir.join("etc/cron.d"), std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let users: Vec<User> = Vec::new();
+        let mut cx = Ctx { root: &root, users: &users, deep: false, unreadable: Vec::new() };
+        let e = cx.entry(Kind::Cron, "etc/cron.d/job", "job");
+        assert!(e.has_flag(Flag::WorldWritable));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
