@@ -23,6 +23,7 @@ WORK="${UNBIDDEN_VM_DIR:-/var/tmp/unbidden-vm}"
 CACHE="$WORK/cache"
 IMAGE=debian-12
 MODULES=""
+ALL=0
 KEEP=0
 SHELL_ONLY=0
 MEM=2048
@@ -31,6 +32,7 @@ CPUS=2
 while [ $# -gt 0 ]; do
     case "$1" in
         --image)   IMAGE="$2"; shift 2 ;;
+        --all)     ALL=1; shift ;;
         --modules) MODULES="$2"; shift 2 ;;
         --keep)    KEEP=1; shift ;;
         --shell)   SHELL_ONLY=1; KEEP=1; shift ;;
@@ -41,6 +43,26 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# The supported set of §1. A defect on any of these blocks a release, so the
+# matrix is a first-class mode rather than something a caller loops over.
+SUPPORTED=(debian-12 debian-13 ubuntu-22.04 ubuntu-24.04 fedora-43 fedora-44)
+
+if [ "$ALL" -eq 1 ]; then
+    declare -a RESULTS=()
+    worst=0
+    for img in "${SUPPORTED[@]}"; do
+        if "$0" --image "$img" ${MODULES:+--modules "$MODULES"}; then
+            RESULTS+=("  PASS  $img")
+        else
+            RESULTS+=("  FAIL  $img")
+            worst=1
+        fi
+    done
+    printf '\n== the supported set\n'
+    printf '%s\n' "${RESULTS[@]}"
+    exit "$worst"
+fi
+
 # Cloud images, because they boot unattended and are the same artefacts the
 # distributions publish for real use.
 case "$IMAGE" in
@@ -48,8 +70,8 @@ case "$IMAGE" in
     debian-13)    URL=https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2;  FAMILY=debian ;;
     ubuntu-22.04) URL=https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img;           FAMILY=debian ;;
     ubuntu-24.04) URL=https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img;           FAMILY=debian ;;
-    fedora-41)    URL=https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2; FAMILY=fedora ;;
-    fedora-42)    URL=https://download.fedoraproject.org/pub/fedora/linux/releases/42/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-42-1.1.x86_64.qcow2; FAMILY=fedora ;;
+    fedora-43)    URL=https://dl.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2; FAMILY=fedora ;;
+    fedora-44)    URL=https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2; FAMILY=fedora ;;
     *) echo "unknown image: $IMAGE" >&2; exit 2 ;;
 esac
 
