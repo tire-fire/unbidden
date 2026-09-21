@@ -755,13 +755,14 @@ mod tests {
 
         let truncated = s.header.collectors[0].truncated.join("\n");
         assert!(truncated.contains("read to"), "the 10 MB line is capped and said so: {truncated}");
-        match status {
-            Status::Partial { unreadable } => {
-                let joined = unreadable.join("\n");
-                assert!(joined.contains("adir"), "a crontab that is a directory is reported: {joined}");
-            }
-            other => panic!("expected a partial collector, got {other:?}"),
-        }
+        // A directory planted where a crontab belongs is reported, but it
+        // does not demote the collector: an attacker must not be able to
+        // declare the whole baseline incomparable by creating one.
+        assert!(truncated.contains("adir"), "a crontab that is a directory is reported: {truncated}");
+        assert!(
+            !matches!(status, Status::Failed { .. }),
+            "hostile input must not kill the collector: {status:?}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

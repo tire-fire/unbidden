@@ -52,6 +52,24 @@ impl<'a> Ctx<'a> {
 
     pub fn read_capped(&mut self, rel: impl AsRef<Path>, cap: usize) -> Option<Vec<u8>> {
         let rel = rel.as_ref();
+
+        // Opening a FIFO for reading blocks until someone writes to it, and a
+        // collector that hangs cannot be rescued by catching a panic. An
+        // attacker plants one by creating a named pipe where a config file is
+        // expected. A directory in the same place is the cheaper version of
+        // the same trick: it fails with EISDIR, which would otherwise demote
+        // the collector to Partial and declare the whole baseline
+        // incomparable over one planted symlink.
+        match self.root.stat_follow(rel) {
+            Ok(meta) if !meta.is_file => {
+                self.truncated.push(format!("{}: not a regular file, not read", rel.display()));
+                return None;
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(_) => {}
+        }
+
         match self.root.read_capped(rel, cap) {
             Ok((bytes, truncated)) => {
                 // A read that hit its cap is not a read that failed. Folding
@@ -181,8 +199,10 @@ pub struct CollectorStatus {
     #[serde(flatten)]
     pub status: Status,
     pub entries: usize,
-    /// Files read up to their cap. Deterministic, so it does not make two
-    /// baselines incomparable, but the operator should still see it.
+    /// Reads that deliberately returned less than the whole file: one that
+    /// hit its cap, or a path that was not a regular file. Deterministic, so
+    /// it does not make two baselines incomparable, but the operator should
+    /// still see it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub truncated: Vec<String>,
 }
@@ -432,6 +452,41 @@ mod tests {
             Status::Failed { error } => assert!(error.contains("hostile input")),
             other => panic!("expected a recorded failure, got {other:?}"),
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_fifo_planted_where_a_config_belongs_does_not_hang_the_scan() {
+        // Opening a FIFO for reading blocks until a writer appears. A
+        // collector that hangs cannot be rescued by catching a panic, so this
+        // test would not fail — it would never finish.
+        let dir = std::env::temp_dir().join(format!("unbidden-fifo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc/cron.d")).unwrap();
+        std::fs::create_dir_all(dir.join("etc/cron.daily")).unwrap();
+
+        let fd = rustix::fs::open(dir.join("etc/cron.d"), rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY, rustix::fs::Mode::empty()).unwrap();
+        rustix::fs::mknodat(&fd, "trap", rustix::fs::FileType::Fifo, rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR, 0).unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let users: Vec<User> = Vec::new();
+        let mut cx = Ctx {
+            root: &root,
+            users: &users,
+            deep: false,
+            unreadable: Vec::new(),
+            truncated: Vec::new(),
+        };
+
+        assert!(cx.read("etc/cron.d/trap").is_none());
+        assert!(cx.truncated.iter().any(|t| t.contains("not a regular file")));
+        assert!(cx.unreadable.is_empty(), "a planted FIFO must not declare the baseline incomparable");
+
+        // A directory in the same position is the cheaper version of the
+        // same trick.
+        assert!(cx.read("etc/cron.daily").is_none());
+        assert!(cx.unreadable.is_empty());
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

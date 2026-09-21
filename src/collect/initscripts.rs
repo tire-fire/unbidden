@@ -632,7 +632,7 @@ exec /usr/sbin/sshd\n";
         assert_eq!(gone.enabled, Enablement::Enabled, "the runlevel still tries to start it");
 
         assert!(s.entries.iter().any(|e| e.name == "S03loop"));
-        assert!(s.entries.iter().any(|e| e.name == "S04root"));
+        assert_eq!(one(&s, Kind::SysvInit, "S04root").raw["not_a_regular_file"], "true");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -777,6 +777,18 @@ exec /usr/sbin/sshd\n";
         put(&dir, "etc/rc2.d/S", b"", 0o755);
         put(&dir, "etc/rc2.d/README", b"not a link\n", 0o644);
 
+        // Opening a FIFO read-only blocks until somebody writes to it. If the
+        // regular-file guard ever goes, this test hangs rather than fails,
+        // which is precisely the behaviour it exists to prevent.
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            dir.join("etc/update-motd.d/60-pipe"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::XUSR,
+            0,
+        )
+        .unwrap();
+
         let s = scan(&dir);
         assert!(matches!(status(&s), Status::Complete), "{:?}", status(&s));
 
@@ -788,12 +800,17 @@ exec /usr/sbin/sshd\n";
             "the cap is reported, not hidden"
         );
 
-        let bad = of_kind(&s, Kind::Motd);
-        assert_eq!(bad.len(), 1);
-        assert!(bad[0].has_flag(Flag::EncodingAnomaly), "a non-UTF-8 shebang is evidence");
-        assert!(bad[0].raw.contains_key("shebang_hex"));
-        assert_eq!(bad[0].raw["env.LD_PRELOAD"], "/tmp/\u{fffd}.so");
-        assert_eq!(bad[0].raw["env.BAD"], "");
+        assert_eq!(of_kind(&s, Kind::Motd).len(), 2);
+        let bad = one(&s, Kind::Motd, "50-\u{fffd}\u{fffd}");
+        assert!(bad.has_flag(Flag::EncodingAnomaly), "a non-UTF-8 shebang is evidence");
+        assert!(bad.raw.contains_key("shebang_hex"));
+        assert_eq!(bad.raw["name_raw_hex"], "35302dfffe");
+        assert_eq!(bad.raw["env.LD_PRELOAD"], "/tmp/\u{fffd}.so");
+        assert_eq!(bad.raw["env.BAD"], "");
+
+        let pipe = one(&s, Kind::Motd, "60-pipe");
+        assert_eq!(pipe.raw["not_a_regular_file"], "true");
+        assert_eq!(pipe.enabled, Enablement::Disabled);
 
         assert!(s.entries.iter().any(|e| e.name == "S"), "a bare S is still an S entry");
         assert!(!s.entries.iter().any(|e| e.name == "README"), "rc runs S* and K* only");
