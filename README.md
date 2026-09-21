@@ -91,6 +91,14 @@ It is useful against the overwhelming majority of real persistence, which is
 userspace and file-backed. It is not a rootkit detector, and a clean report is
 not proof of a clean host.
 
+**Accounts come from `/etc/passwd`, so network directories are a gap.** A
+static binary has no NSS, which is the price of not handing an attacker's
+shared object into the scanner's own address space. unbidden widens the set
+with every home directory and crontab spool actually present on disk, and
+records on each entry how that account was found — but an LDAP or SSSD account
+with no local trace and no home on this machine will not be enumerated, and
+its per-user autostart will not be scanned.
+
 Also outside its reach: a compromised build toolchain, and running it from a
 share mounted on the suspect host.
 
@@ -147,6 +155,20 @@ backend claims what it should, that entries verify intact against their
 manifests, that an edited conffile does not raise the tool's highest-signal
 finding, and that a unit planted in `/etc/systemd/system` is reported
 unpackaged with its missing target flagged. Fast, and it runs on any image.
+
+Derivatives are checked for the thing that makes them derivatives: LMDE must
+read as Debian-based and mainline Mint as Ubuntu-based, and an image that
+merely carries a distribution's name while being something else underneath
+fails rather than passing quietly.
+
+```sh
+UNBIDDEN_DESKTOP=cinnamon docker run ... sh ci/distro-check.sh /w/unbidden
+```
+
+Boots a real Cinnamon or GNOME session under Xvfb, so the extension collector
+reads a dconf database a session actually wrote rather than a synthetic one.
+This is the mechanism the spec says no other Linux tool enumerates, and it is
+the only way to exercise it end to end.
 
 ```sh
 ci/vm-harness.sh                          # Debian 12, the whole matrix
