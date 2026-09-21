@@ -147,13 +147,24 @@ impl Root {
     fn statat(&self, rel: &Path, at: AtFlags) -> io::Result<Meta> {
         let rel = strip_leading_slash(rel);
         let rel = if rel.as_os_str().is_empty() { Path::new(".") } else { rel };
-        let st = if self.confined && at.is_empty() {
-            // statat cannot express RESOLVE_IN_ROOT, so resolve through an
-            // openat2 handle and stat that instead.
-            let fd = self.open_raw(rel, OFlags::PATH)?;
-            rustix::fs::statat(&fd, "", AtFlags::EMPTY_PATH)?
-        } else {
-            rustix::fs::statat(&self.fd, rel, at | AtFlags::SYMLINK_NOFOLLOW.intersection(at))?
+        // statat cannot express RESOLVE_IN_ROOT, so resolution goes through
+        // an openat2 handle. For a no-follow stat that means opening the
+        // PARENT under confinement and stating the final name there: the
+        // final component must not be followed, but everything leading to it
+        // still has to stay inside the root.
+        let st = match (self.confined, at.contains(AtFlags::SYMLINK_NOFOLLOW)) {
+            (true, false) => {
+                let fd = self.open_raw(rel, OFlags::PATH)?;
+                rustix::fs::statat(&fd, "", AtFlags::EMPTY_PATH)?
+            }
+            (true, true) => match (rel.parent(), rel.file_name()) {
+                (Some(parent), Some(name)) if !name.is_empty() => {
+                    let dir = self.open_raw(parent, OFlags::PATH | OFlags::DIRECTORY)?;
+                    rustix::fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW)?
+                }
+                _ => rustix::fs::statat(&self.fd, rel, at)?,
+            },
+            (false, _) => rustix::fs::statat(&self.fd, rel, at)?,
         };
         Ok(meta_of(&st))
     }
@@ -272,7 +283,8 @@ fn probe_openat2(fd: &OwnedFd) -> bool {
 /// anything. Without this list every per-user autostart entry, every
 /// authorized_keys and every shell profile reports as hidden, which is the
 /// opposite of useful.
-const CONVENTIONAL_DOT_DIRS: [&[u8]; 5] = [b".config", b".local", b".cache", b".ssh", b".var"];
+const CONVENTIONAL_DOT_DIRS: [&[u8]; 6] =
+    [b".config", b".local", b".cache", b".ssh", b".var", b".git"];
 
 /// True when the path sits in one of the world-writable scratch directories,
 /// or when a *directory* along the way is dot-prefixed and is not one of the
@@ -344,6 +356,24 @@ mod tests {
     }
 
     #[test]
+    fn a_no_follow_stat_still_cannot_escape_through_its_parents() {
+        let dir = tmpdir("statescape");
+        std::fs::create_dir_all(dir.join("image/etc")).unwrap();
+        std::fs::write(dir.join("image/etc/real"), b"inside").unwrap();
+        // An attacker-named path whose PARENT is an absolute symlink. The
+        // final component is not followed, but the parents still resolve.
+        std::os::unix::fs::symlink("/etc", dir.join("image/escape")).unwrap();
+
+        let root = Root::at(dir.join("image")).unwrap();
+        assert!(root.stat("etc/real").is_ok());
+        match root.stat("escape/passwd") {
+            Err(e) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
+            Ok(_) => panic!("a no-follow stat resolved out of the scan root"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn absent_search_paths_are_not_failures() {
         let dir = tmpdir("absent");
         let root = Root::at(&dir).unwrap();
@@ -382,6 +412,7 @@ mod tests {
         assert!(!is_hidden_path(Path::new("/home/u/.config/autostart/x.desktop")));
         assert!(!is_hidden_path(Path::new("/home/u/.ssh/authorized_keys")));
         assert!(!is_hidden_path(Path::new("/home/u/.bashrc")));
+        assert!(!is_hidden_path(Path::new("/srv/repo/.git/hooks/pre-commit")));
         assert!(!is_hidden_path(Path::new("/usr/lib/systemd/system/x.service")));
     }
 }
@@ -396,5 +427,34 @@ impl Root {
 
     pub fn base(&self) -> &Path {
         &self.base
+    }
+}
+
+/// Btrfs gives every subvolume its own device number while they all live on
+/// one filesystem, so a device comparison alone reports `/home` as a separate
+/// disk on a default Fedora, openSUSE or Arch install.
+const BTRFS_SUPER_MAGIC: i64 = 0x9123_683E;
+
+impl Root {
+    /// An identifier for the filesystem a path sits on, stable across the
+    /// subvolumes of one btrfs. None where the distinction does not arise,
+    /// which keeps the device rule in force for every other filesystem.
+    pub fn filesystem_id(&self, rel: impl AsRef<Path>) -> Option<u64> {
+        let rel = strip_leading_slash(rel.as_ref());
+        let rel = if rel.as_os_str().is_empty() { Path::new(".") } else { rel };
+        let fd = self.open_raw(rel, OFlags::PATH | OFlags::DIRECTORY).ok()?;
+        if rustix::fs::fstatfs(&fd).ok()?.f_type as i64 != BTRFS_SUPER_MAGIC {
+            return None;
+        }
+        // btrfs builds its filesystem id from the volume UUID and then XORs
+        // the subvolume's object id into it — the low 32 bits get the top
+        // half of that object id, which is always zero for the small,
+        // sequential ids subvolumes actually get, and the high 32 bits get
+        // the rest. So the low word identifies the filesystem and the high
+        // word identifies the subvolume within it.
+        //
+        // statfs exposes the two words but rustix keeps them private;
+        // statvfs packs the same pair into one u64, low word first.
+        Some(rustix::fs::fstatvfs(&fd).ok()?.f_fsid as u64 & 0xffff_ffff)
     }
 }

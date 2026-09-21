@@ -197,6 +197,13 @@ impl Entry {
         self.raw.insert(key.to_string(), value.into());
     }
 
+    /// Re-keys the entry on its path within the scan root. Callers that know
+    /// the root use this; `new` alone cannot, since an Entry carries no idea
+    /// of where the scan started.
+    pub fn rekey(&mut self, rel: &Path) {
+        self.id = entry_id(self.kind, rel, &self.name);
+    }
+
     /// What the human table shows: unique-prefix addressing, git style.
     pub fn short_id(&self) -> &str {
         &self.id[..12.min(self.id.len())]
@@ -206,6 +213,12 @@ impl Entry {
 /// Identity is `kind || source || name`, length-framed so that no two distinct
 /// field splits can produce the same hash input. Content is excluded on
 /// purpose: an edited backdoor must diff as Changed, not as remove-plus-add.
+///
+/// The source here is the path *within the scan root*, not the path as
+/// reported. Hashing the reported path would mean the same host scanned live
+/// and then again as a mounted image produced two different ids for every
+/// entry, so the two could never be diffed against each other — which is the
+/// comparison an incident responder most wants to make.
 pub fn entry_id(kind: Kind, source: &Path, name: &str) -> String {
     let mut h = blake3::Hasher::new();
     for part in [kind.as_str().as_bytes(), source.as_os_str().as_bytes(), name.as_bytes()] {

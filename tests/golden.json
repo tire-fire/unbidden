@@ -1,0 +1,904 @@
+{
+  "entries": [
+    {
+      "command": null,
+      "enabled": "masked",
+      "flags": [
+        "degraded-enablement",
+        "unpackaged",
+        "non-standard-location"
+      ],
+      "id": "c0c57816223e2f0d44b31deab1aa2adabedb8549cc30054a0aa2d87f667a706a",
+      "kind": "systemd_unit",
+      "mode": 511,
+      "mtime": "<normalised>",
+      "name": "rsyslog.service",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "dangling_symlink": "true",
+        "scope": "system",
+        "search_path_rank": "0",
+        "symlink_target": "/dev/null",
+        "unit_type": "service"
+      },
+      "source": "<ROOT>/etc/systemd/system/rsyslog.service",
+      "source_utf8": true,
+      "target_path": null,
+      "target_sha256": null,
+      "trigger": "boot"
+    },
+    {
+      "command": null,
+      "enabled": "not-applicable",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "392265a32575fb234a506c4fa44e86360f2682640ab4ab3a9cd80ccf9ad9cbea",
+      "kind": "systemd_unit",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "ssh.service.d/override.conf",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "dropin_for": "ssh.service",
+        "exec.ExecStartPre": "/opt/pre.sh",
+        "scope": "system",
+        "search_path_rank": "0"
+      },
+      "source": "<ROOT>/etc/systemd/system/ssh.service.d/override.conf",
+      "source_utf8": true,
+      "target_path": null,
+      "target_sha256": "81ddf75e8fee1ab69469ccb82740749ff77a882d6bc4aa52f3ac78a0564094fe",
+      "trigger": "boot"
+    },
+    {
+      "command": "/opt/telemetry --quiet",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "degraded-enablement",
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "b0f8e004396441717f2e1f9266b3c1a16f1618bd4e4192ba6a8e106ac14f23c2",
+      "kind": "systemd_unit",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "telemetry.service",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "enabled_by": "<ROOT>/etc/systemd/system/multi-user.target.wants/telemetry.service",
+        "env.LD_PRELOAD": "/tmp/hook.so",
+        "exec.ExecStart": "/opt/telemetry --quiet",
+        "scope": "system",
+        "search_path_rank": "0",
+        "target_provenance": "unpackaged",
+        "unit_type": "service",
+        "user": "root",
+        "wanted_by": "multi-user.target"
+      },
+      "source": "<ROOT>/etc/systemd/system/telemetry.service",
+      "source_utf8": true,
+      "target_path": "<ROOT>/opt/telemetry",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "boot"
+    },
+    {
+      "command": "/usr/sbin/sshd -D",
+      "command_utf8": true,
+      "enabled": "disabled",
+      "flags": [
+        "degraded-enablement",
+        "unpackaged"
+      ],
+      "id": "e2444ea235d818967426239368142bc3d5aa66617598334fc2bd7f2e703318ea",
+      "kind": "systemd_unit",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "ssh.service",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "integrity": "intact",
+        "package": "openssh-server",
+        "verdict": "packaged",
+        "version": "1:9.2p1-2"
+      },
+      "raw": {
+        "exec.ExecStart": "/usr/sbin/sshd -D",
+        "scope": "system",
+        "search_path_rank": "2",
+        "target_provenance": "unpackaged",
+        "unit_type": "service",
+        "wanted_by": "multi-user.target"
+      },
+      "source": "<ROOT>/usr/lib/systemd/system/ssh.service",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/sbin/sshd",
+      "target_path_utf8": true,
+      "target_sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+      "trigger": "boot"
+    },
+    {
+      "command": null,
+      "enabled": "disabled",
+      "flags": [
+        "degraded-enablement",
+        "unpackaged"
+      ],
+      "id": "cd5d22228176fbe7b2096f57390142c2c7e9aff8a2369e30ee67067d95822c4e",
+      "kind": "systemd_timer",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "backup.timer",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "scope": "system",
+        "search_path_rank": "2",
+        "timer.OnCalendar": "daily",
+        "timer.Persistent": "true",
+        "unit_type": "timer",
+        "wanted_by": "timers.target"
+      },
+      "source": "<ROOT>/usr/lib/systemd/system/backup.timer",
+      "source_utf8": true,
+      "target_path": null,
+      "target_sha256": "d053fddb53d3f44bacd888e1a0201e3c52168404295cf74fb2b522e96f719f0e",
+      "trigger": "schedule"
+    },
+    {
+      "command": "/usr/local/bin/agent --daemon",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "c5191ce3ff436ee3e673abd33a58e035d00e6d7957266ff86702ba02318b3b0e",
+      "kind": "cron",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "2b47a4b0193990106e12134e",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "env.LD_PRELOAD": "/tmp/hook.so",
+        "schedule": "@reboot",
+        "target_provenance": "unpackaged"
+      },
+      "source": "<ROOT>/etc/cron.d/agent",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/local/bin/agent",
+      "target_path_utf8": true,
+      "target_sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+      "trigger": "boot"
+    },
+    {
+      "command": null,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "8813dafbf1bdd2b25d05fe382ac851e8e9886ff0577dc0f0955e576183ca31ac",
+      "kind": "cron",
+      "mode": 493,
+      "mtime": "<normalised>",
+      "name": "logrotate",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "schedule": "@daily"
+      },
+      "source": "<ROOT>/etc/cron.daily/logrotate",
+      "source_utf8": true,
+      "target_path": "<ROOT>/etc/cron.daily/logrotate",
+      "target_path_utf8": true,
+      "target_sha256": "37f2e97ff968138ad9bc00e574ce4a1dd7c54e289f3b6b141f4d9b187f0db164",
+      "trigger": "schedule"
+    },
+    {
+      "command": "cd / && run-parts --report /etc/cron.hourly",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-unresolvable"
+      ],
+      "id": "e1196888a8c6bea193f935aeb5cf4dc52d0801c12699d97ecf5b2f7d3a3090b9",
+      "kind": "cron",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "9a4909f686e030c7b984c7bf",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "env.MAILTO": "root",
+        "env.SHELL": "/bin/sh",
+        "schedule": "17 * * * *"
+      },
+      "source": "<ROOT>/etc/crontab",
+      "source_utf8": true,
+      "target_path": null,
+      "target_sha256": "86ef26c7e2e140755aa1f87b7afa91f90ac9fecb7d42781c16d50f45c64358c7",
+      "trigger": "schedule"
+    },
+    {
+      "command": "/usr/bin/nm-applet --indicator",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "5b7b87fb9c7a4e3814d1d6a2a1615d4ae6318e7fe63ae2f37c795daa79ef25d4",
+      "kind": "xdg_autostart",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "nm-applet.desktop",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "desktop_name": "Network",
+        "desktop_type": "Application",
+        "exec_argv": "[\"/usr/bin/nm-applet\",\"--indicator\"]",
+        "target_provenance": "unpackaged"
+      },
+      "source": "<ROOT>/etc/xdg/autostart/nm-applet.desktop",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/bin/nm-applet",
+      "target_path_utf8": true,
+      "target_sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
+      "trigger": "login"
+    },
+    {
+      "command": "/home/alice/.local/bin/upd",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "02e8bdb2ddd1eb5ada07cab3f05055fb4a74afdb8cbb0c6e5e07bea66dc49a9f",
+      "kind": "xdg_autostart",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "updater.desktop",
+      "owner_uid": "<normalised>",
+      "principal": "alice",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "desktop_name": "Updater",
+        "desktop_type": "Application",
+        "exec_argv": "[\"/home/alice/.local/bin/upd\"]",
+        "target_provenance": "unpackaged",
+        "x_gnome_autostart_enabled": "true"
+      },
+      "source": "<ROOT>/home/alice/.config/autostart/updater.desktop",
+      "source_utf8": true,
+      "target_path": "<ROOT>/home/alice/.local/bin/upd",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "login"
+    },
+    {
+      "command": null,
+      "enabled": "not-applicable",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "2d268298f2b55276787c0e134b5a339b96b929ac914fbb62a60537ad39478656",
+      "kind": "shell_profile",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "profile",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "env.PATH": "/usr/local/bin:$PATH",
+        "sourced": "/etc/profile.d/lang.sh",
+        "sourced_count": "1"
+      },
+      "source": "<ROOT>/etc/profile",
+      "source_utf8": true,
+      "target_path": "<ROOT>/etc/profile",
+      "target_path_utf8": true,
+      "target_sha256": "e2900a9e7bc54ea6d443170dac3ff6e6b5544b6cc7ac58ce81e4ce26d28845b0",
+      "trigger": "login"
+    },
+    {
+      "command": null,
+      "enabled": "not-applicable",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "19fd376a641e533bb3ff7f2af7794394125e8c4b75b22fc205049c481bfda1d6",
+      "kind": "shell_profile",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "lang.sh",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "env.LANG": "C.UTF-8"
+      },
+      "source": "<ROOT>/etc/profile.d/lang.sh",
+      "source_utf8": true,
+      "target_path": "<ROOT>/etc/profile.d/lang.sh",
+      "target_path_utf8": true,
+      "target_sha256": "0cb4e6ab50d742505ae4ac4ecb0a1bde412ceae0ef020028cc0dade85199aea4",
+      "trigger": "login"
+    },
+    {
+      "command": null,
+      "enabled": "not-applicable",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "a407d49e8194fd3dc603771af1f02980c11660449a8c519c2359394da3395c1f",
+      "kind": "shell_profile",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": ".bashrc",
+      "owner_uid": "<normalised>",
+      "principal": "alice",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "env.LD_PRELOAD": "/home/alice/.cache/x.so",
+        "login_shell": "/bin/zsh"
+      },
+      "source": "<ROOT>/home/alice/.bashrc",
+      "source_utf8": true,
+      "target_path": "<ROOT>/home/alice/.bashrc",
+      "target_path_utf8": true,
+      "target_sha256": "c6e60d11e59e095e48b73811849322aadf992ac4fc4f7883f4fecbff3f080fc1",
+      "trigger": "login"
+    },
+    {
+      "command": "/usr/local/sbin/notify",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "b4acb5c7e6b71672f2beaf1d102a2cc7797dc8cf248f2bbaf5416485557ef8af",
+      "kind": "pam",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "sshd:session:pam_exec.so:/usr/local/sbin/notify",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "control": "optional",
+        "module": "pam_exec.so",
+        "module_args": "seteuid /usr/local/sbin/notify",
+        "module_type": "session",
+        "pam_exec.seteuid": "true",
+        "service": "sshd",
+        "target_provenance": "unpackaged"
+      },
+      "source": "<ROOT>/etc/pam.d/sshd",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/local/sbin/notify",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "auth"
+    },
+    {
+      "command": "/usr/local/bin/on-usb.sh",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "646ad5c39af3df78c3cbddf0e11815e7f86cd5ded46923f4d21e39655cca25e7",
+      "kind": "udev",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "RUN:293438526a4d",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "key": "RUN",
+        "match.ACTION": "add",
+        "match.SUBSYSTEM": "usb",
+        "op": "+=",
+        "rank": "0",
+        "target_provenance": "unpackaged"
+      },
+      "source": "<ROOT>/etc/udev/rules.d/99-custom.rules",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/local/bin/on-usb.sh",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "device-event"
+    },
+    {
+      "command": null,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "4a26ed564fb2b3a8cbc5667f455680f449f6fba970d129a134b7ef4ecd9f4d13",
+      "kind": "rc_local",
+      "mode": 493,
+      "mtime": "<normalised>",
+      "name": "rc.local",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "executable": "true",
+        "head_scan": "first 200 lines",
+        "interpreter": "/bin/sh",
+        "shebang": "/bin/sh"
+      },
+      "source": "<ROOT>/etc/rc.local",
+      "source_utf8": true,
+      "target_path": "<ROOT>/etc/rc.local",
+      "target_path_utf8": true,
+      "target_sha256": "fa38914a4be4c628553682f236c9ad750cc13eee016e78afdaa9d18b736a0908",
+      "trigger": "boot"
+    },
+    {
+      "command": null,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "e650d94785ef89d40980ea99c87e4c9b850369423f15d89438059099eeb41a9c",
+      "kind": "sysv_init",
+      "mode": 493,
+      "mtime": "<normalised>",
+      "name": "legacy",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "head_scan": "first 200 lines",
+        "interpreter": "/bin/sh",
+        "lsb.Default-Start": "2 3 4 5",
+        "lsb.Provides": "legacy",
+        "shebang": "/bin/sh",
+        "start_priority": "20",
+        "start_runlevels": "2"
+      },
+      "source": "<ROOT>/etc/init.d/legacy",
+      "source_utf8": true,
+      "target_path": "<ROOT>/etc/init.d/legacy",
+      "target_path_utf8": true,
+      "target_sha256": "9653c4ca8fb7a56eeab400f9d5ee6d6029991fffa1fac15f66cb788b182e7624",
+      "trigger": "boot"
+    },
+    {
+      "command": "/usr/local/bin/shell-wrap",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "conffile-modified",
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "9e3555b359a8bf33a6e8974c473f46f0a73625dfb05b91464e21802291797758",
+      "kind": "ssh_authorized_key",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "ForceCommand",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "integrity": "conffile-modified",
+        "package": "openssh-server",
+        "verdict": "packaged",
+        "version": "1:9.2p1-2"
+      },
+      "raw": {
+        "directive": "ForceCommand",
+        "match": "(global)",
+        "ssh_mechanism": "sshd_config",
+        "target_provenance": "unpackaged"
+      },
+      "source": "<ROOT>/etc/ssh/sshd_config",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/local/bin/shell-wrap",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "login"
+    },
+    {
+      "command": "/usr/local/bin/wrap, --strict",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "922fb705b1bacab893ac34da76cea026406fb1855eb6356e481ebfd07365f5d1",
+      "kind": "ssh_authorized_key",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "SHA256:SO9rqwQU1l2xqVFxuGrhDfkJ0Zkfu30msE77NwgaXFI",
+      "owner_uid": "<normalised>",
+      "principal": "alice",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "comment": "alice@host",
+        "key_type": "ssh-ed25519",
+        "opt.no-pty": "true",
+        "options": "command=\"/usr/local/bin/wrap, --strict\",no-pty",
+        "ssh_mechanism": "authorized-key",
+        "target_provenance": "unpackaged"
+      },
+      "source": "<ROOT>/home/alice/.ssh/authorized_keys",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/local/bin/wrap,",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "login"
+    },
+    {
+      "command": "/usr/bin/systemctl",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "1d1bdc79f5c0aa973b4f79aac5c750555e8d69c8ac5d2f505ecdf338e5a35c5f",
+      "kind": "sudoers",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "alice:d80220c349fe",
+      "owner_uid": "<normalised>",
+      "principal": "ALL",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "analysis": "line-level",
+        "commands": "/usr/bin/systemctl",
+        "host_list": "ALL",
+        "line": "alice ALL=(ALL) NOPASSWD: /usr/bin/systemctl",
+        "nopasswd": "true",
+        "runas_explicit": "true",
+        "tags": "NOPASSWD",
+        "target_provenance": "unpackaged",
+        "user_list": "alice"
+      },
+      "source": "<ROOT>/etc/sudoers",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/bin/systemctl",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "always"
+    },
+    {
+      "command": "ALL",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-unresolvable"
+      ],
+      "id": "6e3e547120e55e238b1812b9e92ef6c69ab59274f2f2728d9259966547a38fdf",
+      "kind": "sudoers",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "root:c1d8b4383433",
+      "owner_uid": "<normalised>",
+      "principal": "ALL:ALL",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "analysis": "line-level",
+        "commands": "ALL",
+        "host_list": "ALL",
+        "line": "root ALL=(ALL:ALL) ALL",
+        "runas_explicit": "true",
+        "user_list": "root"
+      },
+      "source": "<ROOT>/etc/sudoers",
+      "source_utf8": true,
+      "target_path": null,
+      "target_sha256": "1733f7251ffe25cc954b3f315112c74cad899ace08b3ab7326b6aa2f4fa2832c",
+      "trigger": "always"
+    },
+    {
+      "command": "LD_PRELOAD=/tmp/hook.so",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "9d3b649ef9e57766c443a3f132d42e71b089f836b7c1d7b9118570ddd12a69e8",
+      "kind": "ld_preload",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "/tmp/hook.so",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unknown"
+      },
+      "raw": {
+        "declared_by_entry": "c5191ce3ff436ee3e673abd33a58e035d00e6d7957266ff86702ba02318b3b0e",
+        "declared_in": "<ROOT>/etc/cron.d/agent",
+        "target_provenance": "unpackaged",
+        "variable": "LD_PRELOAD"
+      },
+      "source": "<ROOT>/etc/cron.d/agent",
+      "source_utf8": true,
+      "target_path": "<ROOT>/tmp/hook.so",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "boot"
+    },
+    {
+      "command": "/usr/lib/libsnoop.so",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "781cee4c8126b1767430082afd0c4a6091f034af1b3e6cc1d280670d73ac9c07",
+      "kind": "ld_preload",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "/usr/lib/libsnoop.so",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unknown"
+      },
+      "raw": {
+        "target_provenance": "unpackaged"
+      },
+      "source": "<ROOT>/etc/ld.so.preload",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/lib/libsnoop.so",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "always"
+    },
+    {
+      "command": "LD_PRELOAD=/tmp/hook.so",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "3436742b5314fd8d5c3cfd89417b016c32ccdfbef49a5982c601c89e45d004f8",
+      "kind": "ld_preload",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "/tmp/hook.so",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unknown"
+      },
+      "raw": {
+        "declared_by_entry": "b0f8e004396441717f2e1f9266b3c1a16f1618bd4e4192ba6a8e106ac14f23c2",
+        "declared_in": "<ROOT>/etc/systemd/system/telemetry.service",
+        "target_provenance": "unpackaged",
+        "variable": "LD_PRELOAD"
+      },
+      "source": "<ROOT>/etc/systemd/system/telemetry.service",
+      "source_utf8": true,
+      "target_path": "<ROOT>/tmp/hook.so",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "boot"
+    },
+    {
+      "command": "LD_PRELOAD=/home/alice/.cache/x.so",
+      "command_utf8": true,
+      "enabled": "not-applicable",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "43490c5eed79d5e3521db8be14596a04ba04be098fb2c9edf9a5446f9c86ac6c",
+      "kind": "ld_preload",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "/home/alice/.cache/x.so",
+      "owner_uid": "<normalised>",
+      "principal": "alice",
+      "provenance": {
+        "verdict": "unknown"
+      },
+      "raw": {
+        "declared_by_entry": "a407d49e8194fd3dc603771af1f02980c11660449a8c519c2359394da3395c1f",
+        "declared_in": "<ROOT>/home/alice/.bashrc",
+        "target_provenance": "unpackaged",
+        "variable": "LD_PRELOAD"
+      },
+      "source": "<ROOT>/home/alice/.bashrc",
+      "source_utf8": true,
+      "target_path": "<ROOT>/home/alice/.cache/x.so",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "login"
+    },
+    {
+      "command": "/bin/sh -c '/tmp/stage.sh; /sbin/modprobe --ignore-install nf_tables'",
+      "command_utf8": true,
+      "enabled": "unknown",
+      "flags": [
+        "degraded-enablement",
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "e8a378fd85ee3301ebdf6a62eed8fe5f338b42edf1fb23dedf69e42b0266ddfa",
+      "kind": "kernel_module",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "install:nf_tables",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "directive": "install",
+        "loaded_state": "unknown: /proc/modules was not readable",
+        "module": "nf_tables",
+        "target_provenance": "unpackaged"
+      },
+      "source": "<ROOT>/etc/modprobe.d/evil.conf",
+      "source_utf8": true,
+      "target_path": "<ROOT>/bin/sh",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "boot"
+    },
+    {
+      "command": null,
+      "enabled": "unknown",
+      "flags": [
+        "degraded-enablement",
+        "unpackaged"
+      ],
+      "id": "8ff7bbf2160d4f2f49e1800f978a9a170c6615eff32d8c2aba523cd5856640b3",
+      "kind": "kernel_module",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "vboxdrv",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "directive": "load",
+        "loaded_state": "unknown: /proc/modules was not readable",
+        "module": "vboxdrv"
+      },
+      "source": "<ROOT>/etc/modules-load.d/extra.conf",
+      "source_utf8": true,
+      "target_path": null,
+      "target_sha256": "835c761f6976b7555b8b674933bc871e4d8b6a98dcec69637b8e30f5f81603df",
+      "trigger": "boot"
+    }
+  ],
+  "header": {
+    "collectors": [
+      {
+        "entries": 5,
+        "name": "auth",
+        "status": "complete"
+      },
+      {
+        "entries": 3,
+        "name": "cron",
+        "status": "complete"
+      },
+      {
+        "entries": 0,
+        "name": "deep",
+        "reason": "needs --deep",
+        "status": "skipped"
+      },
+      {
+        "entries": 2,
+        "name": "desktop",
+        "status": "complete"
+      },
+      {
+        "entries": 2,
+        "name": "initscripts",
+        "status": "complete"
+      },
+      {
+        "entries": 3,
+        "name": "kernel",
+        "status": "partial",
+        "unreadable": [
+          "proc/modules: live-only interface, unavailable on an offline root; loaded-module state is unknown for every module below"
+        ]
+      },
+      {
+        "entries": 0,
+        "name": "pkg",
+        "status": "complete"
+      },
+      {
+        "entries": 4,
+        "name": "shell",
+        "status": "complete"
+      },
+      {
+        "entries": 5,
+        "name": "systemd",
+        "status": "complete"
+      }
+    ],
+    "deep": false,
+    "distro_id": "debian",
+    "distro_version": "12",
+    "enablement": "inferred",
+    "hostname": "golden",
+    "kernel": "<normalised>",
+    "live": false,
+    "privileged": "<normalised>",
+    "root": "<ROOT>/",
+    "scan_time": "<normalised>",
+    "schema_version": 1,
+    "unbidden_version": "<normalised>"
+  }
+}

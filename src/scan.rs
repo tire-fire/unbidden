@@ -113,6 +113,8 @@ impl<'a> Ctx<'a> {
         let rel = rel.as_ref();
         let abs = self.root.abs(rel);
         let mut e = Entry::new(kind, &abs, name);
+        // Reported path for the operator, root-relative path for identity.
+        e.rekey(rel);
 
         if let Ok(link) = self.root.stat(rel) {
             // The link's own timestamp is the interesting one: for an

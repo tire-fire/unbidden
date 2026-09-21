@@ -62,6 +62,11 @@ impl Collector for Deep {
 
 struct Walk {
     root_dev: u64,
+    /// Filesystem identity of the scan root, where the device number alone
+    /// is not enough to decide what counts as the same storage.
+    root_fsid: Option<u64>,
+    /// Device numbers proven to belong to the root's own filesystem.
+    same_storage: HashSet<u64>,
     seen_dirs: HashSet<(u64, u64)>,
     repos: HashSet<(u64, u64)>,
     visited: usize,
@@ -74,6 +79,8 @@ impl Walk {
     fn new(root: (u64, u64)) -> Walk {
         Walk {
             root_dev: root.0,
+            root_fsid: None,
+            same_storage: HashSet::new(),
             seen_dirs: HashSet::from([root]),
             repos: HashSet::new(),
             visited: 0,
@@ -97,7 +104,27 @@ impl Walk {
     /// test is what makes a hardlinked directory or a bind-mount loop
     /// terminate the branch instead of the scan.
     fn may_descend(&mut self, id: (u64, u64)) -> bool {
-        id.0 == self.root_dev && self.seen_dirs.insert(id)
+        (id.0 == self.root_dev || self.same_storage.contains(&id.0)) && self.seen_dirs.insert(id)
+    }
+
+    /// Btrfs gives every subvolume its own st_dev, so a plain device
+    /// comparison stops at /home on a default Fedora, openSUSE or Arch
+    /// install — and every git repository on the machine is under /home.
+    /// A subvolume of the same btrfs filesystem is the same storage, and
+    /// crossing into it is not the network mount the device rule exists to
+    /// avoid.
+    fn same_filesystem(&mut self, cx: &mut Ctx, rel: &Path, dev: u64) -> bool {
+        if dev == self.root_dev || self.same_storage.contains(&dev) {
+            return true;
+        }
+        if self.root_fsid.is_none() {
+            return false;
+        }
+        if self.root_fsid == cx.root.filesystem_id(rel) {
+            self.same_storage.insert(dev);
+            return true;
+        }
+        false
     }
 }
 
@@ -111,6 +138,7 @@ fn walk(cx: &mut Ctx) -> Vec<Entry> {
     };
 
     let mut w = Walk::new(root_id);
+    w.root_fsid = cx.root.filesystem_id("");
     let mut out = Vec::new();
     let mut stack = vec![PathBuf::new()];
 
@@ -153,7 +181,7 @@ fn walk(cx: &mut Ctx) -> Vec<Entry> {
                         continue;
                     }
                 };
-                if !w.may_descend(id) {
+                if !w.same_filesystem(cx, &path, id.0) || !w.may_descend(id) {
                     continue;
                 }
                 if ent.name == ".git" {
@@ -441,11 +469,6 @@ fn shebang(cx: &Ctx, rel: &Path) -> Option<String> {
 
 fn config(cx: &mut Ctx, gitdir: &Path, repo: &str, gitdir_abs: &str) -> Vec<Entry> {
     let rel = gitdir.join("config");
-    // A config that is a fifo would block the collector forever on open, and
-    // Root has no non-blocking read.
-    if !cx.root.stat(&rel).map(|m| m.is_file).unwrap_or(false) {
-        return Vec::new();
-    }
     let Some(bytes) = cx.read(&rel) else { return Vec::new() };
 
     let mut used: BTreeMap<String, usize> = BTreeMap::new();

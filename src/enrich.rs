@@ -334,6 +334,7 @@ fn preload_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
                     continue;
                 }
                 let mut e = Entry::new(Kind::LdPreload, &carrier.source, library);
+                e.rekey(&root.rel(&carrier.source));
                 e.command = Some(format!("{variable}={library}").into_bytes());
                 e.target_path = Some(root.abs(root.rel(Path::new(library))));
                 e.trigger = carrier.trigger;

@@ -29,13 +29,34 @@ pub struct Manager {
 }
 
 impl Manager {
-    /// Asks the system manager. Returns None where there is nothing to ask:
-    /// an offline root, a container without systemd, or a socket we may not
-    /// open — all of which leave the inferred answer in place.
+    /// Asks the system manager, with a deadline. Returns None where there is
+    /// nothing to ask — an offline root, a container without systemd, a
+    /// socket we may not open, or a bus that does not answer — all of which
+    /// leave the inferred answer and its DegradedEnablement flag in place.
+    ///
+    /// The deadline is not a nicety. Enrichment runs after every collector
+    /// has finished, so a bus that accepts a connection and then never
+    /// replies would hang a completed scan just before it printed anything.
     pub fn query(root: &Root) -> Option<Manager> {
         if !root.is_live() {
             return None;
         }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(query_blocking());
+        });
+        // The thread is left to its fate if it overruns: this is a one-shot
+        // scan, and a stuck D-Bus connection must not outlive its usefulness.
+        rx.recv_timeout(QUERY_DEADLINE).ok().flatten()
+    }
+}
+
+/// Long enough for a loaded machine with thousands of units, short enough
+/// that an operator does not think the tool has died.
+const QUERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+
+impl Manager {
+    fn query_inner() -> Option<Manager> {
         let conn = connect()?;
 
         let mut by_path = BTreeMap::new();
@@ -72,14 +93,21 @@ impl Manager {
     }
 }
 
-/// systemd's private socket answers without a bus and without policy, which
-/// matters on a host where the broker itself may have been tampered with.
-/// It is root-only, so the system bus is the fallback.
+fn query_blocking() -> Option<Manager> {
+    Manager::query_inner()
+}
+
+/// The system bus, and only the system bus.
+///
+/// systemd's private socket at /run/systemd/private would be the better
+/// answer — it needs no broker and is subject to no policy — but zbus cannot
+/// speak to it: systemd's replies there carry no valid unique name, and
+/// zbus panics reconstructing the message fields. That panic happens on its
+/// own executor thread, where catching it is not possible, and the blocking
+/// call it was serving then waits forever. A scanner that hangs on a
+/// compromised host is worse than one that answers "inferred".
 fn connect() -> Option<zbus::blocking::Connection> {
-    let private = zbus::blocking::connection::Builder::address("unix:path=/run/systemd/private")
-        .ok()
-        .and_then(|b| b.p2p().build().ok());
-    private.or_else(|| zbus::blocking::Connection::system().ok())
+    zbus::blocking::Connection::system().ok()
 }
 
 fn call(conn: &zbus::blocking::Connection, method: &str) -> zbus::Result<zbus::Message> {
