@@ -62,24 +62,50 @@ mechanism_kind() {
 
 scan() { "$BIN" --deep --json --all "$@"; }
 
+# What each module needs to plant. These genuinely differ — some take a
+# callback address, some a target binary, some a sub-mechanism — and guessing
+# a single shape silently turns "unbidden was never tested against this" into
+# a skip that reads like an environment limitation.
+DIAL="--ip $DEAD_IP --port $DEAD_PORT"
+case "$(. /etc/os-release && echo "$ID")" in
+    debian|ubuntu|linuxmint) PKG_FLAG=--dpkg ;;
+    *)                       PKG_FLAG=--rpm ;;
+esac
+[ -f /tmp/panix-key.pub ] || ssh-keygen -q -t ed25519 -N '' -f /tmp/panix-key >/dev/null 2>&1
+
+plant_args() {
+    case "$1" in
+        at)                echo "--default $DIAL --time 'now + 1 minute'" ;;
+        authorized-keys)   echo "--default --key '$(cat /tmp/panix-key.pub)'" ;;
+        cap-backdoor)      echo "--default" ;;
+        generator)         echo "$DIAL" ;;
+        git)               echo "--default $DIAL --hook" ;;
+        ld-preload)        echo "$DIAL --binary ls" ;;
+        malicious-package) echo "$DIAL $PKG_FLAG" ;;
+        pam)               echo "--pam-exec --backdoor $DIAL" ;;
+        sudoers-backdoor)  echo "--username root" ;;
+        suid-backdoor)     echo "--default" ;;
+        udev)              echo "--default $DIAL --systemd" ;;
+        *)                 echo "--default $DIAL" ;;
+    esac
+}
+
 plant() {
-    # PANIX modules differ in whether they take a target. Try the richest
-    # form first and fall back, rather than hand-curating 38 invocations.
-    for args in "--default --ip $DEAD_IP --port $DEAD_PORT" "--default" ""; do
-        # shellcheck disable=SC2086
-        if timeout 120 bash "$PANIX" --"$1" $args >/tmp/plant.log 2>&1; then
-            echo "$args"
-            return 0
-        fi
-    done
+    local args
+    args=$(plant_args "$1")
+    # shellcheck disable=SC2086
+    if timeout 180 bash -c "bash '$PANIX' --$1 $args" >/tmp/plant.log 2>&1; then
+        echo "$args"
+        return 0
+    fi
     return 1
 }
 
 modules=("$@")
 if [ ${#modules[@]} -eq 0 ]; then
-    modules=(at authorized-keys cron dbus generator git initd ld-preload malicious-package \
-             motd network-manager pam rc-local shell-profile ssh-key sudoers-backdoor \
-             suid-backdoor cap-backdoor systemd udev xdg)
+    modules=(at authorized-keys cap-backdoor cron dbus generator git initd ld-preload \
+             malicious-package motd network-manager pam rc-local shell-profile ssh-key \
+             sudoers-backdoor suid-backdoor systemd udev xdg)
 fi
 
 rebaseline() {
@@ -100,7 +126,7 @@ for m in "${modules[@]}"; do
 
     printf -- '-- %s (expect %s)\n' "$m" "$want"
     if ! used=$(plant "$m"); then
-        echo "   SKIP: PANIX could not plant it here"
+        echo "   SKIP: PANIX could not plant it ($(plant_args "$m"))"
         tail -3 /tmp/plant.log | sed 's/^/     /'
         skip=$((skip + 1))
         continue

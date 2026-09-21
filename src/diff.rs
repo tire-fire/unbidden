@@ -137,7 +137,19 @@ pub fn diff(baseline: &Scan, current: &Scan) -> Result<Vec<Diffed>, String> {
             None => out.push(Diffed { entry, delta: Delta::Added }),
             Some(before) => {
                 let fields = changed_fields(&before, &entry);
-                let delta = if fields.is_empty() { Delta::Unchanged } else { Delta::Changed { fields } };
+                // A timestamp that moved on its own is not a change. systemd
+                // rewrites every generated unit on each daemon-reload, so
+                // reporting mtime alone would fill a diff with rows whose
+                // contents are byte-identical — and a diff nobody trusts is
+                // a diff nobody reads. The field is still in the record and
+                // in `explain` for anyone who wants to cluster on it.
+                let substantive: Vec<&'static str> =
+                    fields.iter().copied().filter(|f| *f != "mtime").collect();
+                let delta = if substantive.is_empty() {
+                    Delta::Unchanged
+                } else {
+                    Delta::Changed { fields }
+                };
                 out.push(Diffed { entry, delta });
             }
         }
@@ -247,6 +259,28 @@ mod tests {
                 assert!(fields.contains(&"target_sha256"));
             }
             other => panic!("expected a change naming its fields, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_timestamp_that_moved_on_its_own_is_not_a_change() {
+        let before = scan_of(vec![unit("gen.service", b"/usr/bin/x")]);
+        let mut touched = unit("gen.service", b"/usr/bin/x");
+        touched.mtime = Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000));
+        let after = scan_of(vec![touched.clone()]);
+        assert_eq!(diff(&before, &after).unwrap()[0].delta, Delta::Unchanged);
+
+        // But an mtime that moved alongside real content still reports both,
+        // because the pair together is what an analyst wants to see.
+        let mut edited = touched;
+        edited.command = Some(b"/tmp/evil".to_vec());
+        let after = scan_of(vec![edited]);
+        match &diff(&before, &after).unwrap()[0].delta {
+            Delta::Changed { fields } => {
+                assert!(fields.contains(&"command"));
+                assert!(fields.contains(&"mtime"));
+            }
+            other => panic!("expected a change, got {other:?}"),
         }
     }
 
