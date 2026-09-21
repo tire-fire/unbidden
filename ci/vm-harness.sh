@@ -89,7 +89,17 @@ say() { printf '\n== %s\n' "$*"; }
 # Static musl, because that is what ships and what an operator copies onto a
 # host. A glibc build from this machine would not run on the guest anyway.
 BIN="$REPO/target/x86_64-unknown-linux-musl/release/unbidden"
-if [ ! -x "$BIN" ]; then
+# A binary older than the source it was built from is the quietest way to
+# test the wrong thing: the run passes, and it passes on yesterday's code.
+stale=0
+if [ -x "$BIN" ]; then
+    newer=$(find "$REPO/src" "$REPO/Cargo.toml" "$REPO/Cargo.lock" -newer "$BIN" -print -quit 2>/dev/null)
+    if [ -n "$newer" ]; then
+        echo "   the staged binary is older than $newer; rebuilding"
+        stale=1
+    fi
+fi
+if [ ! -x "$BIN" ] || [ "$stale" -eq 1 ]; then
     if rustup target list --installed 2>/dev/null | grep -q x86_64-unknown-linux-musl; then
         say "building the static binary"
         (cd "$REPO" && cargo build --release --locked --target x86_64-unknown-linux-musl)
