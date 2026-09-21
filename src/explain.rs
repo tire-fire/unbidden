@@ -113,6 +113,15 @@ fn verify_unchanged(w: &mut impl Write, root: &Root, entry: &Entry) -> io::Resul
 }
 
 fn write_source(w: &mut impl Write, root: &Root, entry: &Entry) -> io::Result<()> {
+    // Some entries were read out of a binary database, not a text file.
+    // Dumping twenty lines of mangled sqlite helps nobody, and the record
+    // itself is already above in `command`.
+    if let Some(from) = entry.raw.get("read_from") {
+        writeln!(w, "source is the {from} database at {}, not a text file", entry.source.display())?;
+        writeln!(w, "the record itself is the command shown above")?;
+        return Ok(());
+    }
+
     let rel = root.rel(&entry.source);
     let Ok((bytes, truncated)) = root.read_capped(&rel, WHOLE_FILE_LIMIT * 16) else {
         writeln!(w, "source text  (unreadable)")?;

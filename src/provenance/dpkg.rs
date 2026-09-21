@@ -31,10 +31,15 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
 
     // Every spelling of every wanted path, mapped back to the one the caller
     // asked about, so a /lib vs /usr/lib mismatch cannot lose an answer.
-    let mut alias_to_wanted: BTreeMap<PathBuf, PathBuf> = BTreeMap::new();
+    // One spelling can be the alias of several wanted paths: the moment a
+    // scan asks about both `bin/sh` and `usr/bin/sh` — which it does as soon
+    // as anything names /bin/sh — they alias to each other, and a map of one
+    // value silently dropped whichever was inserted first. The path that lost
+    // was then answered by nobody and reported Unpackaged.
+    let mut alias_to_wanted: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     for w in wanted {
         for alias in usr_aliases(w) {
-            alias_to_wanted.insert(alias, w.clone());
+            alias_to_wanted.entry(alias).or_default().push(w.clone());
         }
     }
 
@@ -48,8 +53,10 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
             if listed.is_empty() {
                 continue;
             }
-            if let Some(w) = alias_to_wanted.get(Path::new(&String::from_utf8_lossy(listed).into_owned())) {
-                owner.insert(w.clone(), pkg.to_string());
+            if let Some(ws) = alias_to_wanted.get(Path::new(&String::from_utf8_lossy(listed).into_owned())) {
+                for w in ws {
+                    owner.insert(w.clone(), pkg.to_string());
+                }
             }
         }
     }
@@ -361,6 +368,30 @@ mod tests {
                 assert_eq!(version, "2.1");
             }
             other => panic!("expected the arch-qualified package to resolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn both_spellings_of_one_merged_usr_path_are_answered() {
+        // A scan that asks about /bin/sh and /usr/bin/sh together must get an
+        // answer for both. They are aliases of each other, so a lookup table
+        // holding one owner per spelling loses one of them and reports a
+        // perfectly ordinary shell as unpackaged.
+        let f = Fixture::new("aliasboth");
+        let body = b"#!/bin/dash\n";
+        f.write("bin/sh", body);
+        f.write(STATUS, b"Package: dash\nArchitecture: amd64\nVersion: 0.5.12\n\n");
+        f.write(&format!("{INFO}/dash.list"), b"/bin/sh\n");
+        f.write(&format!("{INFO}/dash.md5sums"), format!("{}  bin/sh\n", md5_of(body)).as_bytes());
+
+        let root = f.root();
+        let answers = ask(&root, &["bin/sh", "usr/bin/sh"]);
+        for spelling in ["bin/sh", "usr/bin/sh"] {
+            assert!(
+                matches!(answers.get(Path::new(spelling)), Some(Provenance::Packaged { .. })),
+                "{spelling} went unanswered: {:?}",
+                answers.get(Path::new(spelling))
+            );
         }
     }
 

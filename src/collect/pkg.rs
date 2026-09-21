@@ -7,12 +7,12 @@
 //! host is daily — and a D-Bus service file lets any process that can reach
 //! the bus start a named program by asking for its name.
 //!
-//! What an operator must know about the rpm half is written on the entries
-//! themselves: `%transfiletrigger*` and the `%pre`/`%post` scriptlets live in
-//! the package header inside the rpmdb, not in any file under /etc or
-//! /usr/lib/rpm. Configuration shows which transaction *plugins* are wired up;
-//! it cannot show a scriptlet. That is a database question, and §7's
-//! provenance pass owns the database.
+//! The rpm half has two sources, because rpm keeps its hooks in two places.
+//! Configuration under /etc and /usr/lib/rpm wires up transaction *plugins*;
+//! the `%pre`/`%post` scriptlets and the `%filetrigger*`/`%transfiletrigger*`
+//! scripts live in the package headers inside the rpmdb, where no file names
+//! them. Both run as root on a package operation, so both are read — the
+//! second through the header parser §7's provenance backend already owns.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -479,6 +479,7 @@ fn plugin_code(cx: &Ctx, pythons: &[PathBuf], manager: &str, plugin: &str) -> Op
 /// transaction, wired up by a `%__transaction_<name>` macro. Defining the
 /// macro empty is how rpm turns one off.
 fn rpm(cx: &mut Ctx) -> Vec<Entry> {
+    let (mut out, caveat) = rpm_scriptlets(cx);
     let mut files: Vec<PathBuf> = Vec::new();
     for dir in distinct_dirs(cx, &["usr/lib/rpm", "lib/rpm"]) {
         files.push(Path::new(dir).join("macros"));
@@ -494,7 +495,6 @@ fn rpm(cx: &mut Ctx) -> Vec<Entry> {
         }
     }
 
-    let mut out = Vec::new();
     let mut referenced: BTreeSet<String> = BTreeSet::new();
     for rel in files {
         let Some(bytes) = cx.read(&rel) else { continue };
@@ -544,7 +544,7 @@ fn rpm(cx: &mut Ctx) -> Vec<Entry> {
                 e.note("value", lossy(body));
                 e.enabled = Enablement::NotApplicable;
             }
-            e.note("caveat", RPM_CAVEAT);
+            e.note("caveat", caveat);
             out.push(e);
         }
     }
@@ -574,19 +574,100 @@ fn rpm(cx: &mut Ctx) -> Vec<Entry> {
                 e.flag(Flag::DegradedEnablement);
                 e.note("wired_by", "no %__transaction_* macro read here names this object");
             }
-            e.note("caveat", RPM_CAVEAT);
+            e.note("caveat", caveat);
             out.push(e);
         }
     }
     out
 }
 
-/// Stated on every rpm entry rather than in a README, because the operator
-/// reading the JSON is the one who needs to know the limit of what they are
-/// looking at.
-const RPM_CAVEAT: &str = "configuration shows transaction plugins only; rpm's \
-     %pre/%post and %transfiletrigger* scriptlets live in the package header \
-     in the rpmdb and are not visible in any file";
+/// Stated on every rpm configuration entry rather than in a README, because
+/// the operator reading the JSON is the one who needs to know the limit of
+/// what they are looking at.
+const RPM_CAVEAT: &str = "configuration shows transaction plugins only; the \
+     scriptlets and file triggers rpm keeps in its package headers are read \
+     from the rpmdb and reported as their own entries";
+
+/// The same limit where no database was readable, in which case the scriptlet
+/// half of the answer is genuinely missing rather than elsewhere.
+const RPM_NO_DB: &str = "configuration shows transaction plugins only; no rpmdb \
+     could be read on this root, so the %pre/%post scriptlets and \
+     %filetrigger/%transfiletrigger scripts it holds are not reported";
+
+/// The scriptlets and triggers rpm keeps in its package headers. A `%post`
+/// runs as root on every transaction of its own package, a
+/// `%transfiletriggerin -- /usr/bin` runs as root whenever *anything* is
+/// installed into /usr/bin, and no file under /etc or /usr/lib/rpm names
+/// either of them.
+///
+/// Every one found is emitted. Which of them is interesting is a judgement
+/// this tool does not make (§8), and the volume is bounded by how few
+/// packages carry a scriptlet at all — roughly one entry per three installed
+/// packages: 47 on a stock Fedora 44 container of 147 packages, 141 on one of
+/// 475 with the development tools.
+fn rpm_scriptlets(cx: &mut Ctx) -> (Vec<Entry>, &'static str) {
+    let Some((db, scriptlets)) = crate::provenance::rpm::scriptlets(cx.root) else {
+        return (Vec::new(), RPM_NO_DB);
+    };
+
+    let mut used: BTreeMap<String, usize> = BTreeMap::new();
+    let mut out = Vec::new();
+    for s in scriptlets {
+        let pkg = match s.arch.is_empty() {
+            true => s.package.clone(),
+            false => format!("{}.{}", s.package, s.arch),
+        };
+        // Position in the header identifies nothing: a package holds several
+        // triggers of one type, and one added above the others must not
+        // re-identify them. What identifies a trigger is what fires it, so
+        // that is what the name is built from — never the body, which must be
+        // free to change without the entry becoming a different entry.
+        let name = match s.fires_on.is_empty() {
+            true => format!("{pkg}:{}", s.kind),
+            false => {
+                let fires = format!("{}\n{:?}", s.fires_on.join("\n"), s.priority);
+                format!("{pkg}:{}:{}", s.kind, short_hash(fires.as_bytes()))
+            }
+        };
+
+        let mut e = cx.entry(Kind::PkgHook, db, uniq(&mut used, name));
+        e.trigger = Trigger::PackageOp;
+        e.principal = Some("root".to_string());
+        e.enabled = Enablement::Enabled;
+        e.note("manager", "rpm");
+        e.note("package", s.package.clone());
+        e.note("version", s.version.clone());
+        e.note("scriptlet", s.kind.clone());
+        if !s.prog.is_empty() {
+            e.note("interpreter", s.prog.clone());
+        }
+        // The source is a database file, and an operator who sees one has to
+        // know the entry is a field inside it rather than the file itself.
+        e.note("read_from", "rpm package header");
+        if !s.fires_on.is_empty() {
+            e.note("fires_on", s.fires_on.join(", "));
+        }
+        if let Some(p) = s.priority {
+            e.note("priority", p.to_string());
+        }
+        if s.truncated {
+            e.note("body_truncated", "the scriptlet is longer than the read cap");
+        }
+        set_command(&mut e, &s.body);
+        // A scriptlet is a program, not a command line: the first absolute
+        // path in the body is as likely to be an argument or a comment as the
+        // thing that runs. What rpm execs is the interpreter.
+        e.target_path = first_absolute(s.prog.as_bytes());
+        // `<lua>` names no file: rpm runs the body in an interpreter built
+        // into itself. Saying so is what keeps every lua scriptlet on the
+        // host from being reported as a command whose program went missing.
+        if s.prog == "<lua>" || s.prog.is_empty() {
+            e.note("target_unverifiable", "rpm runs this itself; no program is named");
+        }
+        out.push(e);
+    }
+    (out, RPM_CAVEAT)
+}
 
 /// Does this macro body name something rpm could dlopen? The extension is the
 /// only signal available before the transaction runs: rpm finds its plugins by
@@ -1372,6 +1453,158 @@ mod tests {
         let orphan = one(&s, |e| e.name == "plugin:orphan.so");
         assert_eq!(orphan.enabled, Enablement::Unknown);
         assert!(orphan.has_flag(Flag::DegradedEnablement));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Headers as rpm writes them: the body tags are plain strings, and so is
+    /// a one-word interpreter, whatever rpm's tag table says.
+    fn scriptlet_db(dir: &Path, rel: &str) {
+        use crate::provenance::rpm::tests::{HeaderBuilder, write_rpmdb};
+
+        let mut systemd = HeaderBuilder::default();
+        systemd
+            .string(1000, "systemd")
+            .string(1001, "259.9")
+            .string(1002, "1.fc44")
+            .string(1022, "x86_64")
+            .bytes(1024, b"systemctl daemon-reload || :\n") // POSTIN
+            .string(1086, "/bin/sh") // POSTINPROG
+            .string_array(5076, &["units in", "user reload", "units postun", "services postun"])
+            .string_array(5077, &["/bin/sh", "/bin/sh", "/bin/sh", "/bin/sh"])
+            .string_array(
+                5079,
+                &[
+                    "/etc/systemd/system/",
+                    "/usr/lib/systemd/system/",
+                    "/usr/lib/systemd/user/",
+                    // The trap: two postun triggers on the same two paths,
+                    // told apart only by what they do and when they run.
+                    "/etc/systemd/system/",
+                    "/usr/lib/systemd/system/",
+                    "/etc/systemd/system/",
+                    "/usr/lib/systemd/system/",
+                ],
+            )
+            .ints(5080, &[0, 0, 1, 2, 2, 3, 3])
+            .ints(5082, &[1 << 16, 1 << 16, 1 << 16, 1 << 18, 1 << 18, 1 << 18, 1 << 18])
+            .ints(5085, &[900900, 1000099, 900899, 1000100]);
+
+        let mut evil = HeaderBuilder::default();
+        evil.string(1000, "evil")
+            .string(1001, "1")
+            .string(1002, "1")
+            .string(1022, "noarch")
+            .bytes(1023, b"/tmp/\xff\xfe --install") // PREIN
+            .string(1085, "<lua>"); // PREINPROG
+
+        write_rpmdb(&dir.join(rel), &[systemd.build(), evil.build()]);
+    }
+
+    #[test]
+    fn rpm_scriptlets_and_file_triggers_are_read_out_of_the_database() {
+        let dir = tree("scriptlets");
+        scriptlet_db(&dir, "var/lib/rpm/rpmdb.sqlite");
+        put(&dir, "usr/lib/rpm/macros", b"%__transaction_selinux %{__plugindir}/selinux.so\n");
+
+        let s = scan(&dir);
+        if let Status::Failed { error } = status(&s) {
+            panic!("the collector died on a database: {error}");
+        }
+
+        let post = one(&s, |e| e.name == "systemd.x86_64:%post");
+        assert_eq!(post.kind, Kind::PkgHook);
+        assert_eq!(post.trigger, Trigger::PackageOp);
+        assert_eq!(post.principal.as_deref(), Some("root"));
+        assert_eq!(post.enabled, Enablement::Enabled);
+        assert_eq!(post.source, dir.join("var/lib/rpm/rpmdb.sqlite"));
+        assert_eq!(post.command.as_deref(), Some(b"systemctl daemon-reload || :\n".as_slice()));
+        assert_eq!(post.raw.get("package").map(String::as_str), Some("systemd"));
+        assert_eq!(post.raw.get("version").map(String::as_str), Some("259.9-1.fc44.x86_64"));
+        assert_eq!(post.raw.get("interpreter").map(String::as_str), Some("/bin/sh"));
+        assert_eq!(
+            post.target_path,
+            Some(PathBuf::from("/bin/sh")),
+            "what rpm execs is the interpreter, not a path quoted inside the body"
+        );
+        assert!(post.raw.contains_key("read_from"), "the source is a database, not the script");
+
+        // The operator-relevant fact about a file trigger is which paths fire
+        // it: this one runs whenever anything installs a unit file.
+        let installed = one(&s, |e| {
+            e.raw.get("scriptlet").is_some_and(|k| k == "%transfiletriggerin")
+                && e.raw.get("fires_on").is_some_and(|p| p.starts_with("/etc/systemd/system/"))
+        });
+        assert_eq!(
+            installed.raw.get("fires_on").map(String::as_str),
+            Some("/etc/systemd/system/, /usr/lib/systemd/system/")
+        );
+        assert_eq!(installed.raw.get("priority").map(String::as_str), Some("900900"));
+        assert_eq!(installed.command.as_deref(), Some(b"units in".as_slice()));
+
+        // Two triggers of one type on one package, firing on the same paths.
+        // They must be two entries with two ids, or the diff drops one.
+        let twins: Vec<&Entry> = s
+            .entries
+            .iter()
+            .filter(|e| e.raw.get("scriptlet").is_some_and(|k| k == "%transfiletriggerpostun"))
+            .filter(|e| e.raw.get("fires_on").is_some_and(|p| p.contains("/etc/systemd/system/")))
+            .collect();
+        assert_eq!(twins.len(), 2);
+        assert_ne!(twins[0].id, twins[1].id);
+
+        let mut ids: Vec<&String> = s.entries.iter().map(|e| &e.id).collect();
+        ids.sort();
+        let total = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "two entries share an id");
+
+        // A lua scriptlet runs inside rpm itself, so it resolves to no file.
+        let lua = one(&s, |e| e.name == "evil.noarch:%pre");
+        assert_eq!(lua.raw.get("interpreter").map(String::as_str), Some("<lua>"));
+        assert_eq!(lua.target_path, None);
+        assert!(
+            lua.raw.contains_key("target_unverifiable"),
+            "a scriptlet rpm runs itself has no missing program"
+        );
+        assert!(lua.has_flag(Flag::EncodingAnomaly), "a body is bytes, not text");
+        assert_eq!(lua.command.as_deref(), Some(b"/tmp/\xff\xfe --install".as_slice()));
+        assert!(lua.raw.contains_key("command_hex"));
+
+        // And the caveat on the configuration entries no longer claims that
+        // what was just read cannot be seen.
+        let plugin = one(&s, |e| e.name == "__transaction_selinux");
+        let caveat = plugin.raw.get("caveat").map(String::as_str).unwrap_or_default();
+        assert!(caveat.contains("reported as their own entries"), "stale caveat: {caveat}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_host_with_no_rpmdb_says_so_rather_than_implying_there_are_none() {
+        let dir = tree("nodb");
+        put(&dir, "usr/lib/rpm/macros", b"%__transaction_selinux %{__plugindir}/selinux.so\n");
+        let s = scan(&dir);
+        let plugin = one(&s, |e| e.name == "__transaction_selinux");
+        assert!(
+            plugin.raw.get("caveat").is_some_and(|c| c.contains("no rpmdb")),
+            "an unread database must not read as an empty one"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_database_under_usr_is_read_where_var_is_only_a_symlink_to_it() {
+        // Fedora 36 moved the database under /usr and left /var/lib/rpm as a
+        // symlink. Naming the symlink as an entry's source would report a
+        // path no package owns, so every scriptlet on the host would read as
+        // unpackaged — the one flag the tool leads with.
+        let dir = tree("sysimage");
+        scriptlet_db(&dir, "usr/lib/sysimage/rpm/rpmdb.sqlite");
+        fs::create_dir_all(dir.join("var/lib")).unwrap();
+        std::os::unix::fs::symlink("../../usr/lib/sysimage/rpm", dir.join("var/lib/rpm")).unwrap();
+
+        let s = scan(&dir);
+        let post = one(&s, |e| e.name == "systemd.x86_64:%post");
+        assert_eq!(post.source, dir.join("usr/lib/sysimage/rpm/rpmdb.sqlite"));
         fs::remove_dir_all(&dir).unwrap();
     }
 

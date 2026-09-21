@@ -45,8 +45,28 @@ impl Filters {
 /// not a finding about the host — and on a machine without a running systemd
 /// it is set on every entry, which would suppress nothing at all.
 pub fn suppressed(e: &Entry) -> bool {
-    e.provenance.is_packaged_intact()
-        && e.flags.iter().all(|f| *f == Flag::DegradedEnablement)
+    let quiet = e.flags.iter().all(|f| *f == Flag::DegradedEnablement);
+    quiet && (e.provenance.is_packaged_intact() || from_package_database(e))
+}
+
+/// An entry read out of a package database rather than off the filesystem —
+/// an rpm scriptlet, a file trigger. Its integrity is reported Unknown
+/// because there is no file to hash: the record and the claim about it are
+/// the same artifact.
+///
+/// Those are suppressed when a package owns them, which needs justifying
+/// because §8 otherwise refuses to hide an unverified entry. The reasoning is
+/// that this adds no exposure: §7 already takes the package database at its
+/// word about who owns every file on the host, so an attacker who can edit it
+/// to forge a scriptlet can equally edit it to claim their own binary is
+/// shipped by glibc — which the existing rule would hide too. Refusing here
+/// would buy nothing and cost the default view several hundred rows of vendor
+/// scriptlets, which is the noise §8 exists to remove.
+///
+/// A scriptlet carrying any finding at all is still shown, so an encoded
+/// payload or an unresolvable target in one reaches the operator.
+fn from_package_database(e: &Entry) -> bool {
+    e.raw.contains_key("read_from") && matches!(e.provenance, crate::entry::Provenance::Packaged { .. })
 }
 
 /// Newline-delimited: the header on the first line, then one entry per line,
@@ -252,6 +272,28 @@ mod tests {
         assert!(!suppressed(&entry("ssh.service", packaged(Integrity::Unknown), &[])));
         assert!(!suppressed(&entry("evil.service", Provenance::Unpackaged, &[Flag::Unpackaged])));
         assert!(!suppressed(&entry("ssh.service", packaged(Integrity::Intact), &[Flag::WorldWritable])));
+    }
+
+    #[test]
+    fn a_vendor_scriptlet_is_quiet_but_one_carrying_a_finding_is_not() {
+        let mut shipped = Entry::new(Kind::PkgHook, "/usr/lib/sysimage/rpm/rpmdb.sqlite", "systemd:%post");
+        shipped.provenance = Provenance::Packaged {
+            package: "systemd".into(),
+            version: "259-1".into(),
+            integrity: Integrity::Unknown,
+        };
+        shipped.note("read_from", "rpmdb");
+        assert!(suppressed(&shipped), "a few hundred vendor scriptlets are not the finding");
+
+        let mut payload = shipped.clone();
+        payload.flag(Flag::EncodingAnomaly);
+        assert!(!suppressed(&payload), "a scriptlet carrying a finding must still be shown");
+
+        // The rule is narrow: an ordinary file whose integrity is unknown is
+        // still never hidden.
+        let mut on_disk = shipped.clone();
+        on_disk.raw.remove("read_from");
+        assert!(!suppressed(&on_disk));
     }
 
     #[test]
