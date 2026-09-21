@@ -5,8 +5,7 @@
       "enabled": "masked",
       "flags": [
         "degraded-enablement",
-        "unpackaged",
-        "non-standard-location"
+        "unpackaged"
       ],
       "id": "c0c57816223e2f0d44b31deab1aa2adabedb8549cc30054a0aa2d87f667a706a",
       "kind": "systemd_unit",

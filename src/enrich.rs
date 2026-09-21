@@ -254,6 +254,11 @@ fn apply_location(root: &Root, entry: &mut Entry) {
     // actually leads: `systemctl link /tmp/evil.service` leaves a perfectly
     // ordinary-looking unit name in /etc.
     if let Some(target) = entry.raw.get("symlink_target") {
+        // Masking is a link to /dev/null. That is the documented way to turn
+        // a unit off, not a mechanism hiding outside its search path.
+        if target == "/dev/null" {
+            return;
+        }
         let resolved = in_root(&resolve_link(root, &entry.source, Path::new(target)));
         if !inside(&resolved) {
             entry.flag(Flag::NonStandardLocation);

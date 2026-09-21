@@ -142,7 +142,12 @@ impl<'a> Ctx<'a> {
             // Permissions come from what the path resolves to. A symlink's
             // own bits are always 0777 and the kernel ignores them, so
             // reading them would flag every SysV rc symlink on every host.
-            if !meta.is_symlink && meta.world_writable() {
+            //
+            // The test applies only to ordinary files and directories. A unit
+            // masked the documented way is a symlink to /dev/null, and a
+            // character device is world-writable by design — reading its mode
+            // as the entry's would flag every masked unit on every host.
+            if (meta.is_file || meta.is_dir) && meta.world_writable() {
                 e.flag(Flag::WorldWritable);
             }
             if let Some(owner) = self.home_owner(&abs) {
