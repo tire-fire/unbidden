@@ -124,6 +124,63 @@ Static musl is the supported build. `aarch64-unknown-linux-musl` works the same
 way. The binary needs no configuration file and no runtime data: copy one file
 to a host and run it.
 
+## Testing
+
+Three layers, each answering a different question.
+
+```sh
+cargo test
+```
+
+Unit tests per collector, plus two contract tests: a golden record of the
+whole scan against a synthetic tree, which fails on any unintended change to
+the Entry schema, and a mutation pass that takes that tree apart 120
+different ways — truncating, corrupting bytes, splicing in NULs and quotes,
+inserting 100 KB lines — and requires every collector to survive all of it.
+
+```sh
+docker run --rm -v "$PWD:/w" -w /w debian:12 sh ci/distro-check.sh /w/unbidden
+```
+
+Packaging and provenance against a real distribution: that the package
+backend claims what it should, that entries verify intact against their
+manifests, that an edited conffile does not raise the tool's highest-signal
+finding, and that a unit planted in `/etc/systemd/system` is reported
+unpackaged with its missing target flagged. Fast, and it runs on any image.
+
+```sh
+ci/vm-harness.sh                          # Debian 12, the whole matrix
+ci/vm-harness.sh --image fedora-41
+ci/vm-harness.sh --modules "cron udev systemd"
+ci/vm-harness.sh --shell                  # boot and provision, then hand over
+```
+
+The real one. It boots a disposable VM from a cached cloud image, installs
+[PANIX](https://github.com/Aegrah/PANIX) — a Linux persistence framework with
+a paired revert script and an ATT&CK mapping per mechanism — and for each
+mechanism runs the loop: baseline, plant, scan and assert the entry appears
+with the right kind, revert, scan again and assert the diff is clean.
+
+That last step is worth as much as the first. It catches collectors that
+report stale or phantom entries after a mechanism is removed, which is how a
+tool loses an operator's trust permanently.
+
+A VM rather than a container because half the mechanisms need a real boot and
+a running systemd, and because PANIX installs genuine persistence. Nothing
+touches the machine you are sitting at: a cached cloud image, a copy-on-write
+overlay discarded at the end, and qemu user-mode networking with one SSH port
+on localhost. The planted payloads dial 127.0.0.1, so nothing leaves the VM.
+
+It needs `qemu-system-x86_64`, `qemu-img`, `xorriso` and read access to
+`/dev/kvm`. The static binary is built first, in a container if no musl
+target is installed.
+
+Mechanisms PANIX implements that unbidden does not detect are tracked by name
+in `ci/panix-loop.sh` rather than quietly missing, and every one of them is
+something §2 excludes or §5 defers: rootkits, GRUB, initramfs, polkit,
+container runtimes, web shells, and user-account creation, which is not an
+execution trigger.
+
 ## Licence
 
 MIT.

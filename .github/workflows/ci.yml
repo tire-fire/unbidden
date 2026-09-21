@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -42,6 +43,29 @@ jobs:
         with:
           name: unbidden-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/unbidden
+
+  persistence:
+    # The PANIX matrix needs a real boot, so it needs nested virtualisation.
+    # Run it on demand rather than pretending every runner has KVM.
+    if: github.event_name == 'workflow_dispatch'
+    needs: static
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [debian-12, debian-13, ubuntu-22.04, ubuntu-24.04, fedora-41]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: unbidden-x86_64-unknown-linux-musl
+          path: target/x86_64-unknown-linux-musl/release
+      - run: |
+          chmod +x target/x86_64-unknown-linux-musl/release/unbidden
+          sudo apt-get update -qq
+          sudo apt-get install -y qemu-system-x86 qemu-utils xorriso
+          sudo chmod 666 /dev/kvm || true
+      - run: ci/vm-harness.sh --image ${{ matrix.image }}
 
   distros:
     # The supported set from §1. A defect on any of these blocks a release.
