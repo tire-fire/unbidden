@@ -152,7 +152,14 @@ impl<'a> Ctx<'a> {
                 e.flag(Flag::WorldWritable);
             }
             if let Some(owner) = self.home_owner(&abs) {
-                if owner != meta.uid {
+                // §5: accounts come from three places and the difference
+                // matters. A home directory with no passwd entry is not the
+                // same fact as an ordinary account, and an operator reading
+                // a per-user entry should not have to go and work out which
+                // this was.
+                e.note("user", owner.name.clone());
+                e.note("user_discovered_via", owner.source);
+                if owner.uid.is_some_and(|uid| uid != meta.uid) {
                     e.flag(Flag::OwnerMismatch);
                 }
             }
@@ -176,13 +183,18 @@ impl<'a> Ctx<'a> {
         e
     }
 
-    /// The uid of the user whose home contains this path, if any.
-    fn home_owner(&self, abs: &Path) -> Option<u32> {
+    /// The user whose home contains this path, if any.
+    ///
+    /// Both sides are compared inside the scan root. Homes are recorded as
+    /// they sit in the image (`/home/alice`) while the reported path carries
+    /// the root prefix, so comparing them directly matched nothing at all on
+    /// an offline root — and OwnerMismatch was quietly dead there.
+    fn home_owner(&self, abs: &Path) -> Option<&User> {
+        let here = self.root.rel(abs);
         self.users
             .iter()
-            .filter(|u| u.uid.is_some() && u.has_real_home() && abs.starts_with(&u.home))
+            .filter(|u| u.has_real_home() && here.starts_with(self.root.rel(&u.home)))
             .max_by_key(|u| u.home.as_os_str().len())
-            .and_then(|u| u.uid)
     }
 }
 
@@ -462,6 +474,40 @@ mod tests {
             Status::Failed { error } => assert!(error.contains("hostile input")),
             other => panic!("expected a recorded failure, got {other:?}"),
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_entry_under_a_home_says_how_that_account_was_found() {
+        let dir = std::env::temp_dir().join(format!("unbidden-usersrc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::create_dir_all(dir.join("home/ghost/.config/autostart")).unwrap();
+        std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
+        std::fs::create_dir_all(dir.join("home/alice")).unwrap();
+        std::fs::write(dir.join("home/alice/.bashrc"), b"export X=1\n").unwrap();
+        std::fs::write(dir.join("home/ghost/.config/autostart/x.desktop"), b"[Desktop Entry]\n").unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let users = crate::users::discover(&root);
+        let mut cx = Ctx {
+            root: &root,
+            users: &users,
+            deep: false,
+            unreadable: Vec::new(),
+            truncated: Vec::new(),
+        };
+
+        let known = cx.entry(Kind::ShellProfile, "home/alice/.bashrc", ".bashrc");
+        assert_eq!(known.raw["user"], "alice");
+        assert_eq!(known.raw["user_discovered_via"], "passwd");
+
+        // A home with no account behind it is exactly the case an operator
+        // wants flagged as odd, and it is invisible if the source is dropped.
+        let ghost = cx.entry(Kind::XdgAutostart, "home/ghost/.config/autostart/x.desktop", "x.desktop");
+        assert_eq!(ghost.raw["user"], "ghost");
+        assert_eq!(ghost.raw["user_discovered_via"], "home-dir");
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
