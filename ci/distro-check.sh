@@ -29,7 +29,14 @@ echo "$header" | grep -q '"status":"failed"' && fail "a collector failed: $heade
 dupes=$(tail -n +2 "$out" | sed -n 's/.*"id":"\([0-9a-f]*\)".*/\1/p' | sort | uniq -d | wc -l)
 [ "$dupes" -eq 0 ] || fail "$dupes duplicate entry ids — merged-usr deduplication is broken"
 
-packaged=$(tail -n +2 "$out" | grep -c '"verdict":"packaged"' || true)
+# In a container /proc/modules reports the HOST's loaded modules, which no
+# package in this image owns. They would swamp every ratio below, so the
+# provenance assertions look at the file-backed entries only.
+tail -n +2 "$out" | grep -v '"kind":"kernel_module"' > "$out.files"
+files=$(cat "$out.files")
+note "$(wc -l < "$out.files") file-backed entries"
+
+packaged=$(echo "$files" | grep -c '"verdict":"packaged"' || true)
 note "$packaged entries owned by a package"
 case "$ID" in
     debian|ubuntu|linuxmint)
@@ -43,8 +50,14 @@ case "$ID" in
         ;;
 esac
 
+# A freshly pulled image has been modified by nobody, so the tool's
+# highest-signal finding must not appear even once. A single false
+# packaged-modified here would be thousands across a fleet.
+bogus=$(echo "$files" | grep -c 'packaged-modified' || true)
+[ "$bogus" -eq 0 ] || fail "$bogus entries report packaged-modified on a pristine image"
+
 if [ "$packaged" -gt 0 ]; then
-    intact=$(tail -n +2 "$out" | grep -c '"integrity":"intact"' || true)
+    intact=$(echo "$files" | grep -c '"integrity":"intact"' || true)
     note "$intact verified intact against their package manifest"
     [ "$intact" -gt 0 ] || fail "no entry verified intact; digest checking is not working"
 fi
@@ -52,8 +65,23 @@ fi
 # An edited configuration file is expected to differ from what the package
 # shipped. Without conffile handling, every host with a customised config
 # lights up with the tool's highest-signal finding.
+# A conffile that is also an autostart source is what this needs, and a
+# minimal image may ship none. cron provides /etc/crontab as one on every
+# supported distribution.
+if [ ! -f /etc/crontab ]; then
+    case "$ID" in
+        debian|ubuntu|linuxmint)
+            apt-get -qq update >/dev/null 2>&1 && apt-get -qq install -y cron >/dev/null 2>&1 || true
+            ;;
+        fedora|rhel|centos)
+            (dnf -q -y install cronie >/dev/null 2>&1 || yum -q -y install cronie >/dev/null 2>&1) || true
+            ;;
+    esac
+    [ -f /etc/crontab ] && "$BIN" --json --all > "$out"
+fi
+
 conf=""
-for c in /etc/ssh/sshd_config /etc/crontab /etc/sudoers /etc/profile; do
+for c in /etc/crontab /etc/ssh/sshd_config /etc/sudoers /etc/profile; do
     if [ -f "$c" ] && tail -n +2 "$out" | grep -q "\"source\":\"$c\""; then conf="$c"; break; fi
 done
 if [ -n "$conf" ]; then
@@ -90,5 +118,5 @@ case "$planted" in
     *) fail "the planted unit's absent target was not flagged" ;;
 esac
 
-rm -f "$out"
+rm -f "$out" "$out.files"
 echo "== $ID $VERSION_ID OK"
