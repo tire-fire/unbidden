@@ -107,7 +107,14 @@ fn udev_rules(cx: &mut Ctx) -> Vec<Entry> {
                 // udevd runs as root, so everything it spawns does too.
                 e.principal = Some("root".to_string());
                 e.command = Some(t.value.to_vec());
-                e.target_path = first_absolute(t.value);
+                if names_a_unit(t.key) {
+                    // Nothing to resolve: the value is a unit name, and the
+                    // systemd collector has its own entry for the file.
+                    e.note("systemd_unit", String::from_utf8_lossy(t.value));
+                    e.note("target_unverifiable", "names a systemd unit, not a program");
+                } else {
+                    e.target_path = first_absolute(t.value);
+                }
                 e.enabled =
                     if win == i { Enablement::Enabled } else { Enablement::Disabled };
                 if std::str::from_utf8(t.value).is_err() {
@@ -239,14 +246,30 @@ fn udev_tokens(line: &[u8]) -> Vec<Token<'_>> {
     out
 }
 
-/// The keys that make a rule execute something. `IMPORT{program}` belongs here
-/// as much as `RUN` does: it runs a binary and imports its output as device
-/// properties, and tools that grep for RUN alone miss it.
+/// The keys that make a rule execute something.
+///
+/// `IMPORT{program}` belongs here as much as `RUN` does: it runs a binary and
+/// imports its output as device properties, and tools that grep for RUN alone
+/// miss it.
+///
+/// So does `ENV{SYSTEMD_WANTS}`, which runs nothing itself — it asks systemd
+/// to start the named unit when the device appears. A rule carrying it has
+/// no RUN at all, so a scan looking only for RUN reports the rule directory
+/// as clean while a unit starts on every network interface event.
 fn is_action_key(key: &[u8]) -> bool {
     key == b"RUN".as_slice()
         || key == b"PROGRAM".as_slice()
         || key == b"IMPORT{program}".as_slice()
         || key.starts_with(b"RUN{")
+        || key == b"ENV{SYSTEMD_WANTS}".as_slice()
+        || key == b"ENV{SYSTEMD_USER_WANTS}".as_slice()
+}
+
+/// True for an action key that names a systemd unit rather than a command.
+/// The unit is reported so an operator can join it to the systemd collector's
+/// entry for the same thing; there is no path to resolve.
+fn names_a_unit(key: &[u8]) -> bool {
+    key.starts_with(b"ENV{SYSTEMD_")
 }
 
 fn is_match_key(key: &[u8]) -> bool {
@@ -655,6 +678,9 @@ mod tests {
         r.extend_from_slice(b"\n");
         r.extend_from_slice(br#"SUBSYSTEM=="tty", RUN{builtin}+="kmod load evil""#);
         r.extend_from_slice(b"\n");
+        // No RUN at all: systemd starts the unit when the device appears.
+        r.extend_from_slice(br#"SUBSYSTEM=="net", KERNEL!="lo", TAG+="systemd", ENV{SYSTEMD_WANTS}+="backdoor.service""#);
+        r.extend_from_slice(b"\n");
         // Invalid UTF-8 inside a RUN value is evidence, not a crash.
         r.extend_from_slice(b"SUBSYSTEM==\"mem\", RUN+=\"/tmp/\xff\xfe\"\n");
         // Carries no executable action: must not produce an entry.
@@ -669,7 +695,13 @@ mod tests {
         put(&dir, "etc/udev/rules.d/50-x.rules", &rules_with_every_action_shape());
         let s = scan(&dir);
         let udev = of_kind(&s, Kind::Udev);
-        assert_eq!(udev.len(), 6, "one entry per executing key: {:?}", udev.iter().map(|e| &e.name).collect::<Vec<_>>());
+        assert_eq!(udev.len(), 7, "one entry per executing key: {:?}", udev.iter().map(|e| &e.name).collect::<Vec<_>>());
+        let wants = udev
+            .iter()
+            .find(|e| e.raw.get("key").is_some_and(|k| k == "ENV{SYSTEMD_WANTS}"))
+            .expect("a rule that starts a unit is an executing rule");
+        assert_eq!(wants.raw["systemd_unit"], "backdoor.service");
+        assert_eq!(wants.target_path, None, "a unit name is not a path");
         assert!(udev.iter().all(|e| e.trigger == Trigger::DeviceEvent));
         assert!(udev.iter().all(|e| e.principal.as_deref() == Some("root")));
 

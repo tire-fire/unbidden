@@ -29,6 +29,9 @@ mechanism_kind() {
     case "$1" in
         at)                          echo at_job ;;
         authorized-keys|ssh-key)     echo ssh_authorized_key ;;
+        cap)                         echo file_capability ;;
+        suid)                        echo suid_binary ;;
+        sudoers)                     echo sudoers ;;
         cron)                        echo cron ;;
         dbus)                        echo dbus_service ;;
         generator)                   echo systemd_generator ;;
@@ -42,11 +45,8 @@ mechanism_kind() {
         pam)                         echo pam ;;
         rc-local)                    echo rc_local ;;
         shell-profile)               echo shell_profile ;;
-        sudoers-backdoor)            echo sudoers ;;
-        suid-backdoor)               echo suid_binary ;;
-        cap-backdoor)                echo file_capability ;;
         system-binary)               echo systemd_unit ;;
-        systemd)                     echo systemd_unit ;;
+        systemd)                     echo "systemd_unit systemd_timer" ;;
         udev)                        echo udev ;;
         xdg)                         echo xdg_autostart ;;
         # Mechanisms the spec puts out of scope or defers. Tracked, not
@@ -77,14 +77,15 @@ plant_args() {
     case "$1" in
         at)                echo "--default $DIAL --time 'now + 1 minute'" ;;
         authorized-keys)   echo "--default --key '$(cat /tmp/panix-key.pub)'" ;;
-        cap-backdoor)      echo "--default" ;;
+        cap)               echo "--default" ;;
         generator)         echo "$DIAL" ;;
         git)               echo "--default $DIAL --hook" ;;
-        ld-preload)        echo "$DIAL --binary ls" ;;
+        ld-preload)        echo "$DIAL --binary /usr/bin/ls" ;;
         malicious-package) echo "$DIAL $PKG_FLAG" ;;
         pam)               echo "--pam-exec --backdoor $DIAL" ;;
-        sudoers-backdoor)  echo "--username root" ;;
-        suid-backdoor)     echo "--default" ;;
+        ssh-key)           echo "--default" ;;
+        sudoers)           echo "--username root" ;;
+        suid)              echo "--default" ;;
         udev)              echo "--default $DIAL --systemd" ;;
         *)                 echo "--default $DIAL" ;;
     esac
@@ -103,9 +104,9 @@ plant() {
 
 modules=("$@")
 if [ ${#modules[@]} -eq 0 ]; then
-    modules=(at authorized-keys cap-backdoor cron dbus generator git initd ld-preload \
+    modules=(at authorized-keys cap cron dbus generator git initd ld-preload \
              malicious-package motd network-manager pam rc-local shell-profile ssh-key \
-             sudoers-backdoor suid-backdoor systemd udev xdg)
+             sudoers suid systemd udev xdg)
 fi
 
 rebaseline() {
@@ -135,13 +136,17 @@ for m in "${modules[@]}"; do
     found=$(scan --against "$BASE" | tail -n +2 | grep -E '"delta":"(added|changed)"')
     kinds=$(echo "$found" | sed -n 's/.*"kind":"\([a-z_]*\)".*/\1/p' | sort -u | tr '\n' ' ')
 
-    if echo "$kinds" | grep -qw "$want"; then
-        echo "   found as $want"
-        detected=yes
-    else
+    detected=no
+    for w in $want; do
+        if echo "$kinds" | grep -qw "$w"; then
+            echo "   found as $w"
+            detected=yes
+            break
+        fi
+    done
+    if [ "$detected" = no ]; then
         echo "   MISS: planted but not reported as $want (saw: ${kinds:-nothing})"
         FAILURES+=("$m: not detected as $want, saw ${kinds:-nothing}")
-        detected=no
     fi
 
     if ! timeout 120 bash "$PANIX" --revert "$m" >/tmp/revert.log 2>&1; then
@@ -151,16 +156,38 @@ for m in "${modules[@]}"; do
         continue
     fi
 
-    residue=$(scan --against "$BASE" | tail -n +2 | grep -cE '"delta":"(added|changed|removed)"')
+    scan --against "$BASE" | tail -n +2 | grep -E '"delta":"(added|changed|removed)"' > /tmp/residue.ndjson
+    residue=$(wc -l < /tmp/residue.ndjson)
     if [ "$residue" -eq 0 ]; then
         echo "   reverted clean"
         [ "$detected" = yes ] && pass=$((pass + 1)) || fail=$((fail + 1))
-    elif true; then
-        echo "   PHANTOM: $residue entries still differ after revert"
-        scan --against "$BASE" | tail -n +2 | grep -E '"delta":"(added|changed|removed)"' \
-            | sed -n 's/.*"delta":"\([a-z]*\)".*"source":"\([^"]*\)".*/     \1 \2/p' | head -5
-        FAILURES+=("$m: $residue entries remain after revert")
-        fail=$((fail + 1))
+    else
+        # Two very different things look the same here, and only one of them
+        # is unbidden's fault. A differing entry whose file is still on disk
+        # means PANIX's revert left something behind. One whose file is gone
+        # means unbidden is reporting a mechanism that no longer exists —
+        # which is how a tool loses an operator's trust permanently.
+        phantom=0; leftover=0
+        while IFS= read -r line; do
+            src=$(echo "$line" | sed -n 's/.*"source":"\([^"]*\)".*/\1/p')
+            delta=$(echo "$line" | sed -n 's/.*"delta":"\([a-z]*\)".*/\1/p')
+            if [ -e "$src" ]; then
+                leftover=$((leftover + 1))
+                echo "     left on disk by PANIX: $delta $src"
+            else
+                phantom=$((phantom + 1))
+                echo "     PHANTOM, the file is gone: $delta $src"
+            fi
+        done < /tmp/residue.ndjson
+
+        if [ "$phantom" -gt 0 ]; then
+            echo "   $phantom phantom entries after revert"
+            FAILURES+=("$m: $phantom entries reported for files that no longer exist")
+            fail=$((fail + 1))
+        else
+            echo "   reverted with $leftover files PANIX left behind; nothing phantom"
+            [ "$detected" = yes ] && pass=$((pass + 1)) || fail=$((fail + 1))
+        fi
         # Whatever the revert left behind is now the state of the machine.
         # Re-baselining stops one module's residue being reported again
         # against every module that follows it.

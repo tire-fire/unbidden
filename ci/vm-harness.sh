@@ -104,8 +104,9 @@ KEY="$INSTANCE/key"
 
 # PANIX needs the mechanisms' own tooling present or it refuses to plant.
 case "$FAMILY" in
-    debian) PKGS='[cron, at, sudo, git, network-manager, dbus, openssh-server, python3]' ;;
-    fedora) PKGS='[cronie, at, sudo, git, NetworkManager, dbus, openssh-server, python3]' ;;
+    # gcc because two PANIX modules compile their payload before planting it.
+    debian) PKGS='[cron, at, sudo, git, network-manager, dbus, openssh-server, python3, gcc, build-essential]' ;;
+    fedora) PKGS='[cronie, at, sudo, git, NetworkManager, dbus, openssh-server, python3, gcc, make]' ;;
 esac
 
 cat > "$INSTANCE/user-data" <<EOF
