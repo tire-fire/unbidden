@@ -184,13 +184,6 @@ impl Root {
         Ok(File::from(self.open_raw(rel, OFlags::RDONLY)?))
     }
 
-    /// Opens without following a final-component symlink. Use where the
-    /// distinction is evidence: an autostart file that is a link to somewhere
-    /// else is a fact about the entry, not a detail to resolve through.
-    pub fn open_nofollow(&self, rel: impl AsRef<Path>) -> io::Result<File> {
-        Ok(File::from(self.open_raw(rel.as_ref(), OFlags::RDONLY | OFlags::NOFOLLOW)?))
-    }
-
     /// Reads at most `cap` bytes. The returned flag says the file was longer,
     /// which collectors record rather than hide.
     pub fn read_capped(&self, rel: impl AsRef<Path>, cap: usize) -> io::Result<(Vec<u8>, bool)> {

@@ -108,12 +108,17 @@ impl Collector for Shell {
             let syntax = if *p == PAM_ENV { Syntax::KeyValue } else { Syntax::Shell };
             profile(cx, Path::new(p), None, syntax, &mut seen, &mut out);
         }
-        for ent in cx.dir("etc/profile.d") {
-            if ent.is_dir {
-                continue;
+        // §5 says /etc/zsh/*, not a list of names: a distribution can ship
+        // anything there and an attacker can add to it, and a file zsh reads
+        // that this walk does not is the whole failure mode.
+        for dir in ["etc/zsh", "etc/profile.d"] {
+            for ent in cx.dir(dir) {
+                if ent.is_dir {
+                    continue;
+                }
+                let rel = Path::new(dir).join(&ent.name);
+                profile(cx, &rel, None, Syntax::Shell, &mut seen, &mut out);
             }
-            let rel = Path::new("etc/profile.d").join(&ent.name);
-            profile(cx, &rel, None, Syntax::Shell, &mut seen, &mut out);
         }
 
         // Environment set for every PAM session and every systemd user
