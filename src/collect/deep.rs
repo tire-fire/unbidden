@@ -296,14 +296,11 @@ struct FileCaps {
 }
 
 fn capability(cx: &mut Ctx, w: &mut Walk, rel: &Path, name: &OsStr) -> Option<Entry> {
-    // Root owns no xattr call, so this one access names a path. The path is
-    // the one the walk built out of directories it entered itself, and the
-    // read does not follow a final symlink, so nothing here resolves through
-    // a link an attacker planted.
-    let abs = cx.root.abs(rel);
+    // The path handed over is the one the walk built out of directories it
+    // entered itself, which is the condition Root::xattr documents.
     let mut buf = [0u8; 64];
-    let len = match rustix::fs::lgetxattr(&abs, "security.capability", &mut buf[..]) {
-        Ok(n) => n.min(buf.len()),
+    let len = match cx.root.xattr(rel, "security.capability", &mut buf[..]) {
+        Ok(n) => n,
         Err(e) => {
             // No attribute, or a filesystem that has no attributes at all, is
             // the answer for almost every file on the host.
@@ -318,7 +315,7 @@ fn capability(cx: &mut Ctx, w: &mut Walk, rel: &Path, name: &OsStr) -> Option<En
     name_from_os(&mut e, name);
     e.trigger = Trigger::Always;
     e.enabled = Enablement::NotApplicable;
-    e.target_path = Some(abs);
+    e.target_path = Some(cx.root.abs(rel));
     e.note("cap_raw_hex", hex(&buf[..len]));
     match decode(&buf[..len]) {
         Some(c) => {

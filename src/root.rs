@@ -533,6 +533,25 @@ impl Root {
     pub fn base(&self) -> &Path {
         &self.base
     }
+
+    /// Reads an extended attribute without following a final symlink.
+    ///
+    /// This is the one filesystem access the Root cannot confine with
+    /// `openat2`: Linux grew a `getxattrat` only in 6.13, `fgetxattr` on an
+    /// `O_PATH` descriptor is refused, and the alternative — reaching the
+    /// file through `/proc/self/fd` — is a magic link, which is exactly what
+    /// the resolve flags elsewhere refuse. So the path is named.
+    ///
+    /// What that costs: on an offline root, a symlinked *parent* directory
+    /// could redirect this read outside the image. The caller must therefore
+    /// only pass paths it assembled from directories it entered itself
+    /// without following a link — which is what the deep walk does. The rule
+    /// lives here, in one place, rather than in every caller's head.
+    pub fn xattr(&self, rel: impl AsRef<Path>, name: &str, buf: &mut [u8]) -> rustix::io::Result<usize> {
+        let abs = self.abs(rel);
+        let cap = buf.len();
+        rustix::fs::lgetxattr(&abs, name, buf).map(|n| n.min(cap))
+    }
 }
 
 /// Btrfs gives every subvolume its own device number while they all live on
