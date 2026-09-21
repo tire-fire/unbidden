@@ -13,6 +13,41 @@ note() { echo "  $*"; }
 . /etc/os-release
 echo "== $ID $VERSION_ID"
 
+# Several images named after a distribution are built on its upstream and
+# still carry the upstream's os-release — linuxmintd/mint22-amd64 reports
+# Ubuntu 24.04. Running the checks against one of those is not a failure, it
+# is a silent hole in the matrix, so the caller says what it expects.
+[ -z "${UNBIDDEN_EXPECT_ID:-}" ] || [ "$ID" = "$UNBIDDEN_EXPECT_ID" ] ||
+    fail "this image reports ID=$ID, not the $UNBIDDEN_EXPECT_ID it was added to the matrix for"
+
+# The package backend follows from os-release rather than from a list of
+# distribution names: a derivative inherits its parent's backend through
+# ID_LIKE, which is how Mint and LMDE are read without either being named.
+case "$ID ${ID_LIKE:-}" in
+    *debian*|*ubuntu*)        FAMILY=dpkg ;;
+    *fedora*|*rhel*|*centos*) FAMILY=rpm ;;
+    *)                        FAMILY=none ;;
+esac
+
+# §13: mainline Mint and LMDE both report ID=linuxmint and differ only in the
+# base they are built on, which os-release spells in ID_LIKE. An LMDE read as
+# Ubuntu would have the rest of this script asserting Ubuntu behaviour, snap
+# included, on a system that has never had snapd.
+if [ "$ID" = linuxmint ]; then
+    case "$NAME" in
+        LMDE*) want=debian ;;
+        *)     want=ubuntu ;;
+    esac
+    base=none
+    case "${ID_LIKE:-}" in
+        *ubuntu*) base=ubuntu ;;
+        *debian*) base=debian ;;
+    esac
+    [ "$base" = "$want" ] ||
+        fail "$PRETTY_NAME reports ID_LIKE='${ID_LIKE:-}', so its base reads as $base, not $want"
+    note "$PRETTY_NAME is $base-based"
+fi
+
 out=$(mktemp)
 "$BIN" --json > "$out"
 
@@ -23,6 +58,13 @@ note "$entries entries"
 
 echo "$header" | grep -q '"schema_version"' || fail "no scan header on the first line"
 echo "$header" | grep -q '"status":"failed"' && fail "a collector failed: $header"
+
+# §11 has distro detection read the scan root and nothing else, so the header
+# must repeat what /etc/os-release on that root says.
+echo "$header" | grep -q "\"distro_id\":\"$ID\"" ||
+    fail "the header does not report distro_id $ID: $header"
+echo "$header" | grep -q "\"distro_version\":\"$VERSION_ID\"" ||
+    fail "the header does not report distro_version $VERSION_ID: $header"
 
 # Every supported distribution ships merged /usr, so a vendor unit reached
 # through both /lib and /usr/lib must be reported exactly once.
@@ -38,16 +80,9 @@ note "$(wc -l < "$out.files") file-backed entries"
 
 packaged=$(echo "$files" | grep -c '"verdict":"packaged"' || true)
 note "$packaged entries owned by a package"
-case "$ID" in
-    debian|ubuntu|linuxmint)
-        [ "$packaged" -gt 10 ] || fail "the dpkg backend claimed almost nothing ($packaged)"
-        ;;
-    fedora|rhel|centos)
-        [ "$packaged" -gt 10 ] || fail "the rpm backend claimed almost nothing ($packaged)"
-        ;;
-    *)
-        note "no supported package backend on $ID; provenance is expected to be unknown"
-        ;;
+case "$FAMILY" in
+    none) note "no supported package backend on $ID; provenance is expected to be unknown" ;;
+    *)    [ "$packaged" -gt 10 ] || fail "the $FAMILY backend claimed almost nothing ($packaged)" ;;
 esac
 
 # A freshly pulled image has been modified by nobody, so the tool's
@@ -69,11 +104,11 @@ fi
 # minimal image may ship none. cron provides /etc/crontab as one on every
 # supported distribution.
 if [ ! -f /etc/crontab ]; then
-    case "$ID" in
-        debian|ubuntu|linuxmint)
+    case "$FAMILY" in
+        dpkg)
             apt-get -qq update >/dev/null 2>&1 && apt-get -qq install -y cron >/dev/null 2>&1 || true
             ;;
-        fedora|rhel|centos)
+        rpm)
             (dnf -q -y install cronie >/dev/null 2>&1 || yum -q -y install cronie >/dev/null 2>&1) || true
             ;;
     esac
@@ -117,6 +152,114 @@ case "$planted" in
     *target-missing*) note "and its missing target is flagged" ;;
     *) fail "the planted unit's absent target was not flagged" ;;
 esac
+
+# --- a desktop session -------------------------------------------------
+# §13: an extension present on disk runs only if dconf says so, and nothing
+# writes a dconf database until a session has run. A headless image therefore
+# skips the enablement half of the extension collector without saying so,
+# which is why at least one image per desktop has to boot one. UNBIDDEN_DESKTOP
+# names the session the caller installed; booting one is a slow image, so it
+# is opt-in rather than something every image in the matrix pays for.
+if [ -n "${UNBIDDEN_DESKTOP:-}" ]; then
+    planted="unbidden-check@example.test"
+    case "$UNBIDDEN_DESKTOP" in
+        cinnamon)
+            session=cinnamon-session;  want_kind=cinnamon-applet
+            extdir=".local/share/cinnamon/applets"; entry_file=applet.js
+            schema=org.cinnamon; key=enabled-applets; unlock=""
+            # Cinnamon keys an applet by panel, side, order, uuid and instance.
+            value="panel1:right:0:$planted:99" ;;
+        gnome)
+            session=gnome-session;  want_kind=gnome-shell-extension
+            extdir=".local/share/gnome-shell/extensions"; entry_file=extension.js
+            schema=org.gnome.shell; key=enabled-extensions
+            value="$planted"
+            # A session that has never run an extension leaves the kill switch
+            # on — this one writes it into its own database at startup — and a
+            # desktop that runs one has it off.
+            unlock="disable-user-extensions false" ;;
+        *) fail "UNBIDDEN_DESKTOP=$UNBIDDEN_DESKTOP names no session this script can boot" ;;
+    esac
+    for t in "$session" Xvfb dbus-run-session dbus-daemon gsettings; do
+        command -v "$t" >/dev/null || fail "$t is not installed on this image"
+    done
+
+    # gnome-session aborts outright when there is no system bus to connect
+    # to, and an image that has never booted has none.
+    [ -S /run/dbus/system_bus_socket ] || { mkdir -p /run/dbus; dbus-daemon --system --fork; }
+
+    id -u unbidden-desk >/dev/null 2>&1 || useradd -m unbidden-desk
+    home=$(getent passwd unbidden-desk | cut -d: -f6)
+    rt="/tmp/xdg-unbidden-desk"
+    mkdir -p "$rt"; chown unbidden-desk "$rt"; chmod 700 "$rt"
+    rm -rf "$home/.config/dconf"
+
+    Xvfb :99 -screen 0 1280x800x24 >/tmp/xvfb.log 2>&1 &
+    xvfb=$!
+    su unbidden-desk -c \
+        "DISPLAY=:99 XDG_RUNTIME_DIR=$rt LIBGL_ALWAYS_SOFTWARE=1 dbus-run-session -- $session" \
+        >/tmp/session.log 2>&1 &
+    sess=$!
+
+    # The session writes its first key within a second or two of the shell
+    # coming up. The wait is for a slow image, not for a slow desktop.
+    waited=0
+    while [ ! -s "$home/.config/dconf/user" ] && [ "$waited" -lt 120 ]; do
+        sleep 2
+        waited=$((waited + 2))
+    done
+    [ -s "$home/.config/dconf/user" ] ||
+        fail "$session wrote no dconf database in ${waited}s; see /tmp/session.log"
+    note "$session wrote $(wc -c < "$home/.config/dconf/user") bytes of dconf after ${waited}s"
+
+    # The session has done its job once the database exists. It is stopped
+    # before the key below is written because a running shell rewrites the
+    # enabled list when an extension it is told to load will not load.
+    kill "$sess" "$xvfb" 2>/dev/null || true
+    pkill -u unbidden-desk 2>/dev/null || true
+
+    # An extension nobody shipped, enabled the way the desktop enables one:
+    # through dconf, into the database the session just created. A fresh one
+    # leaves the enabled list at its compiled schema default, so this is what
+    # puts the key in the user database — the half no headless image reaches.
+    appdir="$home/$extdir/$planted"
+    mkdir -p "$appdir"
+    printf '{"uuid":"%s","name":"unbidden check"}\n' "$planted" > "$appdir/metadata.json"
+    : > "$appdir/$entry_file"
+    chown -R unbidden-desk "$home/.local"
+    [ -z "$unlock" ] ||
+        su unbidden-desk -c \
+            "XDG_RUNTIME_DIR=$rt dbus-run-session -- gsettings set $schema $unlock" \
+            >>/tmp/gsettings.log 2>&1 ||
+        fail "could not clear $schema $unlock; see /tmp/gsettings.log"
+    su unbidden-desk -c \
+        "XDG_RUNTIME_DIR=$rt dbus-run-session -- gsettings set $schema $key \"['$value']\"" \
+        >/tmp/gsettings.log 2>&1 ||
+        fail "could not enable $planted through dconf; see /tmp/gsettings.log"
+
+    ext=$("$BIN" --json --all | tail -n +2 | grep '"kind":"desktop_extension"' || true)
+    [ -n "$ext" ] || fail "the $UNBIDDEN_DESKTOP session produced no desktop_extension entries"
+    note "$(echo "$ext" | wc -l) desktop extension entries"
+    echo "$ext" | grep -q "\"extension_kind\":\"$want_kind\"" ||
+        fail "no $want_kind entry from a booted $UNBIDDEN_DESKTOP session"
+
+    # Presence on disk is not enablement, and an unreadable dconf stack is not
+    # a verdict: a collector that cannot answer says so rather than guessing.
+    degraded=$(echo "$ext" | grep -c 'degraded-enablement' || true)
+    [ "$degraded" -eq 0 ] ||
+        fail "$degraded extensions have an unresolved enablement beside a live dconf database"
+
+    mine=$(echo "$ext" | grep "\"name\":\"$planted\"" || true)
+    [ -n "$mine" ] || fail "the extension planted in $appdir was not reported"
+    case "$mine" in
+        *'"enabled":"enabled"'*) ;;
+        *) fail "the planted extension is enabled in dconf but reads as not enabled: $mine" ;;
+    esac
+    case "$mine" in
+        *'"enablement_source":"user-db'*) note "the planted extension reads as enabled from the session's own dconf database" ;;
+        *) fail "the planted extension's enablement did not come from a user database: $mine" ;;
+    esac
+fi
 
 rm -f "$out" "$out.files"
 echo "== $ID $VERSION_ID OK"

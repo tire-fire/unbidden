@@ -762,9 +762,17 @@ fn verdict(
         }
     }
 
+    // A compiled schema default is the same answer for everyone, so naming
+    // the accounts it applied to says nothing and says it at length: on a
+    // real desktop that is every account with a home, on every shipped
+    // applet. Accounts are worth listing only when a particular user's own
+    // database is what turned the thing on.
+    let from_schema = source.as_deref().is_some_and(|s| s.starts_with("schema:"));
+    let who = (!enabled_for.is_empty() && !from_schema).then(|| enabled_for.join(", "));
+
     for (note, value) in [
         ("dconf_key", Some(key.to_string())),
-        ("enabled_for", (!enabled_for.is_empty()).then(|| enabled_for.join(", "))),
+        ("enabled_for", who),
         ("enabled_by", matched),
         ("enablement_source", source),
     ] {
@@ -1022,7 +1030,9 @@ mod tests {
         );
         // A compiled default applies to every account, not just the one whose
         // database was read.
-        assert!(e[0].raw.get("enabled_for").unwrap().contains("alice"));
+        // The schema default is user-independent, so the accounts it covers
+        // are not worth listing — the source note already says so.
+        assert!(e[0].raw.get("enabled_for").is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

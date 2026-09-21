@@ -73,6 +73,47 @@ jobs:
           sudo chmod 666 /dev/kvm || true
       - run: ci/vm-harness.sh --image ${{ matrix.image }}
 
+  desktop:
+    # §13: an extension on disk runs only if dconf says so, and nothing
+    # writes a dconf database until a session has run — so every headless
+    # image in the matrix below skips the enablement half of the extension
+    # collector without saying so. One image per desktop boots a real
+    # session instead: Mint brings Cinnamon and Debian brings GNOME, which
+    # is the pair §1 puts across the four supported distributions.
+    needs: static
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - desktop: cinnamon
+            image: linuxmintd/mint21-amd64
+            packages: cinnamon-core
+            expect: linuxmint
+          - desktop: gnome
+            image: debian:12
+            packages: gnome-core
+            expect: debian
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: unbidden-x86_64-unknown-linux-musl
+          path: ./bin
+      - run: chmod +x ./bin/unbidden
+      - name: a ${{ matrix.desktop }} session on ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w \
+            -e DEBIAN_FRONTEND=noninteractive \
+            -e UNBIDDEN_DESKTOP=${{ matrix.desktop }} \
+            -e UNBIDDEN_EXPECT_ID=${{ matrix.expect }} \
+            ${{ matrix.image }} sh -c '
+              apt-get -qq update >/dev/null &&
+              apt-get -qq install -y --no-install-recommends \
+                ${{ matrix.packages }} xvfb dbus-x11 xauth libgl1-mesa-dri procps \
+                >/dev/null &&
+              sh ci/distro-check.sh /w/bin/unbidden'
+
   distros:
     # The supported set from §1. A defect on any of these blocks a release.
     needs: static
@@ -87,6 +128,12 @@ jobs:
           - ubuntu:24.04
           - fedora:latest
           - fedora:41
+          # Mint publishes no cloud image, so the container matrix is the
+          # only place §1's third distribution is tested at all. LMDE is a
+          # separate image because it is a separate base: §13 wants the
+          # Debian one read as Debian and not as Ubuntu.
+          - linuxmintd/mint21-amd64
+          - linuxmintd/lmde6-amd64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -96,5 +143,12 @@ jobs:
       - run: chmod +x ./bin/unbidden
       - name: ${{ matrix.image }}
         run: |
-          docker run --rm -v "$PWD:/w" -w /w ${{ matrix.image }} \
+          # Several distribution-named images are built on their upstream and
+          # still report it: linuxmintd/mint22-amd64 is Ubuntu 24.04 down to
+          # its os-release. Naming what the image is for turns that from a
+          # hole in the matrix into a failure.
+          case "${{ matrix.image }}" in
+            *mint*|*lmde*) export UNBIDDEN_EXPECT_ID=linuxmint ;;
+          esac
+          docker run --rm -v "$PWD:/w" -w /w -e UNBIDDEN_EXPECT_ID ${{ matrix.image }} \
             sh ci/distro-check.sh /w/bin/unbidden
