@@ -184,21 +184,27 @@ qemu-system-x86_64 \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$PORT-:22" -device virtio-net-pci,netdev=n0 \
     -serial "file:$INSTANCE/console.log" -pidfile "$INSTANCE/qemu.pid"
 
-printf '   waiting for ssh on 127.0.0.1:%s' "$PORT"
-for _ in $(seq 1 60); do
-    vm_ssh true 2>/dev/null && break
-    printf .; sleep 5
+# One loop, not two. cloud-init restarts sshd as it provisions, so a probe
+# that succeeds and is then verified a second time can fail on the restart —
+# which looked exactly like a VM that never booted. Waiting for the marker
+# file is the only condition that matters, and it tolerates ssh going away
+# and coming back underneath it.
+printf '   waiting for ssh and cloud-init on 127.0.0.1:%s' "$PORT"
+ready=0
+for _ in $(seq 1 150); do
+    if vm_ssh 'test -f /root/.harness-ready' 2>/dev/null; then
+        ready=1
+        break
+    fi
+    printf .
+    sleep 5
 done
 echo
-vm_ssh true 2>/dev/null || { echo "the VM never came up; see $INSTANCE/console.log" >&2; exit 1; }
-
-printf '   waiting for cloud-init'
-for _ in $(seq 1 90); do
-    vm_ssh 'test -f /root/.harness-ready' 2>/dev/null && break
-    printf .; sleep 5
-done
-echo
-vm_ssh 'test -f /root/.harness-ready' || { echo "cloud-init never finished; see $INSTANCE/console.log" >&2; exit 1; }
+if [ "$ready" -ne 1 ]; then
+    echo "the VM never finished provisioning; see $INSTANCE/console.log" >&2
+    tail -5 "$INSTANCE/console.log" >&2 2>/dev/null
+    exit 1
+fi
 vm_ssh 'cat /etc/os-release | sed -n "s/^PRETTY_NAME=//p"'
 
 say "installing the harness"
