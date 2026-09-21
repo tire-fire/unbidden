@@ -1,0 +1,70 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked --all-targets
+      - run: cargo build --locked --release
+      - name: no warnings
+        run: cargo build --locked --release 2>&1 | tee /tmp/build.log && ! grep -q '^warning' /tmp/build.log
+
+  static:
+    # /etc/ld.so.preload is a persistence mechanism: a dynamically linked
+    # scanner runs the attacker's code before main(). A regression here is a
+    # silent loss of that guarantee rather than a visible break, so it is
+    # checked rather than trusted.
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo install cross --locked
+      - run: cross build --locked --release --target ${{ matrix.target }}
+      - name: the binary must be static
+        run: |
+          bin=target/${{ matrix.target }}/release/unbidden
+          file "$bin"
+          file "$bin" | grep -q 'statically linked' \
+            || { echo "not statically linked"; exit 1; }
+          if ldd "$bin" 2>&1 | grep -qv 'not a dynamic executable'; then
+            echo "ldd reports dynamic linkage:"; ldd "$bin"; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unbidden-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/unbidden
+
+  distros:
+    # The supported set from §1. A defect on any of these blocks a release.
+    needs: static
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - debian:12
+          - debian:13
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - fedora:latest
+          - fedora:41
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: unbidden-x86_64-unknown-linux-musl
+          path: ./bin
+      - run: chmod +x ./bin/unbidden
+      - name: ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w ${{ matrix.image }} \
+            sh ci/distro-check.sh /w/bin/unbidden
