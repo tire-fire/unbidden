@@ -34,11 +34,17 @@ jobs:
         run: |
           bin=target/${{ matrix.target }}/release/unbidden
           file "$bin"
-          file "$bin" | grep -q 'statically linked' \
+          # rustc emits a static-PIE, which `file` calls "static-pie linked",
+          # so both spellings count and anything else does not.
+          file "$bin" | grep -qE 'static-pie linked|statically linked' \
             || { echo "not statically linked"; exit 1; }
-          if ldd "$bin" 2>&1 | grep -qv 'not a dynamic executable'; then
-            echo "ldd reports dynamic linkage:"; ldd "$bin"; exit 1
-          fi
+          # ldd prints exactly one of two things for a static binary; any
+          # other output is a shared object the binary needs.
+          out=$(ldd "$bin" 2>&1 || true)
+          case "$out" in
+            *"not a dynamic executable"*|*"statically linked"*) ;;
+            *) echo "ldd reports dynamic linkage:"; echo "$out"; exit 1 ;;
+          esac
       - uses: actions/upload-artifact@v4
         with:
           name: unbidden-${{ matrix.target }}

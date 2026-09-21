@@ -54,6 +54,9 @@ pub struct Root {
     base: PathBuf,
     live: bool,
     confined: bool,
+    /// Home directories, once discovered. A symlink inside one of these whose
+    /// target leaves it is not followed — see `escaping_link`.
+    homes: std::sync::OnceLock<Vec<PathBuf>>,
 }
 
 impl Root {
@@ -78,7 +81,13 @@ impl Root {
                  without it a symlink in the image can escape to the host filesystem",
             ));
         }
-        Ok(Root { fd, base: path.to_path_buf(), live, confined })
+        Ok(Root {
+            fd,
+            base: path.to_path_buf(),
+            live,
+            confined,
+            homes: std::sync::OnceLock::new(),
+        })
     }
 
     /// True on a running system. Collectors reading /proc, /sys or D-Bus must
@@ -112,8 +121,67 @@ impl Root {
         }
     }
 
+    /// Declares the home directories found on this root. Set once, before
+    /// any collector runs, so the symlink rule below applies to every read.
+    pub fn set_homes(&self, homes: Vec<PathBuf>) {
+        let _ = self.homes.set(homes);
+    }
+
+    pub fn homes(&self) -> &[PathBuf] {
+        self.homes.get().map(|v| v.as_slice()).unwrap_or(&[])
+    }
+
+    /// A symlink sitting in someone's home whose target leaves that home.
+    ///
+    /// Links within one home are ordinary — every dotfile manager makes them,
+    /// and following them is how the real file gets scanned. A link that
+    /// leaves is the confused-deputy case: the account that can write the
+    /// link need not be able to read what it points at, but this process
+    /// can, and whatever it reads is printed in a report. `~/.bashrc ->
+    /// /etc/shadow` would put password hashes in the JSON.
+    ///
+    /// The check lives here rather than in a collector because a collector
+    /// that reaches past its own helper would otherwise silently opt out.
+    pub fn escaping_link(&self, rel: &Path) -> Option<PathBuf> {
+        let homes = self.homes.get()?;
+        if homes.is_empty() {
+            return None;
+        }
+        let link = self.stat(rel).ok()?;
+        if !link.is_symlink {
+            return None;
+        }
+        // Homes are recorded as they sit inside the root; every path here is
+        // compared in the same coordinates so an offline root lines up.
+        let here = self.rel(&self.abs(rel));
+        let home = homes
+            .iter()
+            .map(|h| self.rel(h))
+            .filter(|h| here.starts_with(h))
+            .max_by_key(|h| h.as_os_str().len())?;
+
+        let target = self.read_link(rel).ok()?;
+        let resolved = if target.is_absolute() {
+            self.rel(&target)
+        } else {
+            self.rel(&self.abs(rel).parent()?.join(&target))
+        };
+        (!resolved.starts_with(&home)).then_some(target)
+    }
+
     pub fn open(&self, rel: impl AsRef<Path>) -> io::Result<File> {
-        Ok(File::from(self.open_raw(rel.as_ref(), OFlags::RDONLY)?))
+        let rel = rel.as_ref();
+        if let Some(target) = self.escaping_link(rel) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is a symlink out of its owner's home to {};                      recorded as a link, not followed",
+                    rel.display(),
+                    target.display()
+                ),
+            ));
+        }
+        Ok(File::from(self.open_raw(rel, OFlags::RDONLY)?))
     }
 
     /// Opens without following a final-component symlink. Use where the
@@ -370,6 +438,43 @@ mod tests {
             Err(e) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
             Ok(_) => panic!("a no-follow stat resolved out of the scan root"),
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_symlink_out_of_a_home_is_recorded_but_never_read() {
+        // A planted link turns the scanner into an exfiltration channel: the
+        // account that writes ~/.bashrc need not be able to read /etc/shadow,
+        // but this process can, and whatever it reads lands in a report.
+        let dir = tmpdir("escaping");
+        std::fs::create_dir_all(dir.join("home/alice/dotfiles")).unwrap();
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc/shadow"), b"root:$6$SALT$HASH:19000:0:99999:7:::\n").unwrap();
+        std::fs::write(dir.join("home/alice/dotfiles/bashrc"), b"export EDITOR=vi\n").unwrap();
+        std::os::unix::fs::symlink("/etc/shadow", dir.join("home/alice/.bashrc")).unwrap();
+        std::os::unix::fs::symlink("/home/alice/dotfiles/bashrc", dir.join("home/alice/.profile")).unwrap();
+
+        let root = Root::at(&dir).unwrap();
+
+        // Before the homes are known nothing is restricted, which is why the
+        // scan declares them before any collector runs.
+        assert!(root.escaping_link(Path::new("home/alice/.bashrc")).is_none());
+
+        root.set_homes(vec![PathBuf::from("/home/alice")]);
+        assert_eq!(
+            root.escaping_link(Path::new("home/alice/.bashrc")),
+            Some(PathBuf::from("/etc/shadow"))
+        );
+        let err = root.read("home/alice/.bashrc").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        // A link inside the same home is how every dotfile manager works and
+        // is still followed.
+        assert!(root.escaping_link(Path::new("home/alice/.profile")).is_none());
+        assert_eq!(root.read("home/alice/.profile").unwrap(), b"export EDITOR=vi\n");
+
+        // And a link outside any home is not this rule's business.
+        assert!(root.escaping_link(Path::new("etc/shadow")).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

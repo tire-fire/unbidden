@@ -18,6 +18,12 @@ use crate::scan::Scan;
 pub fn enrich(root: &Root, scan: &mut Scan) {
     normalise_targets(root, &mut scan.entries);
 
+    // Before the paths are gathered, so the interpreters and sourced files
+    // these name get their provenance resolved in the same pass as everything
+    // else rather than needing a second one.
+    let chained = interpreter_chain(root, &scan.entries);
+    scan.entries.extend(chained);
+
     let wanted = paths_to_resolve(root, &scan.entries);
     let answers = provenance::resolve(root, &wanted);
 
@@ -68,18 +74,32 @@ fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
 }
 
 fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answers) {
-    let source_rel = root.rel(&entry.source);
-    let verdict = answers.get(&source_rel).cloned().unwrap_or(Provenance::Unknown);
+    // An entry synthesised out of another one — a preloaded library, a
+    // script's interpreter — is a row *about its target*. It keeps the
+    // carrier's source so the location rules judge the right file, but the
+    // package verdict has to be the target's, or an ordinary /bin/sh reached
+    // through an unpackaged crontab would itself read as unpackaged.
+    let subject = if entry.raw.contains_key("declared_by_entry") {
+        entry.target_path.clone().map(|t| root.rel(&t))
+    } else {
+        None
+    };
+    let source_rel = subject.unwrap_or_else(|| root.rel(&entry.source));
 
-    match &verdict {
-        Provenance::Unpackaged => entry.flag(Flag::Unpackaged),
-        Provenance::Packaged { integrity: Integrity::Modified, .. } => entry.flag(Flag::PackagedModified),
-        Provenance::Packaged { integrity: Integrity::ConffileModified, .. } => {
-            entry.flag(Flag::ConffileModified)
+    // A path this pass was not asked about keeps whatever an earlier pass
+    // decided. Writing Unknown over a resolved verdict would make a later,
+    // narrower pass undo the work of the first one.
+    if let Some(verdict) = answers.get(&source_rel).cloned() {
+        match &verdict {
+            Provenance::Unpackaged => entry.flag(Flag::Unpackaged),
+            Provenance::Packaged { integrity: Integrity::Modified, .. } => entry.flag(Flag::PackagedModified),
+            Provenance::Packaged { integrity: Integrity::ConffileModified, .. } => {
+                entry.flag(Flag::ConffileModified)
+            }
+            _ => {}
         }
-        _ => {}
+        entry.provenance = verdict;
     }
-    entry.provenance = verdict;
 
     // The target is a separate file with a separate verdict, and an entry
     // whose backing file is packaged can still point at something that is
@@ -230,7 +250,7 @@ fn standard_roots(kind: Kind) -> &'static [&'static str] {
             "/usr/lib/modules-load.d/",
             "/proc/modules",
         ],
-        Kind::XdgAutostart => &["/etc/xdg/autostart/", "/.config/autostart/"],
+        Kind::XdgAutostart => &["/etc/xdg/autostart/"],
         Kind::Cron => &["/etc/crontab", "/etc/cron", "/etc/anacrontab", "/var/spool/cron"],
         _ => &[],
     }
@@ -241,9 +261,20 @@ fn apply_location(root: &Root, entry: &mut Entry) {
     if roots.is_empty() {
         return;
     }
+    // Per-user autostart lives under each home, so the acceptable prefixes
+    // are built from the homes actually found rather than matched loosely.
+    let mut acceptable: Vec<String> = roots.iter().map(|r| (*r).to_string()).collect();
+    if entry.kind == Kind::XdgAutostart {
+        for home in root.homes() {
+            acceptable.push(format!("{}/.config/autostart/", Path::new("/").join(root.rel(home)).display()));
+        }
+    }
+    // A prefix test, not a substring one. `contains` let an attacker keep the
+    // flag off by staging under any directory whose name happened to hold the
+    // search path — /home/alice/etc/systemd/evil.service passed it.
     let inside = |p: &Path| {
         let text = p.to_string_lossy().into_owned();
-        roots.iter().any(|r| text.contains(r))
+        acceptable.iter().any(|r| text.starts_with(r.as_str()))
     };
     // Paths are judged as they sit inside the scan root, so an offline image
     // does not inherit the analyst's own directory names.
@@ -353,6 +384,146 @@ fn preload_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
                 e.note("declared_by_entry", &carrier.id);
                 out.push(e);
             }
+        }
+    }
+    out
+}
+
+// -------------------------------------------------- the interpreter chain ----
+
+/// Bytes read from a referenced script. The shebang is the first line; the
+/// rest is the window in which a second file the script hands control to is
+/// still the obvious next link rather than a guess about control flow.
+const SCRIPT_HEAD: usize = 8 * 1024;
+
+/// §5's third deep finding — "scripts referenced by entries but living
+/// outside any package" — reduced to the part nothing else answers. An
+/// entry's own target is resolved above: a cron job running an unpackaged
+/// script already reports `Unpackaged` and a `target_provenance` note. The
+/// link after that one is unreported. A script can be packaged, unmodified
+/// and still name `/opt/python3.11/bin/python` in its shebang, or source a
+/// second file out of /tmp; the executable an entry points at is only the
+/// first hop, and `target_path` here is the next one so that the pass above
+/// resolves its provenance too.
+///
+/// It is enrichment rather than a collector because "referenced by entries"
+/// is exactly the relation §14.4 forbids a collector from seeing. Nothing is
+/// traversed — every file read here was already named by an entry — so the
+/// `--deep` gate §5 puts on this finding buys nothing and is not applied.
+///
+/// One hop, and only where the path is written out in full. A `source
+/// "$DIR/x"`, a relative interpreter, or anything else the shell would have
+/// to expand is left alone rather than guessed at, and nothing recurses: the
+/// entries this emits are not themselves followed.
+fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut out = Vec::new();
+    // Keyed on the entry id's own inputs, so that two entries reaching one
+    // script — an init script and the rc2.d symlink enabling it — cannot
+    // produce the same id twice.
+    let mut seen: BTreeSet<(Kind, PathBuf, String)> = BTreeSet::new();
+
+    for carrier in entries {
+        let script = match &carrier.target_path {
+            Some(target) => root.rel(target),
+            None => root.rel(&carrier.source),
+        };
+        // Stat before opening: a named pipe where a script is expected would
+        // block this pass forever, and a directory or device node is not a
+        // script. Resolving the link is deliberate, because the kernel reads
+        // the shebang of whatever the link points at, and the root handle
+        // keeps that resolution inside the scan root.
+        if !matches!(root.stat_follow(&script), Ok(m) if m.is_file) {
+            continue;
+        }
+        let Ok((head, _)) = root.read_capped(&script, SCRIPT_HEAD) else { continue };
+        // No shebang, no script. It also keeps this off the ELF binaries most
+        // entries point at, where bytes that read like `exec /tmp/x` are a
+        // coincidence of the file's data rather than a command.
+        let Some(after) = head.strip_prefix(b"#!") else { continue };
+        let first = &after[..after.iter().position(|b| *b == b'\n').unwrap_or(after.len())];
+
+        let mut links: Vec<(&str, Vec<u8>)> = Vec::new();
+        links.extend(interpreter_of(first).map(|i| ("shebang", i)));
+        links.extend(handed_off(&head));
+
+        for (via, referenced) in links {
+            let name = String::from_utf8_lossy(&referenced).into_owned();
+            if !seen.insert((carrier.kind, carrier.source.clone(), name.clone())) {
+                continue;
+            }
+            // The kind and source are the carrier's: the mechanism that makes
+            // this code run is still cron or systemd, and the file the fact
+            // hangs off is the one whose own location and ownership the
+            // operator is already being shown.
+            let mut e = Entry::new(carrier.kind, &carrier.source, &name);
+            e.rekey(&root.rel(&carrier.source));
+            let path = Path::new(std::ffi::OsStr::from_bytes(&referenced));
+            if path.is_absolute() {
+                e.target_path = Some(root.abs(root.rel(path)));
+            } else if let Some(found) = resolve_bare_command(root, carrier.kind, &referenced) {
+                // `#!/usr/bin/env python3` names env; the interpreter is the
+                // argument, and which python3 answers is a question about the
+                // search path — the same question a bare ExecStart asks.
+                e.note("target_resolved_from", "search path");
+                e.target_path = Some(found);
+            }
+            if std::str::from_utf8(&referenced).is_err() {
+                e.flag(Flag::EncodingAnomaly);
+                e.note("referenced_raw_hex", crate::entry::hex(&referenced));
+            }
+            e.command = Some(referenced);
+            e.trigger = carrier.trigger;
+            e.principal = carrier.principal.clone();
+            e.enabled = carrier.enabled;
+            e.owner_uid = carrier.owner_uid;
+            e.mode = carrier.mode;
+            e.mtime = carrier.mtime;
+            e.note("chain", via);
+            e.note("chain_from", root.abs(&script).to_string_lossy());
+            e.note("declared_by_entry", &carrier.id);
+            out.push(e);
+        }
+    }
+    out
+}
+
+/// The program a shebang line actually starts. `#!/usr/bin/env python3`
+/// starts python3 rather than env, and env's own options and `KEY=VALUE`
+/// arguments come between the two.
+fn interpreter_of(line: &[u8]) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut words = line.split(|b: &u8| b.is_ascii_whitespace()).filter(|w| !w.is_empty());
+    let first = words.next()?;
+    if Path::new(std::ffi::OsStr::from_bytes(first)).file_name() != Some(std::ffi::OsStr::new("env"))
+    {
+        return Some(first.to_vec());
+    }
+    Some(words.find(|w| w[0] != b'-' && !w.contains(&b'=')).unwrap_or(first).to_vec())
+}
+
+/// Where a shell script hands control on: `source` and `.` pull a second file
+/// into the running shell, `exec` replaces the shell with one. Only a literal
+/// absolute path counts, because a word carrying a `$` is the shell's to
+/// expand and this pass does not run shells.
+fn handed_off(head: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+    let mut out = Vec::new();
+    for line in head.split(|b| *b == b'\n').skip(1) {
+        let mut words = line.split(|b: &u8| b.is_ascii_whitespace()).filter(|w| !w.is_empty());
+        let Some(verb) = words.next() else { continue };
+        let via = if verb == b"." || verb == b"source" {
+            "source"
+        } else if verb == b"exec" {
+            "exec"
+        } else {
+            continue;
+        };
+        let Some(word) = words.next() else { continue };
+        let word: Vec<u8> = word.iter().copied().filter(|b| *b != b'"' && *b != b'\'').collect();
+        if word.first() == Some(&b'/') && !word.contains(&b'$') {
+            out.push((via, word));
         }
     }
     out
@@ -507,6 +678,166 @@ mod tests {
         assert!(profile.provenance.is_packaged_intact());
         assert!(crate::render::suppressed(profile));
         assert!(!crate::render::suppressed(preload));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Entries whose targets are scripts, so the chain pass has something to
+    /// read past. Every one of them is a cron job, because the mechanism is
+    /// not what is under test — the link after the target is.
+    struct Referencing;
+
+    impl Collector for Referencing {
+        fn name(&self) -> &'static str {
+            "referencing"
+        }
+
+        fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
+            let jobs = [
+                ("backup", "/usr/local/bin/backup.sh"),
+                ("report", "/usr/local/bin/report.py"),
+                ("collect", "/usr/local/bin/collect"),
+                ("weird", "/usr/local/bin/weird.sh"),
+                // A named pipe where a script is expected, and a binary that
+                // is not a script at all.
+                ("pipe", "/usr/local/bin/pipe"),
+                ("elf", "/usr/bin/true"),
+            ];
+            jobs.iter()
+                .map(|(job, target)| {
+                    let mut e = cx.entry(Kind::Cron, format!("etc/cron.d/{job}"), *job);
+                    e.command = Some(format!("{target} --nightly").into_bytes());
+                    e.target_path = Some(PathBuf::from(target));
+                    e.trigger = Trigger::Schedule;
+                    e.principal = Some("root".to_string());
+                    e
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn the_interpreter_a_referenced_script_names_is_resolved_in_its_own_right() {
+        let dir = std::env::temp_dir().join(format!("unbidden-chain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let write = |rel: &str, body: &[u8]| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+
+        for job in ["backup", "report", "collect", "weird", "pipe", "elf"] {
+            write(&format!("etc/cron.d/{job}"), b"@daily root x\n");
+        }
+        write("bin/sh", b"\x7fELF");
+        write("usr/local/bin/backup.sh", b"#!/bin/sh\n. /tmp/stage.sh\nexec /opt/tool --now\n");
+        write("usr/local/bin/report.py", b"#!/usr/bin/env python3 -u\nprint(1)\n");
+        write("usr/local/bin/python3", b"\x7fELF");
+        write("usr/local/bin/collect", b"#!/opt/python3.11/bin/python\n");
+        write("usr/local/bin/weird.sh", b"#!/opt/\xff\xfe/py\n");
+        // An ELF whose bytes happen to spell a command: no shebang, so it is
+        // never read as a script.
+        write("usr/bin/true", b"\x7fELF\x02\x01exec /tmp/planted\n");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            dir.join("usr/local/bin/pipe"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o644),
+            0,
+        )
+        .unwrap();
+
+        // A package owns the cron files, the shell and the collect script, so
+        // that Unpackaged on a chained entry can only have come from what the
+        // script itself named.
+        let owned = ["etc/cron.d/backup", "etc/cron.d/collect", "bin/sh", "usr/local/bin/collect"];
+        write("var/lib/dpkg/status", b"Package: backup-tools\nStatus: install ok installed\nVersion: 1.2\n\n");
+        write(
+            "var/lib/dpkg/info/backup-tools.list",
+            owned.map(|p| format!("/{p}\n")).concat().as_bytes(),
+        );
+        let sums: String = owned
+            .iter()
+            .map(|p| {
+                use md5::Digest as _;
+                let mut h = md5::Md5::new();
+                h.update(std::fs::read(dir.join(p)).unwrap());
+                format!("{}  {p}\n", crate::entry::hex(&h.finalize()))
+            })
+            .collect();
+        write("var/lib/dpkg/info/backup-tools.md5sums", sums.as_bytes());
+
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Referencing)];
+        let mut scan = scan::run(&root, &Options { deep: false }, &collectors);
+        enrich(&root, &mut scan);
+
+        let mut chained: Vec<(&str, &str)> = scan
+            .entries
+            .iter()
+            .filter_map(|e| Some((e.name.as_str(), e.raw.get("chain")?.as_str())))
+            .collect();
+        chained.sort_unstable();
+        assert_eq!(
+            chained,
+            [
+                ("/bin/sh", "shebang"),
+                ("/opt/python3.11/bin/python", "shebang"),
+                ("/opt/tool", "exec"),
+                ("/opt/\u{fffd}\u{fffd}/py", "shebang"),
+                ("/tmp/stage.sh", "source"),
+                ("python3", "shebang"),
+            ],
+            "a fifo must not be read and a file with no shebang is not a script"
+        );
+
+        // The finding: a packaged, unmodified cron file runs a packaged,
+        // unmodified script, and the interpreter that script names is owned
+        // by nothing.
+        let job = find(&scan, "collect");
+        assert!(crate::render::suppressed(job), "the job itself is ordinary: {:?}", job.flags);
+        let hijack = find(&scan, "/opt/python3.11/bin/python");
+        assert_eq!(hijack.kind, Kind::Cron, "the mechanism that runs it is still cron");
+        assert_eq!(hijack.source, dir.join("etc/cron.d/collect"));
+        assert_eq!(hijack.raw["chain_from"], dir.join("usr/local/bin/collect").to_string_lossy());
+        assert_eq!(hijack.raw["declared_by_entry"], job.id);
+        // The row is about the interpreter, so its own verdict is the
+        // interpreter's — no separate target_provenance note is needed.
+        assert_eq!(hijack.provenance, Provenance::Unpackaged);
+        assert_eq!(hijack.trigger, Trigger::Schedule, "it fires when its carrier does");
+        assert_eq!(hijack.principal.as_deref(), Some("root"));
+        assert!(hijack.has_flag(Flag::TargetMissing));
+        assert!(!crate::render::suppressed(hijack), "which is the whole point of the entry");
+
+        // The ordinary case is recorded and then hidden by provenance rather
+        // than by a list of interpreter names.
+        let sh = find(&scan, "/bin/sh");
+        assert_eq!(sh.target_path, Some(dir.join("bin/sh")));
+        assert!(
+            matches!(&sh.provenance, Provenance::Packaged { package, .. } if package == "backup-tools"),
+            "got {:?}",
+            sh.provenance
+        );
+        assert!(crate::render::suppressed(sh), "an intact /bin/sh is noise: {:?}", sh.flags);
+
+        // `env` names the argument, not itself, and which python3 that is
+        // depends on the search path.
+        let env = find(&scan, "python3");
+        assert_eq!(env.target_path, Some(dir.join("usr/local/bin/python3")));
+        assert_eq!(env.raw["target_resolved_from"], "search path");
+
+        assert!(find(&scan, "/tmp/stage.sh").has_flag(Flag::TargetMissing));
+        assert_eq!(find(&scan, "/opt/tool").target_path, Some(dir.join("opt/tool")));
+        assert!(
+            find(&scan, "/opt/\u{fffd}\u{fffd}/py").has_flag(Flag::EncodingAnomaly),
+            "a shebang that is not UTF-8 is evidence, not a crash"
+        );
+
+        let mut ids: Vec<&String> = scan.entries.iter().map(|e| &e.id).collect();
+        ids.sort_unstable();
+        let total = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), total, "every synthesised entry needs its own identity");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

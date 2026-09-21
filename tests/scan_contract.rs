@@ -71,8 +71,9 @@ fn build_tree(dir: &Path) {
     std::os::unix::fs::symlink("../init.d/legacy", dir.join("etc/rc2.d/S20legacy")).unwrap();
 
     // A package database, so provenance has something to say.
-    w("var/lib/dpkg/status", b"Package: openssh-server\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1:9.2p1-2\nConffiles:\n /etc/ssh/sshd_config 00000000000000000000000000000000\n\n");
+    w("var/lib/dpkg/status", b"Package: openssh-server\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1:9.2p1-2\nConffiles:\n /etc/ssh/sshd_config 00000000000000000000000000000000\n\nPackage: dash\nStatus: install ok installed\nArchitecture: amd64\nVersion: 0.5.12-2\n\n");
     w("var/lib/dpkg/info/openssh-server.list", b"/usr/lib/systemd/system/ssh.service\n/etc/ssh/sshd_config\n");
+    w("var/lib/dpkg/info/dash.list", b"/bin/sh\n");
     let digest = {
         use md5::Digest as _;
         let mut h = md5::Md5::new();
@@ -80,12 +81,27 @@ fn build_tree(dir: &Path) {
         format!("{:x}", h.finalize())
     };
     w("var/lib/dpkg/info/openssh-server.md5sums", format!("{digest}  usr/lib/systemd/system/ssh.service\n").as_bytes());
+    let sh_digest = {
+        use md5::Digest as _;
+        let mut h = md5::Md5::new();
+        h.update(b"ELF-ish\n");
+        format!("{:x}", h.finalize())
+    };
+    w("var/lib/dpkg/info/dash.md5sums", format!("{sh_digest}  bin/sh\n").as_bytes());
 
     // Targets that exist, so TargetMissing means something when it appears.
     for bin in ["usr/sbin/sshd", "usr/bin/nm-applet", "usr/local/bin/agent"] {
         w(bin, b"#!/bin/sh\n");
         exec(bin);
     }
+
+    // The interpreter every script in this tree names. Packaged and intact,
+    // so the chained rows it produces are suppressed — which is the half of
+    // interpreter chaining that has to stay quiet. /usr/sbin/legacyd, which
+    // the init script execs, is owned by nobody and is the half that must
+    // not be.
+    w("bin/sh", b"ELF-ish\n");
+    exec("bin/sh");
 }
 
 fn scan_tree(dir: &Path) -> Scan {

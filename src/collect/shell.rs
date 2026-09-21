@@ -947,7 +947,12 @@ mod tests {
         let b = by_name(&scan, Kind::ShellProfile, ".bashrc");
         assert_eq!(b.raw["symlink_target"], "/tmp/payload", "the link is the finding");
         assert_eq!(b.raw["home_symlink_target"], "../srv/carol");
-        assert_eq!(b.raw["env.LD_PRELOAD"], "/tmp/x.so", "and it is still read through");
+        // The link leaves the home, so it is recorded and not followed. An
+        // account that can write this link need not be able to read what it
+        // points at; following it would let the report carry the contents of
+        // any file on the host.
+        assert!(!b.raw.contains_key("env.LD_PRELOAD"), "a link out of the home is not read through");
+        assert!(b.raw["unreadable"].contains("symlink out of its owner's home"));
 
         let p = by_name(&scan, Kind::ShellProfile, ".profile");
         assert_eq!(p.raw["symlink_target"], "/tmp/gone");

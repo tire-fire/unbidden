@@ -70,6 +70,7 @@ impl<'a> Ctx<'a> {
             Err(_) => {}
         }
 
+
         match self.root.read_capped(rel, cap) {
             Ok((bytes, truncated)) => {
                 // A read that hit its cap is not a read that failed. Folding
@@ -255,6 +256,8 @@ pub struct Options {
 
 pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Scan {
     let users = users::discover(root);
+    // Every read from here on is subject to the escaping-symlink rule.
+    root.set_homes(users.iter().filter(|u| u.has_real_home()).map(|u| u.home.clone()).collect());
     let mut results: Vec<(CollectorStatus, Vec<Entry>)> = Vec::new();
 
     std::thread::scope(|scope| {

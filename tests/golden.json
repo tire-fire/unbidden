@@ -96,6 +96,36 @@
       "trigger": "boot"
     },
     {
+      "command": "/bin/sh",
+      "command_utf8": true,
+      "enabled": "disabled",
+      "flags": [],
+      "id": "ef74f67a50c15e275741c8b75922e82b8750553065639bdf924ea06951778f91",
+      "kind": "systemd_unit",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "/bin/sh",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "integrity": "intact",
+        "package": "dash",
+        "verdict": "packaged",
+        "version": "0.5.12-2"
+      },
+      "raw": {
+        "chain": "shebang",
+        "chain_from": "<ROOT>/usr/sbin/sshd",
+        "declared_by_entry": "e2444ea235d818967426239368142bc3d5aa66617598334fc2bd7f2e703318ea"
+      },
+      "source": "<ROOT>/usr/lib/systemd/system/ssh.service",
+      "source_utf8": true,
+      "target_path": "<ROOT>/bin/sh",
+      "target_path_utf8": true,
+      "target_sha256": "d51a09c3d70de62a8740a60ddbfb1bb7b547e41ce2a53f931030db62f74a4d11",
+      "trigger": "boot"
+    },
+    {
       "command": "/usr/sbin/sshd -D",
       "command_utf8": true,
       "enabled": "disabled",
@@ -163,6 +193,36 @@
       "trigger": "schedule"
     },
     {
+      "command": "/bin/sh",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [],
+      "id": "a585d169118e4188e2528f94f79dfbf428949adb2a4d76fcafd0350f0dae2062",
+      "kind": "cron",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "/bin/sh",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "integrity": "intact",
+        "package": "dash",
+        "verdict": "packaged",
+        "version": "0.5.12-2"
+      },
+      "raw": {
+        "chain": "shebang",
+        "chain_from": "<ROOT>/usr/local/bin/agent",
+        "declared_by_entry": "c5191ce3ff436ee3e673abd33a58e035d00e6d7957266ff86702ba02318b3b0e"
+      },
+      "source": "<ROOT>/etc/cron.d/agent",
+      "source_utf8": true,
+      "target_path": "<ROOT>/bin/sh",
+      "target_path_utf8": true,
+      "target_sha256": "d51a09c3d70de62a8740a60ddbfb1bb7b547e41ce2a53f931030db62f74a4d11",
+      "trigger": "boot"
+    },
+    {
       "command": "/usr/local/bin/agent --daemon",
       "command_utf8": true,
       "enabled": "enabled",
@@ -190,6 +250,36 @@
       "target_path_utf8": true,
       "target_sha256": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf",
       "trigger": "boot"
+    },
+    {
+      "command": "/bin/sh",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [],
+      "id": "b2022ab9f68decb8befcf267ba2be8620cb5a72dc5165d0ae987d95ed85f540a",
+      "kind": "cron",
+      "mode": 493,
+      "mtime": "<normalised>",
+      "name": "/bin/sh",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "integrity": "intact",
+        "package": "dash",
+        "verdict": "packaged",
+        "version": "0.5.12-2"
+      },
+      "raw": {
+        "chain": "shebang",
+        "chain_from": "<ROOT>/etc/cron.daily/logrotate",
+        "declared_by_entry": "8813dafbf1bdd2b25d05fe382ac851e8e9886ff0577dc0f0955e576183ca31ac"
+      },
+      "source": "<ROOT>/etc/cron.daily/logrotate",
+      "source_utf8": true,
+      "target_path": "<ROOT>/bin/sh",
+      "target_path_utf8": true,
+      "target_sha256": "d51a09c3d70de62a8740a60ddbfb1bb7b547e41ce2a53f931030db62f74a4d11",
+      "trigger": "schedule"
     },
     {
       "command": null,
@@ -245,6 +335,36 @@
       "target_path": null,
       "target_sha256": "86ef26c7e2e140755aa1f87b7afa91f90ac9fecb7d42781c16d50f45c64358c7",
       "trigger": "schedule"
+    },
+    {
+      "command": "/bin/sh",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [],
+      "id": "7c2536c5a1ce1769a4ad0f79a7051a11dab0bc7689436f3e1eaf618011647b9b",
+      "kind": "xdg_autostart",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "/bin/sh",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "integrity": "intact",
+        "package": "dash",
+        "verdict": "packaged",
+        "version": "0.5.12-2"
+      },
+      "raw": {
+        "chain": "shebang",
+        "chain_from": "<ROOT>/usr/bin/nm-applet",
+        "declared_by_entry": "5b7b87fb9c7a4e3814d1d6a2a1615d4ae6318e7fe63ae2f37c795daa79ef25d4"
+      },
+      "source": "<ROOT>/etc/xdg/autostart/nm-applet.desktop",
+      "source_utf8": true,
+      "target_path": "<ROOT>/bin/sh",
+      "target_path_utf8": true,
+      "target_sha256": "d51a09c3d70de62a8740a60ddbfb1bb7b547e41ce2a53f931030db62f74a4d11",
+      "trigger": "login"
     },
     {
       "command": "/usr/bin/nm-applet --indicator",
@@ -457,6 +577,36 @@
       "trigger": "device-event"
     },
     {
+      "command": "/bin/sh",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [],
+      "id": "aa30a1b18a907caf2e09a25fa58d0f373fd508c1c26378a4c5badaecf1116899",
+      "kind": "rc_local",
+      "mode": 493,
+      "mtime": "<normalised>",
+      "name": "/bin/sh",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "integrity": "intact",
+        "package": "dash",
+        "verdict": "packaged",
+        "version": "0.5.12-2"
+      },
+      "raw": {
+        "chain": "shebang",
+        "chain_from": "<ROOT>/etc/rc.local",
+        "declared_by_entry": "4a26ed564fb2b3a8cbc5667f455680f449f6fba970d129a134b7ef4ecd9f4d13"
+      },
+      "source": "<ROOT>/etc/rc.local",
+      "source_utf8": true,
+      "target_path": "<ROOT>/bin/sh",
+      "target_path_utf8": true,
+      "target_sha256": "d51a09c3d70de62a8740a60ddbfb1bb7b547e41ce2a53f931030db62f74a4d11",
+      "trigger": "boot"
+    },
+    {
       "command": null,
       "enabled": "enabled",
       "flags": [
@@ -483,6 +633,66 @@
       "target_path": "<ROOT>/etc/rc.local",
       "target_path_utf8": true,
       "target_sha256": "fa38914a4be4c628553682f236c9ad750cc13eee016e78afdaa9d18b736a0908",
+      "trigger": "boot"
+    },
+    {
+      "command": "/bin/sh",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [],
+      "id": "c4dfe514be50bfe40ba0b728b89a5c19d02bd564a38b4eee0477abe8c4ab376b",
+      "kind": "sysv_init",
+      "mode": 493,
+      "mtime": "<normalised>",
+      "name": "/bin/sh",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "integrity": "intact",
+        "package": "dash",
+        "verdict": "packaged",
+        "version": "0.5.12-2"
+      },
+      "raw": {
+        "chain": "shebang",
+        "chain_from": "<ROOT>/etc/init.d/legacy",
+        "declared_by_entry": "e650d94785ef89d40980ea99c87e4c9b850369423f15d89438059099eeb41a9c"
+      },
+      "source": "<ROOT>/etc/init.d/legacy",
+      "source_utf8": true,
+      "target_path": "<ROOT>/bin/sh",
+      "target_path_utf8": true,
+      "target_sha256": "d51a09c3d70de62a8740a60ddbfb1bb7b547e41ce2a53f931030db62f74a4d11",
+      "trigger": "boot"
+    },
+    {
+      "command": "/usr/sbin/legacyd",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "529166e70fb3754402e64b592b15a0ed85f6576add6785eda95062f05e61cb44",
+      "kind": "sysv_init",
+      "mode": 493,
+      "mtime": "<normalised>",
+      "name": "/usr/sbin/legacyd",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "chain": "exec",
+        "chain_from": "<ROOT>/etc/init.d/legacy",
+        "declared_by_entry": "e650d94785ef89d40980ea99c87e4c9b850369423f15d89438059099eeb41a9c"
+      },
+      "source": "<ROOT>/etc/init.d/legacy",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/sbin/legacyd",
+      "target_path_utf8": true,
+      "target_sha256": null,
       "trigger": "boot"
     },
     {
@@ -669,12 +879,11 @@
       "owner_uid": "<normalised>",
       "principal": "root",
       "provenance": {
-        "verdict": "unknown"
+        "verdict": "unpackaged"
       },
       "raw": {
         "declared_by_entry": "c5191ce3ff436ee3e673abd33a58e035d00e6d7957266ff86702ba02318b3b0e",
         "declared_in": "<ROOT>/etc/cron.d/agent",
-        "target_provenance": "unpackaged",
         "variable": "LD_PRELOAD"
       },
       "source": "<ROOT>/etc/cron.d/agent",
@@ -700,7 +909,7 @@
       "owner_uid": "<normalised>",
       "principal": null,
       "provenance": {
-        "verdict": "unknown"
+        "verdict": "unpackaged"
       },
       "raw": {
         "target_provenance": "unpackaged"
@@ -728,12 +937,11 @@
       "owner_uid": "<normalised>",
       "principal": "root",
       "provenance": {
-        "verdict": "unknown"
+        "verdict": "unpackaged"
       },
       "raw": {
         "declared_by_entry": "b0f8e004396441717f2e1f9266b3c1a16f1618bd4e4192ba6a8e106ac14f23c2",
         "declared_in": "<ROOT>/etc/systemd/system/telemetry.service",
-        "target_provenance": "unpackaged",
         "variable": "LD_PRELOAD"
       },
       "source": "<ROOT>/etc/systemd/system/telemetry.service",
@@ -759,12 +967,11 @@
       "owner_uid": "<normalised>",
       "principal": "alice",
       "provenance": {
-        "verdict": "unknown"
+        "verdict": "unpackaged"
       },
       "raw": {
         "declared_by_entry": "a407d49e8194fd3dc603771af1f02980c11660449a8c519c2359394da3395c1f",
         "declared_in": "<ROOT>/home/alice/.bashrc",
-        "target_provenance": "unpackaged",
         "variable": "LD_PRELOAD"
       },
       "source": "<ROOT>/home/alice/.bashrc",
@@ -780,8 +987,7 @@
       "enabled": "unknown",
       "flags": [
         "degraded-enablement",
-        "unpackaged",
-        "target-missing"
+        "unpackaged"
       ],
       "id": "e8a378fd85ee3301ebdf6a62eed8fe5f338b42edf1fb23dedf69e42b0266ddfa",
       "kind": "kernel_module",
@@ -797,13 +1003,13 @@
         "directive": "install",
         "loaded_state": "unknown: /proc/modules was not readable",
         "module": "nf_tables",
-        "target_provenance": "unpackaged"
+        "target_provenance": "dash (intact)"
       },
       "source": "<ROOT>/etc/modprobe.d/evil.conf",
       "source_utf8": true,
       "target_path": "<ROOT>/bin/sh",
       "target_path_utf8": true,
-      "target_sha256": null,
+      "target_sha256": "d51a09c3d70de62a8740a60ddbfb1bb7b547e41ce2a53f931030db62f74a4d11",
       "trigger": "boot"
     },
     {
