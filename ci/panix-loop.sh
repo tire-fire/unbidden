@@ -21,8 +21,9 @@ DEAD_IP=127.0.0.1
 DEAD_PORT=9999
 
 BASE=/tmp/panix-baseline.json
-pass=0; fail=0; skip=0
+pass=0; fail=0; skip=0; unreverted=0
 declare -a FAILURES=()
+declare -a PANIX_ISSUES=()
 
 # module → the Entry kind unbidden must report for it.
 mechanism_kind() {
@@ -150,9 +151,13 @@ for m in "${modules[@]}"; do
     fi
 
     if ! timeout 120 bash "$PANIX" --revert "$m" >/tmp/revert.log 2>&1; then
-        echo "   revert failed; resetting is the caller's job"
-        FAILURES+=("$m: PANIX revert failed")
-        fail=$((fail + 1))
+        # PANIX's revert script failing says nothing about unbidden, which
+        # has already reported the mechanism. Recorded, not counted against
+        # the tool under test.
+        echo "   PANIX's own revert failed; the mechanism is still planted"
+        PANIX_ISSUES+=("$m: PANIX revert failed")
+        unreverted=$((unreverted + 1))
+        rebaseline || { echo "re-baseline failed"; exit 1; }
         continue
     fi
 
@@ -171,6 +176,13 @@ for m in "${modules[@]}"; do
         while IFS= read -r line; do
             src=$(echo "$line" | sed -n 's/.*"source":"\([^"]*\)".*/\1/p')
             delta=$(echo "$line" | sed -n 's/.*"delta":"\([a-z]*\)".*/\1/p')
+            case "$src" in
+                /proc/*|/sys/*)
+                    leftover=$((leftover + 1))
+                    echo "     live kernel state moved: $delta $src"
+                    continue
+                    ;;
+            esac
             if [ -e "$src" ]; then
                 leftover=$((leftover + 1))
                 echo "     left on disk by PANIX: $delta $src"
@@ -197,8 +209,13 @@ for m in "${modules[@]}"; do
 done
 
 echo
-echo "== $pass detected and reverted clean, $fail failed, $skip skipped"
+echo "== $pass detected and reverted clean, $fail failed, $skip skipped, $unreverted left planted"
+if [ ${#PANIX_ISSUES[@]} -gt 0 ]; then
+    echo "   PANIX's own limitations, not findings about unbidden:"
+    printf '%s\n' "${PANIX_ISSUES[@]}" | sed 's/^/     /'
+fi
 if [ ${#FAILURES[@]} -gt 0 ]; then
-    printf '%s\n' "${FAILURES[@]}" | sed 's/^/   /'
+    echo "   findings about unbidden:"
+    printf '%s\n' "${FAILURES[@]}" | sed 's/^/     /'
     exit 1
 fi
