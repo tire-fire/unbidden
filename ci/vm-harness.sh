@@ -135,10 +135,12 @@ qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$INSTANCE/overlay.qcow2" 20G
 
 # --- boot --------------------------------------------------------------
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
-SSHOPTS=(-i "$KEY" -p "$PORT" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+# scp spells the port -P and reads -p as "preserve timestamps", so the two
+# cannot share one option array.
+SSHOPTS=(-i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
          -o LogLevel=ERROR -o ConnectTimeout=5)
-vm_ssh() { ssh "${SSHOPTS[@]}" root@127.0.0.1 "$@"; }
-vm_scp() { scp -q "${SSHOPTS[@]}" "$@"; }
+vm_ssh() { ssh -p "$PORT" "${SSHOPTS[@]}" root@127.0.0.1 "$@"; }
+vm_scp() { scp -q -P "$PORT" "${SSHOPTS[@]}" "$@"; }
 
 cleanup() {
     status=$?
@@ -184,7 +186,7 @@ vm_ssh 'chmod +x /usr/local/bin/unbidden /usr/local/bin/*.sh /opt/panix/panix.sh
 
 if [ "$SHELL_ONLY" -eq 1 ]; then
     say "the VM is yours"
-    echo "   ssh ${SSHOPTS[*]} root@127.0.0.1"
+    echo "   ssh -p $PORT ${SSHOPTS[*]} root@127.0.0.1"
     echo "   console: $INSTANCE/console.log"
     echo "   stop it: kill \$(cat $INSTANCE/qemu.pid)"
     exit 0

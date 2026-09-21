@@ -62,10 +62,6 @@ mechanism_kind() {
 
 scan() { "$BIN" --deep --json --all "$@"; }
 
-deltas() { # <delta> — names of entries with that delta
-    grep "\"delta\":\"$1\"" | sed -n 's/.*"kind":"\([a-z_]*\)".*/\1/p'
-}
-
 plant() {
     # PANIX modules differ in whether they take a target. Try the richest
     # form first and fall back, rather than hand-curating 38 invocations.
@@ -86,10 +82,13 @@ if [ ${#modules[@]} -eq 0 ]; then
              suid-backdoor cap-backdoor systemd udev xdg)
 fi
 
+rebaseline() {
+    scan --save "$BASE" > /tmp/panix-baseline.ndjson || return 1
+    echo "   baseline: $(( $(wc -l < /tmp/panix-baseline.ndjson) - 1 )) entries"
+}
+
 echo "== baseline"
-scan --save "$BASE" >/dev/null || { echo "baseline scan failed"; exit 1; }
-baseline_entries=$(scan | tail -n +2 | wc -l)
-echo "   $baseline_entries entries"
+rebaseline || { echo "baseline scan failed"; exit 1; }
 
 for m in "${modules[@]}"; do
     want=$(mechanism_kind "$m")
@@ -130,12 +129,17 @@ for m in "${modules[@]}"; do
     if [ "$residue" -eq 0 ]; then
         echo "   reverted clean"
         [ "$detected" = yes ] && pass=$((pass + 1)) || fail=$((fail + 1))
-    else
+    elif true; then
         echo "   PHANTOM: $residue entries still differ after revert"
         scan --against "$BASE" | tail -n +2 | grep -E '"delta":"(added|changed|removed)"' \
             | sed -n 's/.*"delta":"\([a-z]*\)".*"source":"\([^"]*\)".*/     \1 \2/p' | head -5
         FAILURES+=("$m: $residue entries remain after revert")
         fail=$((fail + 1))
+        # Whatever the revert left behind is now the state of the machine.
+        # Re-baselining stops one module's residue being reported again
+        # against every module that follows it.
+        echo "   re-baselining so the residue is not counted twice"
+        rebaseline || { echo "re-baseline failed"; exit 1; }
     fi
 done
 
