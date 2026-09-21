@@ -6,7 +6,7 @@
 //! user records how it was found. The gap is documented, never papered over.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::root::{READ_CAP, Root};
 
@@ -24,6 +24,27 @@ impl User {
     /// A path under this user's home, as a root-relative path.
     pub fn in_home(&self, rel: &str) -> PathBuf {
         self.home.join(rel)
+    }
+
+    /// Whether this account's home is somewhere a person keeps files.
+    ///
+    /// System accounts are routinely given a home of `/`, `/proc` or
+    /// `/nonexistent`. Treating those as homes makes every file beneath them
+    /// look like it belongs to that account — on this machine the `rtkit`
+    /// account homed at `/proc` flagged all 248 loaded kernel modules as
+    /// owner-mismatched.
+    pub fn has_real_home(&self) -> bool {
+        const SYSTEM_TREES: [&str; 13] = [
+            "/proc", "/sys", "/dev", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc",
+            "/var", "/srv", "/tmp",
+        ];
+        if self.home == Path::new("/root") {
+            return true;
+        }
+        if self.home.components().count() < 3 {
+            return false;
+        }
+        !SYSTEM_TREES.iter().any(|t| self.home.starts_with(t))
     }
 }
 
@@ -109,6 +130,24 @@ fn read_lines(root: &Root, rel: &str) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_system_account_homed_at_a_system_tree_is_not_a_home() {
+        let user = |home: &str| User {
+            name: "x".into(),
+            uid: Some(1),
+            home: PathBuf::from(home),
+            shell: None,
+            source: "passwd",
+        };
+        assert!(user("/home/alice").has_real_home());
+        assert!(user("/root").has_real_home());
+        assert!(user("/export/home/bob").has_real_home());
+        assert!(!user("/").has_real_home(), "bin, daemon, nobody and friends");
+        assert!(!user("/proc").has_real_home(), "rtkit");
+        assert!(!user("/var/lib/mysql").has_real_home());
+        assert!(!user("/srv/http").has_real_home());
+    }
 
     #[test]
     fn passwd_home_and_spool_are_unioned_with_their_sources() {

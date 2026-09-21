@@ -938,7 +938,9 @@ mod tests {
         assert_eq!(user.raw.get("env.LD_PRELOAD").map(String::as_str), Some("/tmp/evil.so"));
         assert_eq!(user.target_path, Some(dir.join("usr/bin/nm-applet")));
         assert_eq!(user.raw.get("exec_field_codes").map(String::as_str), Some("%u"));
-        assert!(user.has_flag(Flag::HiddenPath));
+        // ~/.config/autostart is where per-user autostart is supposed to
+        // live, so being under a dot-directory says nothing about it.
+        assert!(!user.has_flag(Flag::HiddenPath));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

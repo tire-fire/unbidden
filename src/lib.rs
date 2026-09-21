@@ -1,5 +1,8 @@
 pub mod collect;
+pub mod diff;
+pub mod enrich;
 pub mod entry;
+pub mod explain;
 pub mod provenance;
 pub mod render;
 pub mod root;

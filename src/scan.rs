@@ -142,7 +142,9 @@ impl<'a> Ctx<'a> {
             }
         }
 
-        if is_hidden_path(&abs) {
+        // Judged inside the scan root, not on the reported path: an image
+        // mounted under /tmp must not report every file in it as hidden.
+        if is_hidden_path(&Path::new("/").join(rel)) {
             e.flag(Flag::HiddenPath);
         }
         e
@@ -152,7 +154,7 @@ impl<'a> Ctx<'a> {
     fn home_owner(&self, abs: &Path) -> Option<u32> {
         self.users
             .iter()
-            .filter(|u| u.uid.is_some() && abs.starts_with(&u.home) && u.home != Path::new("/"))
+            .filter(|u| u.uid.is_some() && u.has_real_home() && abs.starts_with(&u.home))
             .max_by_key(|u| u.home.as_os_str().len())
             .and_then(|u| u.uid)
     }

@@ -1044,7 +1044,8 @@ mod tests {
         assert_eq!(u.raw["scope"], "user:alice");
         assert_eq!(u.principal.as_deref(), Some("alice"), "a user unit runs as its owner");
         assert_eq!(u.raw["env.LD_PRELOAD"], "/home/alice/.cache/hook.so");
-        assert!(u.has_flag(Flag::HiddenPath));
+        // ~/.config/systemd/user is the documented location for user units.
+        assert!(!u.has_flag(Flag::HiddenPath));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

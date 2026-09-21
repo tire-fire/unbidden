@@ -728,7 +728,8 @@ fn sshd_config_file(
             }
             _ => {
                 e.note("value", lossy(value));
-                e.target_path = Some(bpath(value));
+                // Include takes a list; the first member is the path.
+                e.target_path = words(value).first().map(|w| bpath(w));
             }
         }
         flag_non_utf8(&mut e, line);

@@ -31,12 +31,22 @@ impl Filters {
     }
 }
 
-/// An entry is hidden by default when a package owns it and its contents
-/// still match the manifest. A PackagedModified entry lives inside that
-/// category and must never be suppressed — it is the highest-signal finding
-/// the tool produces.
+/// An entry is hidden by default when a package owns it, its contents still
+/// match the manifest, and nothing else about it was worth remarking on.
+///
+/// A PackagedModified entry lives inside the packaged category and must never
+/// be suppressed — it is the highest-signal finding the tool produces. Nor is
+/// a packaged file that is world-writable or sitting behind a link into /tmp:
+/// the spec's rule is "packaged and intact", and every other flag is a fact
+/// the operator asked to see.
+///
+/// DegradedEnablement is the one exception. It says the enablement answer was
+/// inferred rather than read from systemd, which is a caveat about the row,
+/// not a finding about the host — and on a machine without a running systemd
+/// it is set on every entry, which would suppress nothing at all.
 pub fn suppressed(e: &Entry) -> bool {
-    e.provenance.is_packaged_intact() && !e.has_flag(Flag::PackagedModified) && e.flags.is_empty()
+    e.provenance.is_packaged_intact()
+        && e.flags.iter().all(|f| *f == Flag::DegradedEnablement)
 }
 
 /// Newline-delimited: the header on the first line, then one entry per line,
@@ -297,4 +307,73 @@ mod tests {
         assert!(text.contains("Running unprivileged"));
         assert!(text.contains("Incomplete collectors: cron (1 paths)"));
     }
+}
+
+/// A diff is rendered like a scan with one more column. Unchanged rows are
+/// the noise here, so they are what `--all` reveals.
+pub fn diff_table(
+    w: &mut impl Write,
+    scan: &Scan,
+    diffs: &[crate::diff::Diffed],
+    filters: &Filters,
+    opts: &TableOpts,
+) -> io::Result<()> {
+    banners(w, scan)?;
+
+    let mut shown: Vec<&crate::diff::Diffed> = Vec::new();
+    let mut unchanged = 0usize;
+    for d in diffs.iter().filter(|d| filters.keep(&d.entry)) {
+        if !opts.all && d.delta == crate::diff::Delta::Unchanged {
+            unchanged += 1;
+        } else {
+            shown.push(d);
+        }
+    }
+
+    let kind_w = width_of(shown.iter().map(|d| d.entry.kind.as_str().len()), 12, 20);
+    let name_w = width_of(shown.iter().map(|d| d.entry.name.chars().count()), 12, 34);
+    let fixed = 9 + 2 + 12 + 2 + kind_w + 2 + name_w + 2;
+    let detail_w = opts.width.saturating_sub(fixed).max(16);
+
+    writeln!(w, "{:<9}  {:<12}  {:<kind_w$}  {:<name_w$}  {}", "DELTA", "ID", "KIND", "NAME", "DETAIL")?;
+    for d in &shown {
+        let detail = match &d.delta {
+            crate::diff::Delta::Changed { fields } => fields.join(", "),
+            _ => match &d.entry.command {
+                Some(c) => String::from_utf8_lossy(c).replace(['\n', '\t', '\r'], " "),
+                None => d.entry.source.to_string_lossy().into_owned(),
+            },
+        };
+        writeln!(
+            w,
+            "{:<9}  {:<12}  {:<kind_w$}  {:<name_w$}  {}",
+            d.delta.label(),
+            d.entry.short_id(),
+            clip(d.entry.kind.as_str(), kind_w),
+            clip(&d.entry.name, name_w),
+            clip(&detail, detail_w),
+        )?;
+    }
+
+    writeln!(w)?;
+    writeln!(w, "{} entries differ.", shown.len())?;
+    if unchanged > 0 {
+        writeln!(w, "{unchanged} entries unchanged — use --all")?;
+    }
+    w.flush()
+}
+
+pub fn diff_ndjson(
+    w: &mut impl Write,
+    scan: &Scan,
+    diffs: &[crate::diff::Diffed],
+    filters: &Filters,
+) -> io::Result<()> {
+    serde_json::to_writer(&mut *w, &scan.header)?;
+    w.write_all(b"\n")?;
+    for d in diffs.iter().filter(|d| filters.keep(&d.entry)) {
+        serde_json::to_writer(&mut *w, &crate::diff::to_json(d))?;
+        w.write_all(b"\n")?;
+    }
+    w.flush()
 }

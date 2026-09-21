@@ -268,17 +268,33 @@ fn probe_openat2(fd: &OwnedFd) -> bool {
     .is_ok()
 }
 
-/// True when any component of the path is dot-prefixed, or it sits in one of
-/// the world-writable scratch directories. Feeds the HiddenPath flag.
+/// Directories that are dot-prefixed by convention rather than to hide
+/// anything. Without this list every per-user autostart entry, every
+/// authorized_keys and every shell profile reports as hidden, which is the
+/// opposite of useful.
+const CONVENTIONAL_DOT_DIRS: [&[u8]; 5] = [b".config", b".local", b".cache", b".ssh", b".var"];
+
+/// True when the path sits in one of the world-writable scratch directories,
+/// or when a *directory* along the way is dot-prefixed and is not one of the
+/// conventional ones. The final component is not tested: a collector that
+/// looked for `.bashrc` found exactly what it went looking for.
 pub fn is_hidden_path(p: &Path) -> bool {
     for dir in ["/tmp", "/dev/shm", "/var/tmp"] {
         if p.starts_with(dir) {
             return true;
         }
     }
-    p.components().any(|c| match c {
-        Component::Normal(n) => n.as_bytes().starts_with(b".") && n.as_bytes() != b".",
-        _ => false,
+    let mut dirs: Vec<&OsStr> = p
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n),
+            _ => None,
+        })
+        .collect();
+    dirs.pop();
+    dirs.iter().any(|n| {
+        let bytes = n.as_bytes();
+        bytes.starts_with(b".") && bytes != b"." && !CONVENTIONAL_DOT_DIRS.contains(&bytes)
     })
 }
 
@@ -355,9 +371,17 @@ mod tests {
 
     #[test]
     fn hidden_paths() {
-        assert!(is_hidden_path(Path::new("/home/u/.config/autostart/x.desktop")));
         assert!(is_hidden_path(Path::new("/tmp/x")));
         assert!(is_hidden_path(Path::new("/dev/shm/x")));
+        assert!(is_hidden_path(Path::new("/var/tmp/x")));
+        assert!(is_hidden_path(Path::new("/home/u/.hoard/payload.sh")));
+        assert!(is_hidden_path(Path::new("/usr/lib/.x/mod.so")));
+
+        // Standard locations are not hiding anything, and neither is a
+        // dotfile a collector went looking for by name.
+        assert!(!is_hidden_path(Path::new("/home/u/.config/autostart/x.desktop")));
+        assert!(!is_hidden_path(Path::new("/home/u/.ssh/authorized_keys")));
+        assert!(!is_hidden_path(Path::new("/home/u/.bashrc")));
         assert!(!is_hidden_path(Path::new("/usr/lib/systemd/system/x.service")));
     }
 }
