@@ -187,7 +187,14 @@ fn changed_fields(before: &Entry, after: &Entry) -> Vec<&'static str> {
         b.sort();
         a != b
     });
-    check("raw", before.raw != after.raw);
+    // Collector notes prefixed `live.` describe the machine's current state
+    // rather than its configuration — a loaded module's reference count, its
+    // dependants. They move on their own, and a diff that reports them is a
+    // diff whose real findings are buried.
+    fn settled(e: &Entry) -> BTreeMap<&String, &String> {
+        e.raw.iter().filter(|(k, _)| !k.starts_with("live.")).collect()
+    }
+    check("raw", settled(before) != settled(after));
     out
 }
 
@@ -280,6 +287,24 @@ mod tests {
                 assert!(fields.contains(&"command"));
                 assert!(fields.contains(&"mtime"));
             }
+            other => panic!("expected a change, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn live_kernel_state_that_moves_on_its_own_is_not_a_change() {
+        let mut before = unit("i915", b"");
+        before.raw.insert("live.refcount".into(), "12".into());
+        before.raw.insert("directive".into(), "loaded".into());
+        let mut after = before.clone();
+        after.raw.insert("live.refcount".into(), "19".into());
+        assert_eq!(diff(&scan_of(vec![before.clone()]), &scan_of(vec![after])).unwrap()[0].delta, Delta::Unchanged);
+
+        // A note that is not live state still counts.
+        let mut edited = before.clone();
+        edited.raw.insert("directive".into(), "install".into());
+        match &diff(&scan_of(vec![before]), &scan_of(vec![edited])).unwrap()[0].delta {
+            Delta::Changed { fields } => assert!(fields.contains(&"raw")),
             other => panic!("expected a change, got {other:?}"),
         }
     }

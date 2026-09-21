@@ -356,7 +356,12 @@ fn loaded_entries(cx: &mut Ctx, loaded: &Loaded) -> Vec<Entry> {
         e.enabled = Enablement::Enabled;
         e.note("directive", "loaded");
         e.note("module", name.clone());
-        for (i, key) in ["size", "refcount", "used_by", "state"].iter().enumerate() {
+        // Prefixed `live.` because these move on their own: a module's
+        // reference count and dependants change as the machine is used, and
+        // a diff that reported every loaded module as changed on every run
+        // would be noise nobody reads. The diff ignores this prefix; a
+        // single scan and `explain` still show the values.
+        for (i, key) in ["live.size", "live.refcount", "live.used_by", "live.state"].iter().enumerate() {
             if let Some(v) = fields.get(i).filter(|v| *v != "-") {
                 e.note(key, v.trim_end_matches(',').to_string());
             }
