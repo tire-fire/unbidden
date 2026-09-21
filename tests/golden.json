@@ -860,6 +860,11 @@
         "status": "complete"
       },
       {
+        "entries": 0,
+        "name": "git_config",
+        "status": "complete"
+      },
+      {
         "entries": 2,
         "name": "initscripts",
         "status": "complete"

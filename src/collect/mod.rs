@@ -26,6 +26,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(auth::Auth),
         Box::new(kernel::Kernel),
         Box::new(pkg::PkgHooks),
+        Box::new(deep::GitConfig),
         Box::new(deep::Deep),
     ]
 }

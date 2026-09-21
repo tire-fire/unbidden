@@ -395,11 +395,15 @@ fn cap_names(mask: u64) -> String {
 /// `[core]` keys that hand a command to a shell during an ordinary git
 /// operation, mapped from the lowercased spelling git compares against to the
 /// canonical one an operator would recognise.
-const CORE_KEYS: [(&str, &str); 4] = [
+const CORE_KEYS: [(&str, &str); 5] = [
     ("pager", "core.pager"),
     ("editor", "core.editor"),
     ("fsmonitor", "core.fsmonitor"),
     ("sshcommand", "core.sshCommand"),
+    // Not a command, but it redirects a repository's hooks somewhere else
+    // entirely — the obvious way around a scan that only looks in
+    // .git/hooks, so the redirection itself is the finding.
+    ("hookspath", "core.hooksPath"),
 ];
 
 fn repository(cx: &mut Ctx, w: &mut Walk, gitdir: &Path, worktree: &Path) -> Vec<Entry> {
@@ -468,7 +472,11 @@ fn shebang(cx: &Ctx, rel: &Path) -> Option<String> {
 }
 
 fn config(cx: &mut Ctx, gitdir: &Path, repo: &str, gitdir_abs: &str) -> Vec<Entry> {
-    let rel = gitdir.join("config");
+    config_at(cx, &gitdir.join("config"), repo, gitdir_abs)
+}
+
+fn config_at(cx: &mut Ctx, rel: &Path, repo: &str, gitdir_abs: &str) -> Vec<Entry> {
+    let rel = rel.to_path_buf();
     let Some(bytes) = cx.read(&rel) else { return Vec::new() };
 
     let mut used: BTreeMap<String, usize> = BTreeMap::new();
@@ -491,6 +499,47 @@ fn config(cx: &mut Ctx, gitdir: &Path, repo: &str, gitdir_abs: &str) -> Vec<Entr
         out.push(e);
     }
     out
+}
+
+/// Git's configuration is layered, and the two layers above a repository run
+/// their commands for *every* repository that account touches — a wider blast
+/// radius than any single `.git/config`, and reachable without a filesystem
+/// walk. They are fixed paths, so they are not behind --deep.
+pub struct GitConfig;
+
+impl Collector for GitConfig {
+    fn name(&self) -> &'static str {
+        "git_config"
+    }
+
+    fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
+        let mut out = Vec::new();
+        let mut seen: Vec<PathBuf> = Vec::new();
+
+        let scan = |cx: &mut Ctx, rel: PathBuf, scope: &str, out: &mut Vec<Entry>, seen: &mut Vec<PathBuf>| {
+            if seen.contains(&rel) {
+                return;
+            }
+            seen.push(rel.clone());
+            let abs = cx.root.abs(&rel).to_string_lossy().into_owned();
+            for mut e in config_at(cx, &rel, scope, &abs) {
+                e.note("config_scope", scope);
+                out.push(e);
+            }
+        };
+
+        scan(cx, PathBuf::from("etc/gitconfig"), "system", &mut out, &mut seen);
+        scan(cx, PathBuf::from("usr/local/etc/gitconfig"), "system", &mut out, &mut seen);
+
+        for user in cx.users.to_vec() {
+            let home = cx.root.rel(&user.home);
+            for name in ["_gitconfig", ".config/git/config"] {
+                let name = name.replacen('_', ".", 1);
+                scan(cx, home.join(name), &user.name, &mut out, &mut seen);
+            }
+        }
+        out
+    }
 }
 
 /// A worktree or a submodule keeps a `.git` file holding `gitdir: <path>`, and
@@ -843,6 +892,38 @@ mod tests {
         assert_eq!(hook.raw.get("repository").map(String::as_str), Some(dir.join("srv/app").to_str().unwrap()));
         assert_eq!(hook.raw.get("interpreter").map(String::as_str), Some("/bin/sh"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_global_git_config_runs_for_every_repository_that_account_touches() {
+        let dir = tree("gitconfig");
+        let put = |rel: &str, body: &[u8]| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        put("etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/sh\n");
+        put("etc/gitconfig", b"[core]\n\tpager = /usr/local/bin/wrap\n");
+        put("home/alice/.gitconfig", b"[core]\n\thooksPath = /tmp/hooks\n\tsshCommand = ssh -o ProxyCommand=/tmp/p\n");
+        std::fs::create_dir_all(dir.join("home/alice")).unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(GitConfig)];
+        let s = run(&root, &Options { deep: false }, &collectors);
+
+        let by: Vec<(&str, &str)> = s
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.raw["config_scope"].as_str()))
+            .collect();
+        assert!(by.contains(&("core.pager", "system")), "{by:?}");
+        assert!(by.contains(&("core.hooksPath", "alice")), "hook redirection is the evasion: {by:?}");
+        assert!(by.contains(&("core.sshCommand", "alice")), "{by:?}");
+        assert!(
+            !s.header.collectors.iter().any(|c| matches!(c.status, Status::Failed { .. })),
+            "the collector must not need --deep"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
