@@ -59,6 +59,29 @@ const USER_PROFILES: &[&str] = &[
 /// The one system file in the list above that is not shell (§ PAM reads it).
 const PAM_ENV: &str = "etc/environment";
 
+/// pam_env's own configuration, which sets variables for every PAM session —
+/// every login, every su, every cron job that goes through PAM. Its syntax is
+/// not the `KEY=value` of /etc/environment but
+/// `VARIABLE [DEFAULT=value] [OVERRIDE=value]`, so it needs its own reading.
+const PAM_ENV_CONF: &str = "etc/security/pam_env.conf";
+
+/// systemd's environment drop-ins, which apply to every user session it
+/// starts. Plain `KEY=value`, like /etc/environment.
+const ENVIRONMENT_D: &[&str] =
+    &["etc/environment.d", "run/environment.d", "usr/lib/environment.d", "lib/environment.d"];
+
+/// How a file that carries environment assignments spells them.
+#[derive(Clone, Copy, PartialEq)]
+enum Syntax {
+    /// A shell script: `export NAME=value`, and it may run commands.
+    Shell,
+    /// `NAME=value` only, no expansion, no commands. /etc/environment and
+    /// systemd's environment.d drop-ins.
+    KeyValue,
+    /// `VARIABLE DEFAULT=value OVERRIDE=value`.
+    PamEnvConf,
+}
+
 /// Library directories every distribution already searches. A directory
 /// outside these is what makes an ld.so.conf drop-in worth mentioning.
 const STANDARD_LIB_DIRS: &[&str] =
@@ -82,14 +105,29 @@ impl Collector for Shell {
         let mut seen = BTreeSet::new();
 
         for p in SYSTEM_PROFILES {
-            profile(cx, Path::new(p), None, *p == PAM_ENV, &mut seen, &mut out);
+            let syntax = if *p == PAM_ENV { Syntax::KeyValue } else { Syntax::Shell };
+            profile(cx, Path::new(p), None, syntax, &mut seen, &mut out);
         }
         for ent in cx.dir("etc/profile.d") {
             if ent.is_dir {
                 continue;
             }
             let rel = Path::new("etc/profile.d").join(&ent.name);
-            profile(cx, &rel, None, false, &mut seen, &mut out);
+            profile(cx, &rel, None, Syntax::Shell, &mut seen, &mut out);
+        }
+
+        // Environment set for every PAM session and every systemd user
+        // session. Neither runs a command itself, which is exactly why an
+        // LD_PRELOAD parked here is quiet.
+        profile(cx, Path::new(PAM_ENV_CONF), None, Syntax::PamEnvConf, &mut seen, &mut out);
+        for dir in ENVIRONMENT_D {
+            for ent in cx.dir(dir) {
+                if ent.is_dir || !ent.name.to_string_lossy().ends_with(".conf") {
+                    continue;
+                }
+                let rel = Path::new(dir).join(&ent.name);
+                profile(cx, &rel, None, Syntax::KeyValue, &mut seen, &mut out);
+            }
         }
 
         let users = cx.users;
@@ -102,7 +140,7 @@ impl Collector for Shell {
             for f in USER_PROFILES {
                 let rel = u.in_home(f);
                 let at = out.len();
-                profile(cx, &rel, Some(u), false, &mut seen, &mut out);
+                profile(cx, &rel, Some(u), Syntax::Shell, &mut seen, &mut out);
                 if let (Some(t), Some(e)) = (&home_link, out.get_mut(at)) {
                     e.note("home_symlink_target", t.to_string_lossy());
                 }
@@ -118,7 +156,7 @@ fn profile(
     cx: &mut Ctx,
     rel: &Path,
     user: Option<&User>,
-    pam_env: bool,
+    syntax: Syntax,
     seen: &mut BTreeSet<PathBuf>,
     out: &mut Vec<Entry>,
 ) {
@@ -186,11 +224,17 @@ fn profile(
     if nul > 0 {
         e.note("nul_bytes", nul.to_string());
     }
-    if pam_env {
-        e.note("syntax", "pam-environment");
+    match syntax {
+        Syntax::Shell => {}
+        Syntax::KeyValue => e.note("syntax", "pam-environment"),
+        Syntax::PamEnvConf => e.note("syntax", "pam_env.conf"),
     }
 
-    apply(&mut e, if pam_env { scan_pam_env(&bytes) } else { scan_shell(&bytes) });
+    apply(&mut e, match syntax {
+        Syntax::Shell => scan_shell(&bytes),
+        Syntax::KeyValue => scan_pam_env(&bytes),
+        Syntax::PamEnvConf => scan_pam_env_conf(&bytes),
+    });
     out.push(e);
 }
 
@@ -386,6 +430,45 @@ fn scan_segment(seg: &[Word], s: &mut Scanned) -> bool {
 /// `/etc/environment` is read by pam_env, not by a shell: plain `KEY=value`
 /// lines, no `export`, no expansion, no commands. Parsing it as shell would
 /// invent findings that cannot happen.
+/// `VARIABLE DEFAULT=value OVERRIDE=value`, where OVERRIDE wins when both are
+/// present. Either may be quoted, and either may be absent.
+fn scan_pam_env_conf(bytes: &[u8]) -> Scanned {
+    let mut s = Scanned::default();
+    for raw in bytes.split(|b| *b == b'\n') {
+        let line = match raw.split_last() {
+            Some((b'\r', rest)) => {
+                s.crlf = true;
+                rest
+            }
+            _ => raw,
+        };
+        let line = line.trim_ascii();
+        if line.is_empty() || line.starts_with(b"#") {
+            continue;
+        }
+        let mut words = line.split(|b| *b == b' ' || *b == b'\t').filter(|w| !w.is_empty());
+        let Some(name) = words.next() else { continue };
+        if !is_name(name) {
+            continue;
+        }
+        let (mut default, mut over) = (None, None);
+        for w in words {
+            if let Some(v) = w.strip_prefix(b"DEFAULT=") {
+                default = Some(v.to_vec());
+            } else if let Some(v) = w.strip_prefix(b"OVERRIDE=") {
+                over = Some(v.to_vec());
+            }
+        }
+        // OVERRIDE wins where both are given, which is what pam_env does.
+        let Some(value) = over.or(default) else { continue };
+        s.env.push((
+            String::from_utf8_lossy(name).into_owned(),
+            clip(unquote(&value), VALUE_CAP),
+        ));
+    }
+    s
+}
+
 fn scan_pam_env(bytes: &[u8]) -> Scanned {
     let mut s = Scanned::default();
     for raw in bytes.split(|b| *b == b'\n') {
@@ -639,6 +722,46 @@ fn clip(b: &[u8], cap: usize) -> String {
         s.push_str("…[clipped]");
     }
     s
+}
+
+
+#[cfg(test)]
+mod pam_env_tests {
+    use super::*;
+    use crate::scan::{self, Collector, Options};
+
+    #[test]
+    fn an_ld_preload_parked_in_a_pam_or_systemd_environment_file_is_found() {
+        let dir = std::env::temp_dir().join(format!("unbidden-pamenv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let put = |rel: &str, body: &[u8]| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        put("etc/os-release", b"ID=debian\n");
+        // OVERRIDE beats DEFAULT, which is what pam_env does.
+        put(
+            "etc/security/pam_env.conf",
+            b"# comment\nLANG DEFAULT=C\nLD_PRELOAD DEFAULT=/usr/lib/ok.so OVERRIDE=/tmp/evil.so\nBROKEN\n",
+        );
+        put("etc/environment.d/99-x.conf", b"LD_AUDIT=/tmp/audit.so\n");
+
+        let root = crate::root::Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Shell)];
+        let s = scan::run(&root, &Options { deep: false }, &collectors);
+
+        let conf = s.entries.iter().find(|e| e.name == "pam_env.conf").expect("pam_env.conf");
+        assert_eq!(conf.raw["syntax"], "pam_env.conf");
+        assert_eq!(conf.raw["env.LD_PRELOAD"], "/tmp/evil.so", "OVERRIDE wins over DEFAULT");
+        assert_eq!(conf.raw["env.LANG"], "C");
+        assert!(!conf.raw.contains_key("env.BROKEN"), "a line with no value sets nothing");
+
+        let dropin = s.entries.iter().find(|e| e.name == "99-x.conf").expect("environment.d drop-in");
+        assert_eq!(dropin.raw["env.LD_AUDIT"], "/tmp/audit.so");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[cfg(test)]
