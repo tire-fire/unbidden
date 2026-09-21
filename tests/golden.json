@@ -419,6 +419,8 @@
         "desktop_type": "Application",
         "exec_argv": "[\"/home/alice/.local/bin/upd\"]",
         "target_provenance": "unpackaged",
+        "user": "alice",
+        "user_discovered_via": "passwd",
         "x_gnome_autostart_enabled": "true"
       },
       "source": "<ROOT>/home/alice/.config/autostart/updater.desktop",
@@ -500,7 +502,9 @@
       },
       "raw": {
         "env.LD_PRELOAD": "/home/alice/.cache/x.so",
-        "login_shell": "/bin/zsh"
+        "login_shell": "/bin/zsh",
+        "user": "alice",
+        "user_discovered_via": "passwd"
       },
       "source": "<ROOT>/home/alice/.bashrc",
       "source_utf8": true,
@@ -786,7 +790,9 @@
         "opt.no-pty": "true",
         "options": "command=\"/usr/local/bin/wrap, --strict\",no-pty",
         "ssh_mechanism": "authorized-key",
-        "target_provenance": "unpackaged"
+        "target_provenance": "unpackaged",
+        "user": "alice",
+        "user_discovered_via": "passwd"
       },
       "source": "<ROOT>/home/alice/.ssh/authorized_keys",
       "source_utf8": true,

