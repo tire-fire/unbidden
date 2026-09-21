@@ -210,10 +210,12 @@ fn apply_target(root: &Root, entry: &mut Entry) {
             // path could be got out of it, that is a finding of its own —
             // unless the mechanism runs it inside its own process, as udev
             // does with its builtins, in which case there is no file to find.
-            let builtin = entry.raw.get("key").is_some_and(|k| k.contains("{builtin}"));
-            if builtin {
+            // A collector that already knows there is no path to find says
+            // so, and is believed: a udev rule naming a systemd unit, or one
+            // whose action runs inside udev itself, has no file to resolve.
+            if entry.raw.get("key").is_some_and(|k| k.contains("{builtin}")) {
                 entry.note("target_unverifiable", "runs inside udev, not a program");
-            } else if entry.command.is_some() {
+            } else if entry.command.is_some() && !entry.raw.contains_key("target_unverifiable") {
                 entry.flag(Flag::TargetUnresolvable);
             }
             root.rel(&entry.source)
