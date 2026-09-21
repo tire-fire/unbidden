@@ -29,9 +29,15 @@ pub struct Systemd;
 /// The system unit search path with its precedence rank: /etc shadows /run
 /// shadows the vendor directories. `lib` and `usr/lib` share rank because on a
 /// merged-usr host they are the same directory.
-const SYSTEM_PATHS: [(&str, u8); 4] = [
+const SYSTEM_PATHS: [(&str, u8); 7] = [
     ("etc/systemd/system", 0),
     ("run/systemd/system", 1),
+    // Generator output. systemd loads these like any other unit, and a
+    // generator is itself a persistence mechanism, so what it wrote has to
+    // be enumerated rather than inferred from the generator alone.
+    ("run/systemd/generator.early", 1),
+    ("run/systemd/generator", 1),
+    ("run/systemd/generator.late", 1),
     ("usr/lib/systemd/system", 2),
     ("lib/systemd/system", 2),
 ];
@@ -100,13 +106,17 @@ struct Link {
     rel: PathBuf,
 }
 
+/// Search-path ranks an administrator writes to: /etc and /run. A .wants
+/// link at any other rank was shipped by a package.
+const ADMIN_RANKS: [u8; 2] = [0, 1];
+
 #[derive(Default)]
 struct Walk {
     units: Vec<Found>,
     dropins: Vec<Found>,
     /// Unit name to the symlinks that pull it in, including the template name
     /// an instance symlink resolves to.
-    links: BTreeMap<(Scope, String), Vec<PathBuf>>,
+    links: BTreeMap<(Scope, String), Vec<(u8, PathBuf)>>,
     wants: Vec<Link>,
 }
 
@@ -169,6 +179,20 @@ impl Walk {
                     self.scan_dropins(cx, scope, &rel, parent, rank);
                 }
             } else if !ent.is_dir && unit_suffix(&name).is_some() {
+                // A unit file in /etc or /run that is a symlink to another
+                // unit is an Alias=, and systemd treats the aliased unit as
+                // enabled. `systemctl enable gdm` works exactly this way:
+                // it writes /etc/systemd/system/display-manager.service.
+                if ent.is_symlink && ADMIN_RANKS.contains(&rank) {
+                    if let Ok(target) = cx.root.read_link(&rel) {
+                        if let Some(base) = target.file_name().map(|n| n.to_string_lossy().into_owned()) {
+                            if base != name && unit_suffix(&base).is_some() {
+                                let abs = cx.root.abs(&rel);
+                                self.links.entry((scope.clone(), base)).or_default().push((rank, abs));
+                            }
+                        }
+                    }
+                }
                 self.units.push(Found { scope: scope.clone(), rank, rel, file_name: ent.name, unit: name });
             }
         }
@@ -188,12 +212,12 @@ impl Walk {
                 .read_link(&rel)
                 .ok()
                 .and_then(|t| t.file_name().map(|n| n.to_string_lossy().into_owned()));
-            self.links.entry((scope.clone(), name.clone())).or_default().push(abs.clone());
+            self.links.entry((scope.clone(), name.clone())).or_default().push((rank, abs.clone()));
             // An instance symlink enables the template it points at, so the
             // template file is reported enabled too.
             if let Some(tb) = &target_base {
                 if *tb != name {
-                    self.links.entry((scope.clone(), tb.clone())).or_default().push(abs);
+                    self.links.entry((scope.clone(), tb.clone())).or_default().push((rank, abs));
                 }
             }
             self.wants.push(Link { scope: scope.clone(), rank, name, rel });
@@ -287,20 +311,36 @@ impl Walk {
 
         e.enabled = if masked {
             Enablement::Masked
-        } else if let Some(links) = self.enabling_links(f, suffix) {
-            let paths: Vec<String> = links.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-            e.note("enabled_by", paths.join(", "));
-            Enablement::Enabled
-        } else if !facts.has_install {
-            Enablement::Static
         } else {
-            Enablement::Disabled
+            let links = self.enabling_links(f, suffix);
+            let describe = |want: bool| -> Option<String> {
+                let paths: Vec<String> = links?
+                    .iter()
+                    .filter(|(rank, _)| ADMIN_RANKS.contains(rank) == want)
+                    .map(|(_, p)| p.to_string_lossy().into_owned())
+                    .collect();
+                (!paths.is_empty()).then(|| paths.join(", "))
+            };
+            // A .wants link under /usr/lib is a vendor dependency, not an
+            // administrator enabling something: systemd reports those units
+            // as static. Only a link in /etc or /run is an admin action.
+            if let Some(vendor) = describe(false) {
+                e.note("pulled_in_by", vendor);
+            }
+            match describe(true) {
+                Some(admin) => {
+                    e.note("enabled_by", admin);
+                    Enablement::Enabled
+                }
+                None if !facts.has_install => Enablement::Static,
+                None => Enablement::Disabled,
+            }
         };
         e.flag(Flag::DegradedEnablement);
         e
     }
 
-    fn enabling_links(&self, f: &Found, suffix: Option<&str>) -> Option<&Vec<PathBuf>> {
+    fn enabling_links(&self, f: &Found, suffix: Option<&str>) -> Option<&Vec<(u8, PathBuf)>> {
         if let Some(l) = self.links.get(&(f.scope.clone(), f.unit.clone())) {
             return Some(l);
         }

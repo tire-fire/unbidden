@@ -238,6 +238,7 @@ mod tests {
                 live: true,
                 deep: false,
                 privileged: true,
+                enablement: crate::scan::inferred(),
                 collectors: Vec::new(),
             },
             entries,

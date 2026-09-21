@@ -1,4 +1,5 @@
 pub mod collect;
+pub mod dbus;
 pub mod diff;
 pub mod enrich;
 pub mod entry;

@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use crate::dbus;
 use crate::entry::{Entry, Flag, Integrity, Kind, Provenance};
 use crate::provenance;
 use crate::root::{Root, is_hidden_path};
@@ -24,6 +25,15 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
         apply_provenance(root, entry, &answers);
         apply_target(root, entry);
         apply_location(root, entry);
+    }
+
+    // Authoritative enablement goes on after provenance, so a generated
+    // unit can be re-attributed from Unpackaged to its generator.
+    if let Some(manager) = dbus::Manager::query(root) {
+        let answered = dbus::apply(&manager, &mut scan.entries);
+        if answered > 0 {
+            scan.header.enablement = "systemd-dbus".to_string();
+        }
     }
 
     apply_shadowing(&mut scan.entries);

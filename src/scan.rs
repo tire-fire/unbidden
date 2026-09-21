@@ -200,7 +200,16 @@ pub struct Header {
     pub live: bool,
     pub deep: bool,
     pub privileged: bool,
+    /// Whether enablement was read from systemd or inferred from symlinks.
+    /// A baseline taken one way is not comparable with one taken the other:
+    /// every unit's enablement would appear to have changed.
+    #[serde(default = "inferred")]
+    pub enablement: String,
     pub collectors: Vec<CollectorStatus>,
+}
+
+pub fn inferred() -> String {
+    "inferred".to_string()
 }
 
 /// The JSON contract of §10. Bump only for additive change; a reader must
@@ -350,6 +359,7 @@ fn header(root: &Root, opts: &Options, collectors: Vec<CollectorStatus>) -> Head
         live: root.is_live(),
         deep: opts.deep,
         privileged: rustix::process::geteuid().is_root(),
+        enablement: inferred(),
         collectors,
     }
 }

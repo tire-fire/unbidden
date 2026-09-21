@@ -58,6 +58,13 @@ pub fn comparable(baseline: &Scan, current: &Scan) -> Result<(), String> {
         ));
     }
 
+    if baseline.header.enablement != current.header.enablement {
+        return Err(format!(
+            "baseline enablement came from {} and this scan's from {};              every unit would appear to have changed",
+            baseline.header.enablement, current.header.enablement
+        ));
+    }
+
     let by_name = |s: &Scan| -> BTreeMap<String, CollectorStatus> {
         s.header.collectors.iter().map(|c| (c.name.clone(), c.clone())).collect()
     };
@@ -204,6 +211,7 @@ mod tests {
             live: true,
             deep: false,
             privileged: true,
+            enablement: crate::scan::inferred(),
             collectors: vec![CollectorStatus {
                 name: "systemd".into(),
                 entries: 1,
