@@ -107,7 +107,7 @@ impl Manager {
                 }
             }
         }
-        merged
+        merged.map(|m| m.canonical(root))
     }
 }
 
@@ -214,6 +214,29 @@ impl Manager {
         }
 
         Some(Manager { by_path, active })
+    }
+
+    /// Re-keys every answer on the path the collectors record: the unit
+    /// file's directory resolved on this root. systemd names a unit by the
+    /// search-path directory it was built with — /lib/systemd/system on
+    /// Debian 12, Ubuntu 22.04 and Mint 21, where /lib is a link to /usr/lib
+    /// — while the walk reports the directory it resolves to. Matched as
+    /// spelled, not one vendor unit on those systems ever took systemd's
+    /// answer.
+    ///
+    /// The unit file's own name is not resolved: an alias is a file of its
+    /// own, and systemd answers for it separately.
+    fn canonical(self, root: &Root) -> Manager {
+        let mut by_path: BTreeMap<PathBuf, UnitFile> = BTreeMap::new();
+        for (path, file) in self.by_path {
+            let rel = root.rel(&path);
+            let resolved = match (rel.parent(), rel.file_name()) {
+                (Some(dir), Some(name)) => root.resolve(dir).map(|d| root.abs(d.join(name))).unwrap_or(path),
+                _ => path,
+            };
+            by_path.entry(resolved).or_default().by_manager.extend(file.by_manager);
+        }
+        Manager { by_path, active: self.active }
     }
 
     /// Folds another manager's answers in, keeping both where they cover the
@@ -641,6 +664,34 @@ mod tests {
         assert_eq!(apply(&manager, &mut entries), 0);
         assert_eq!(entries[0].enabled, Enablement::Enabled);
         assert!(entries[0].has_flag(Flag::DegradedEnablement));
+    }
+
+    #[test]
+    fn a_unit_systemd_names_through_merged_usr_takes_its_answer() {
+        // systemd on Debian 12, Ubuntu 22.04 and Mint 21 lists vendor units
+        // under /lib/systemd/system; the walk reports /usr/lib/systemd/system.
+        let dir = std::env::temp_dir().join(format!("unbidden-dbus-usr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("usr/lib/systemd/system")).unwrap();
+        std::fs::write(dir.join("usr/lib/systemd/system/cron.service"), b"[Service]\n").unwrap();
+        std::os::unix::fs::symlink("usr/lib", dir.join("lib")).unwrap();
+        let root = Root::at(&dir).unwrap();
+
+        let manager = manager_of(vec![(
+            &dir.join("lib/systemd/system/cron.service").to_string_lossy(),
+            answers(&[("system", "enabled")]),
+        )])
+        .canonical(&root);
+
+        let mut e = Entry::new(Kind::SystemdUnit, dir.join("usr/lib/systemd/system/cron.service"), "cron.service");
+        e.enabled = Enablement::Disabled;
+        e.flag(Flag::DegradedEnablement);
+        e.note("scope", "system");
+        let mut entries = vec![e];
+        assert_eq!(apply(&manager, &mut entries), 1);
+        assert_eq!(entries[0].enabled, Enablement::Enabled);
+        assert!(!entries[0].has_flag(Flag::DegradedEnablement));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

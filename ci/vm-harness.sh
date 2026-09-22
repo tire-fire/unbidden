@@ -12,7 +12,7 @@
 # user-mode NAT with a single forwarded SSH port bound to localhost.
 #
 #   ci/vm-harness.sh                       # Debian 12, the whole matrix
-#   ci/vm-harness.sh --image fedora-41
+#   ci/vm-harness.sh --image fedora-44
 #   ci/vm-harness.sh --modules "cron udev systemd"
 #   ci/vm-harness.sh --keep                # leave it running to poke at
 #   ci/vm-harness.sh --shell               # boot, provision, hand over a shell
@@ -70,8 +70,9 @@ case "$IMAGE" in
     debian-13)    URL=https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2;  FAMILY=debian ;;
     ubuntu-22.04) URL=https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img;           FAMILY=debian ;;
     ubuntu-24.04) URL=https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img;           FAMILY=debian ;;
-    fedora-43)    URL=https://dl.fedoraproject.org/pub/fedora/linux/releases/43/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-43-1.6.x86_64.qcow2; FAMILY=fedora ;;
-    fedora-44)    URL=https://dl.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2; FAMILY=fedora ;;
+    # Fedora names its images by compose, and a respin replaces the file, so
+    # the name is read from the release directory rather than pinned.
+    fedora-*)     URL=fedora:${IMAGE#fedora-}; FAMILY=fedora ;;
     *) echo "unknown image: $IMAGE" >&2; exit 2 ;;
 esac
 
@@ -120,7 +121,15 @@ fi
 # --- the fixtures ------------------------------------------------------
 BASE="$CACHE/$IMAGE.qcow2"
 if [ ! -f "$BASE" ]; then
+    if [[ "$URL" == fedora:* ]]; then
+        release=${URL#fedora:}
+        dir="https://dl.fedoraproject.org/pub/fedora/linux/releases/$release/Cloud/x86_64/images/"
+        name=$(curl -fsSL --retry 3 "$dir" | grep -oE "Fedora-Cloud-Base-Generic-$release-[0-9.]+\.x86_64\.qcow2" | sort -uV | tail -1)
+        [ -n "$name" ] || { echo "no Fedora $release cloud image listed at $dir" >&2; exit 1; }
+        URL="$dir$name"
+    fi
     say "fetching the $IMAGE cloud image"
+    echo "   $URL"
     curl -fsSL --retry 3 -o "$BASE.part" "$URL"
     mv "$BASE.part" "$BASE"
 fi
@@ -136,10 +145,17 @@ KEY="$INSTANCE/key"
 
 # PANIX needs the mechanisms' own tooling present or it refuses to plant.
 case "$FAMILY" in
-    # gcc because two PANIX modules compile their payload before planting it.
-    debian) PKGS='[cron, at, sudo, git, network-manager, dbus, openssh-server, python3, gcc, build-essential]' ;;
-    fedora) PKGS='[cronie, at, sudo, git, NetworkManager, dbus, openssh-server, python3, gcc, make]' ;;
+    # gcc because two PANIX modules compile their payload before planting it;
+    # libcap's tools for cap, rpm-build for malicious-package on Fedora.
+    debian) PKGS='[cron, at, sudo, git, network-manager, dbus, openssh-server, python3, gcc, build-essential, udev, libcap2-bin]' ;;
+    fedora) PKGS='[cronie, at, sudo, git, NetworkManager, dbus, openssh-server, python3, gcc, make, rpm-build, libcap]' ;;
 esac
+# lkm builds its module against the kernel that is running, whose version is
+# only known inside the guest — so this line runs there. The single quotes
+# keep the runner from expanding it, and a heredoc does not expand the value
+# of a variable a second time.
+# shellcheck disable=SC2016
+HEADERS='[ sh, -c, "apt-get install -y linux-headers-$(uname -r) || dnf install -y kernel-devel-$(uname -r)" ]'
 
 cat > "$INSTANCE/user-data" <<EOF
 #cloud-config
@@ -153,6 +169,7 @@ users:
 package_update: true
 packages: $PKGS
 runcmd:
+  - $HEADERS
   - [ systemctl, enable, --now, sshd ]
   - [ systemctl, enable, --now, ssh ]
   - [ touch, /root/.harness-ready ]
@@ -185,9 +202,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+ACCEL=()
+[ -r /dev/kvm ] && ACCEL=(-enable-kvm -cpu host)
 say "booting $IMAGE"
 qemu-system-x86_64 \
-    ${KVM:+-enable-kvm} $([ -r /dev/kvm ] && echo -enable-kvm) \
+    "${ACCEL[@]}" \
     -m "$MEM" -smp "$CPUS" -display none -daemonize \
     -drive "file=$INSTANCE/overlay.qcow2,if=virtio,format=qcow2" \
     -drive "file=$INSTANCE/seed.iso,if=virtio,format=raw,readonly=on" \
@@ -219,7 +238,8 @@ vm_ssh 'cat /etc/os-release | sed -n "s/^PRETTY_NAME=//p"'
 
 say "installing the harness"
 vm_scp "$BIN" root@127.0.0.1:/usr/local/bin/unbidden
-vm_scp "$REPO/ci/panix-loop.sh" "$REPO/ci/distro-check.sh" root@127.0.0.1:/usr/local/bin/
+vm_scp "$REPO/ci/panix-loop.sh" "$REPO/ci/panix-coverage.tsv" "$REPO/ci/distro-check.sh" "$REPO/ci/live-check.sh" \
+    root@127.0.0.1:/usr/local/bin/
 vm_scp -r "$PANIX" root@127.0.0.1:/opt/panix
 vm_ssh 'chmod +x /usr/local/bin/unbidden /usr/local/bin/*.sh /opt/panix/panix.sh'
 
@@ -235,6 +255,9 @@ rc=0
 
 say "packaging and provenance"
 vm_ssh 'sh /usr/local/bin/distro-check.sh /usr/local/bin/unbidden' || rc=1
+
+say "against the running system"
+vm_ssh 'sh /usr/local/bin/live-check.sh /usr/local/bin/unbidden' || rc=1
 
 say "persistence mechanisms"
 vm_ssh "bash /usr/local/bin/panix-loop.sh /usr/local/bin/unbidden /opt/panix/panix.sh $MODULES" || rc=1

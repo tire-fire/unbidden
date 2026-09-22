@@ -17,35 +17,45 @@ jobs:
       - name: no warnings
         run: cargo build --locked --release 2>&1 | tee /tmp/build.log && ! grep -q '^warning' /tmp/build.log
 
+  lint:
+    # The CI scripts are code that decides whether a release ships, and a
+    # quoting mistake in one fails open as easily as closed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -S warning ci/*.sh
+
   fuzz:
     # §13: every parser gets a cargo-fuzz target, and §3 is why — parser input
     # is adversarial, so "it does not panic" has to be exercised rather than
     # asserted. cargo-fuzz needs nightly for its sanitizer flags, which is the
     # one place this repository leaves the toolchain in Cargo.toml.
     #
-    # Nothing depends on this job and it depends on nothing, so it never holds
-    # up the matrix below. It does fail the run, though: a collector that
-    # panics is a whole mechanism class the operator silently loses, and a
-    # fuzzer that cannot redden a build is decoration.
-    #
-    # A minute a target is a smoke run, not a soak. It catches a shallow panic
-    # on every push; finding the deep ones is what a corpus and a real fuzzing
+    # It fails the run: a collector that panics is a whole mechanism class the
+    # operator silently loses, and a fuzzer that cannot redden a build is
+    # decoration. A minute on each of the five §13 names first, twenty seconds
+    # on every other parser: a smoke run, not a soak. It catches a shallow
+    # panic on every push; the deep ones are what a corpus and a real fuzzing
     # host are for.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo install cargo-fuzz --locked
-      - run: cargo +nightly fuzz build
-      - name: a minute on each target
+      - run: cargo +nightly fuzz build -O
+      - name: every target
         run: |
           for t in $(cargo +nightly fuzz list); do
-            echo "::group::$t"
+            case "$t" in
+              unit_file|crontab|desktop_file|udev_rules|pam_config) secs=60 ;;
+              *) secs=20 ;;
+            esac
+            echo "::group::$t (${secs}s)"
             # -timeout turns a hang into a reported crash rather than a job
             # that runs until GitHub kills it; the two memory limits are how
             # "no unbounded memory" gets checked at all.
-            cargo +nightly fuzz run "$t" -- \
-              -max_total_time=60 -timeout=10 -rss_limit_mb=2048 -malloc_limit_mb=512
+            cargo +nightly fuzz run -O "$t" -- \
+              -max_total_time=$secs -timeout=10 -rss_limit_mb=2048 -malloc_limit_mb=512
             echo "::endgroup::"
           done
       - if: failure()
@@ -70,31 +80,19 @@ jobs:
       - run: cargo install cross --locked
       - run: cross build --locked --release --target ${{ matrix.target }}
       - name: the binary must be static
-        run: |
-          bin=target/${{ matrix.target }}/release/unbidden
-          file "$bin"
-          # rustc emits a static-PIE, which `file` calls "static-pie linked",
-          # so both spellings count and anything else does not.
-          file "$bin" | grep -qE 'static-pie linked|statically linked' \
-            || { echo "not statically linked"; exit 1; }
-          # ldd prints exactly one of two things for a static binary; any
-          # other output is a shared object the binary needs.
-          out=$(ldd "$bin" 2>&1 || true)
-          case "$out" in
-            *"not a dynamic executable"*|*"statically linked"*) ;;
-            *) echo "ldd reports dynamic linkage:"; echo "$out"; exit 1 ;;
-          esac
+        run: ci/static-check.sh target/${{ matrix.target }}/release/unbidden
       - uses: actions/upload-artifact@v4
         with:
           name: unbidden-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/unbidden
 
   persistence:
-    # The PANIX matrix needs a real boot, so it needs nested virtualisation.
-    # Run it on demand rather than pretending every runner has KVM.
-    if: github.event_name == 'workflow_dispatch'
+    # §13's PANIX loop, on every supported distribution that publishes a cloud
+    # image, in a real VM: a real boot, a real systemd, a kernel of its own.
+    # It gates a release, as §1 says every supported distribution does.
     needs: static
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -105,12 +103,54 @@ jobs:
         with:
           name: unbidden-x86_64-unknown-linux-musl
           path: target/x86_64-unknown-linux-musl/release
+      - name: hardware virtualisation
+        run: |
+          # GitHub's Linux runners expose /dev/kvm to the kvm group only. The
+          # loop plants and scans thirty-odd mechanisms with a whole-disk walk
+          # each time; under emulation that outlives the job, so a runner
+          # without KVM is a failure to say so, not a slow pass.
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "no usable /dev/kvm on this runner"; exit 1; }
       - run: |
           chmod +x target/x86_64-unknown-linux-musl/release/unbidden
           sudo apt-get update -qq
           sudo apt-get install -y qemu-system-x86 qemu-utils xorriso
-          sudo chmod 666 /dev/kvm || true
       - run: ci/vm-harness.sh --image ${{ matrix.image }}
+
+  persistence-mint:
+    # Mint and LMDE publish no cloud image, so the same loop and the same live
+    # checks run in a privileged container booted with systemd. lkm is the one
+    # module a container cannot host, and the loop names it as not run.
+    needs: static
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: linuxmintd/mint21-amd64
+            expect: linuxmint:21
+            args: ""
+          - image: linuxmintd/mint22-amd64
+            expect: linuxmint:22
+            args: --mint-base-files
+          - image: linuxmintd/lmde6-amd64
+            expect: linuxmint:6
+            args: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: unbidden-x86_64-unknown-linux-musl
+          path: target/x86_64-unknown-linux-musl/release
+      - run: chmod +x target/x86_64-unknown-linux-musl/release/unbidden
+      - name: ${{ matrix.image }}
+        run: |
+          for i in 1 2 3; do docker pull ${{ matrix.image }} && break; sleep $((i * 10)); done
+          ci/container-harness.sh --image ${{ matrix.image }} --expect ${{ matrix.expect }} ${{ matrix.args }}
 
   desktop:
     # §13: an extension on disk runs only if dconf says so, and nothing
@@ -170,25 +210,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The official images come through AWS's mirror of the Docker
-        # library. An anonymous Docker Hub pull is charged against the
-        # runner's shared address, and this matrix made ten of them a run.
-        # The Mint images are published nowhere else, so they stay.
-        image:
-          - public.ecr.aws/docker/library/debian:12
-          - public.ecr.aws/docker/library/debian:13
-          - public.ecr.aws/docker/library/ubuntu:22.04
-          - public.ecr.aws/docker/library/ubuntu:24.04
+        include:
+          # The official images come through AWS's mirror of the Docker
+          # library. An anonymous Docker Hub pull is charged against the
+          # runner's shared address, and this matrix made ten of them a run.
+          # The Mint images are published nowhere else, so they stay.
+          - image: public.ecr.aws/docker/library/debian:12
+            # The one image that also waits out the install window, to check
+            # that an edited maintainer script is noticed. Two minutes once
+            # is enough; the ordering it depends on is dpkg's, not the image's.
+            slow: "1"
+          - image: public.ecr.aws/docker/library/debian:13
+          - image: public.ecr.aws/docker/library/ubuntu:22.04
+          - image: public.ecr.aws/docker/library/ubuntu:24.04
           # §1: current and current-1, pinned so a release does not silently
           # change what the matrix tested.
-          - public.ecr.aws/docker/library/fedora:44
-          - public.ecr.aws/docker/library/fedora:43
-          # Mint publishes no cloud image, so the container matrix is the
-          # only place §1's third distribution is tested at all. LMDE is a
-          # separate image because it is a separate base: §13 wants the
-          # Debian one read as Debian and not as Ubuntu.
-          - linuxmintd/mint21-amd64
-          - linuxmintd/lmde6-amd64
+          - image: public.ecr.aws/docker/library/fedora:44
+          - image: public.ecr.aws/docker/library/fedora:43
+          # Mint publishes no cloud image, so the containers are the only
+          # place §1's third distribution is tested without systemd running.
+          # LMDE is a separate image because it is a separate base: §13
+          # wants the Debian one read as Debian and not as Ubuntu.
+          - image: linuxmintd/mint21-amd64
+            expect_id: linuxmint
+            expect_version: "21"
+          # The published Mint 22 image carries Ubuntu's base-files and
+          # reports Ubuntu 24.04. Mint's own base-files, from the Mint
+          # repository its apt sources already name, makes it Mint 22.
+          - image: linuxmintd/mint22-amd64
+            expect_id: linuxmint
+            expect_version: "22"
+            prep: apt-get -qq update && apt-get -qq install -y base-files >/dev/null &&
+          - image: linuxmintd/lmde6-amd64
+            expect_id: linuxmint
+            expect_version: "6"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -198,13 +253,6 @@ jobs:
       - run: chmod +x ./bin/unbidden
       - name: ${{ matrix.image }}
         run: |
-          # Several distribution-named images are built on their upstream and
-          # still report it: linuxmintd/mint22-amd64 is Ubuntu 24.04 down to
-          # its os-release. Naming what the image is for turns that from a
-          # hole in the matrix into a failure.
-          case "${{ matrix.image }}" in
-            *mint*|*lmde*) export UNBIDDEN_EXPECT_ID=linuxmint ;;
-          esac
           # Any registry resets a connection now and then, and the pull is
           # the only part of this job that talks to one.
           pull() {
@@ -215,8 +263,12 @@ jobs:
             return 1
           }
           pull ${{ matrix.image }}
-          docker run --rm -v "$PWD:/w" -w /w -e UNBIDDEN_EXPECT_ID ${{ matrix.image }} \
-            sh ci/distro-check.sh /w/bin/unbidden
+          docker run --rm -v "$PWD:/w" -w /w \
+            -e UNBIDDEN_EXPECT_ID=${{ matrix.expect_id }} \
+            -e UNBIDDEN_EXPECT_VERSION=${{ matrix.expect_version }} \
+            -e UNBIDDEN_SLOW_CHECKS=${{ matrix.slow }} \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ${{ matrix.image }} sh -c '${{ matrix.prep }} sh ci/distro-check.sh /w/bin/unbidden'
 
   release:
     # A push to main that touched the tool is a release. A README or workflow
@@ -225,7 +277,7 @@ jobs:
     # editing the version in Cargo.toml, and CI then uses what it finds. A
     # hand-pushed vX.Y.Z tag releases exactly that version.
     if: github.event_name == 'push'
-    needs: [test, fuzz, static, desktop, distros]
+    needs: [test, lint, fuzz, static, desktop, distros, persistence, persistence-mint]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -272,8 +324,7 @@ jobs:
             rustup target add "$t"
             cross build --locked --release --target "$t" --target-dir "build-$t"
             bin=build-$t/$t/release/unbidden
-            file "$bin" | grep -qE 'static-pie linked|statically linked' \
-              || { echo "$t: not statically linked"; exit 1; }
+            ci/static-check.sh "$bin"
             cp "$bin" "unbidden-$t"
           done
           sha256sum unbidden-* > SHA256SUMS
