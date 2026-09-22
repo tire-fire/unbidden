@@ -26,34 +26,80 @@ use crate::scan::{Collector, Ctx};
 
 pub struct Systemd;
 
-/// The system unit search path with its precedence rank: /etc shadows /run
-/// shadows the vendor directories. `lib` and `usr/lib` share rank because on a
-/// merged-usr host they are the same directory.
-const SYSTEM_PATHS: [(&str, u8); 7] = [
-    ("etc/systemd/system", 0),
-    ("run/systemd/system", 1),
-    // Generator output. systemd loads these like any other unit, and a
-    // generator is itself a persistence mechanism, so what it wrote has to
-    // be enumerated rather than inferred from the generator alone.
-    ("run/systemd/generator.early", 1),
-    ("run/systemd/generator", 1),
-    ("run/systemd/generator.late", 1),
-    ("usr/lib/systemd/system", 2),
-    ("lib/systemd/system", 2),
+/// One directory on a unit search path.
+struct SearchDir {
+    path: &'static str,
+    /// Position on the search path, lower first. A unit here shadows a
+    /// same-named unit at any higher rank. `lib` and `usr/lib` share one
+    /// because on a merged-usr host they are the same directory.
+    rank: u8,
+    /// Whether a `.wants/` link or an alias here is someone enabling a unit,
+    /// as opposed to a package declaring a dependency. systemd reports a
+    /// unit wanted only from a vendor directory as static, not enabled.
+    admin: bool,
+}
+
+const fn dir(path: &'static str, rank: u8, admin: bool) -> SearchDir {
+    SearchDir { path, rank, admin }
+}
+
+/// The system manager's unit search path, in the order systemd.unit(5) gives
+/// it. Generator output is part of it: systemd loads those units like any
+/// other, and a generator is itself a persistence mechanism, so what it wrote
+/// is enumerated rather than inferred from the generator alone. Note where
+/// the three generator directories fall — `generator.early` outranks /etc,
+/// and `generator.late` sits below every vendor directory.
+const SYSTEM_PATHS: [SearchDir; 13] = [
+    dir("etc/systemd/system.control", 0, true),
+    dir("run/systemd/system.control", 1, true),
+    dir("run/systemd/transient", 2, true),
+    dir("run/systemd/generator.early", 3, true),
+    dir("etc/systemd/system", 4, true),
+    dir("etc/systemd/system.attached", 5, true),
+    dir("run/systemd/system", 6, true),
+    dir("run/systemd/system.attached", 7, true),
+    dir("run/systemd/generator", 8, true),
+    dir("usr/local/lib/systemd/system", 9, false),
+    dir("usr/lib/systemd/system", 10, false),
+    dir("lib/systemd/system", 10, false),
+    dir("run/systemd/generator.late", 11, true),
 ];
 
-const USER_PATHS: [(&str, u8); 4] = [
-    ("etc/systemd/user", 0),
-    ("run/systemd/user", 1),
-    ("usr/lib/systemd/user", 2),
-    ("lib/systemd/user", 2),
+/// The user manager's search path outside any home, ranked on the same
+/// scale as `HOME_USER_PATHS` so the two can be compared: each account's user
+/// manager reads both, interleaved.
+const USER_PATHS: [SearchDir; 8] = [
+    dir("etc/xdg/systemd/user", 5, true),
+    dir("etc/systemd/user", 6, true),
+    dir("run/systemd/user", 8, true),
+    dir("usr/local/share/systemd/user", 11, false),
+    dir("usr/share/systemd/user", 12, false),
+    dir("usr/local/lib/systemd/user", 13, false),
+    dir("usr/lib/systemd/user", 14, false),
+    dir("lib/systemd/user", 14, false),
 ];
 
-const GENERATOR_PATHS: [&str; 6] = [
+/// The per-account part of the user search path, relative to the home.
+/// `~/.config/systemd/user` is where `systemctl --user enable` writes, and
+/// `~/.local/share/systemd/user` is where applications install their own
+/// units — both writable by the account alone, which is what makes them
+/// worth an attacker's attention.
+const HOME_USER_PATHS: [SearchDir; 3] = [
+    dir(".config/systemd/user.control", 0, true),
+    dir(".config/systemd/user", 4, true),
+    dir(".local/share/systemd/user", 10, false),
+];
+
+/// Every directory systemd.generator(7) says generators are loaded from.
+const GENERATOR_PATHS: [&str; 10] = [
+    "run/systemd/system-generators",
     "etc/systemd/system-generators",
+    "usr/local/lib/systemd/system-generators",
     "usr/lib/systemd/system-generators",
     "lib/systemd/system-generators",
+    "run/systemd/user-generators",
     "etc/systemd/user-generators",
+    "usr/local/lib/systemd/user-generators",
     "usr/lib/systemd/user-generators",
     "lib/systemd/user-generators",
 ];
@@ -106,17 +152,14 @@ struct Link {
     rel: PathBuf,
 }
 
-/// Search-path ranks an administrator writes to: /etc and /run. A .wants
-/// link at any other rank was shipped by a package.
-const ADMIN_RANKS: [u8; 2] = [0, 1];
-
 #[derive(Default)]
 struct Walk {
     units: Vec<Found>,
     dropins: Vec<Found>,
     /// Unit name to the symlinks that pull it in, including the template name
-    /// an instance symlink resolves to.
-    links: BTreeMap<(Scope, String), Vec<(u8, PathBuf)>>,
+    /// an instance symlink resolves to, each with whether it sits where an
+    /// administrator enables things.
+    links: BTreeMap<(Scope, String), Vec<(bool, PathBuf)>>,
     wants: Vec<Link>,
 }
 
@@ -129,19 +172,19 @@ impl Collector for Systemd {
         let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();
         let mut w = Walk::default();
 
-        for (p, rank) in SYSTEM_PATHS {
-            w.scan(cx, &mut seen, &Scope::System, Path::new(p), rank);
+        for d in &SYSTEM_PATHS {
+            w.scan(cx, &mut seen, &Scope::System, Path::new(d.path), d);
         }
-        for (p, rank) in USER_PATHS {
-            w.scan(cx, &mut seen, &Scope::User, Path::new(p), rank);
+        for d in &USER_PATHS {
+            w.scan(cx, &mut seen, &Scope::User, Path::new(d.path), d);
         }
-        let homes: Vec<(String, PathBuf)> = cx
+        let homes: Vec<(String, PathBuf, &SearchDir)> = cx
             .users
             .iter()
-            .map(|u| (u.name.clone(), u.in_home(".config/systemd/user")))
+            .flat_map(|u| HOME_USER_PATHS.iter().map(move |d| (u.name.clone(), u.in_home(d.path), d)))
             .collect();
-        for (who, dir) in &homes {
-            w.scan(cx, &mut seen, &Scope::Home(who.clone()), dir, 0);
+        for (who, dir, d) in &homes {
+            w.scan(cx, &mut seen, &Scope::Home(who.clone()), dir, d);
         }
 
         let mut out = w.entries(cx);
@@ -151,7 +194,8 @@ impl Collector for Systemd {
 }
 
 impl Walk {
-    fn scan(&mut self, cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>, scope: &Scope, dir: &Path, rank: u8) {
+    fn scan(&mut self, cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>, scope: &Scope, dir: &Path, at: &SearchDir) {
+        let (rank, admin) = (at.rank, at.admin);
         match cx.root.dir_identity(dir) {
             Ok(id) => {
                 if !seen.insert(id) {
@@ -172,7 +216,7 @@ impl Walk {
 
             if name.ends_with(".wants") || name.ends_with(".requires") {
                 if walkable {
-                    self.scan_links(cx, scope, &rel, rank);
+                    self.scan_links(cx, scope, &rel, rank, admin);
                 }
             } else if let Some(parent) = name.strip_suffix(".d") {
                 if walkable {
@@ -183,12 +227,12 @@ impl Walk {
                 // unit is an Alias=, and systemd treats the aliased unit as
                 // enabled. `systemctl enable gdm` works exactly this way:
                 // it writes /etc/systemd/system/display-manager.service.
-                if ent.is_symlink && ADMIN_RANKS.contains(&rank) {
+                if ent.is_symlink && admin {
                     if let Ok(target) = cx.root.read_link(&rel) {
                         if let Some(base) = target.file_name().map(|n| n.to_string_lossy().into_owned()) {
                             if base != name && unit_suffix(&base).is_some() {
                                 let abs = cx.root.abs(&rel);
-                                self.links.entry((scope.clone(), base)).or_default().push((rank, abs));
+                                self.links.entry((scope.clone(), base)).or_default().push((admin, abs));
                             }
                         }
                     }
@@ -199,7 +243,7 @@ impl Walk {
     }
 
     /// `multi-user.target.wants/foo.service` is how a unit is enabled on disk.
-    fn scan_links(&mut self, cx: &mut Ctx, scope: &Scope, dir: &Path, rank: u8) {
+    fn scan_links(&mut self, cx: &mut Ctx, scope: &Scope, dir: &Path, rank: u8, admin: bool) {
         for ent in cx.dir(dir) {
             let name = ent.name.to_string_lossy().into_owned();
             if unit_suffix(&name).is_none() {
@@ -212,12 +256,12 @@ impl Walk {
                 .read_link(&rel)
                 .ok()
                 .and_then(|t| t.file_name().map(|n| n.to_string_lossy().into_owned()));
-            self.links.entry((scope.clone(), name.clone())).or_default().push((rank, abs.clone()));
+            self.links.entry((scope.clone(), name.clone())).or_default().push((admin, abs.clone()));
             // An instance symlink enables the template it points at, so the
             // template file is reported enabled too.
             if let Some(tb) = &target_base {
                 if *tb != name {
-                    self.links.entry((scope.clone(), tb.clone())).or_default().push((rank, abs));
+                    self.links.entry((scope.clone(), tb.clone())).or_default().push((admin, abs));
                 }
             }
             self.wants.push(Link { scope: scope.clone(), rank, name, rel });
@@ -265,24 +309,48 @@ impl Walk {
         out
     }
 
-    /// The search path is walked in precedence order, so each group is already
-    /// ordered highest-precedence first.
+    /// Orders each unit name's files by search-path rank and records who
+    /// shadows whom. An account's user manager reads its own directories and
+    /// the global user ones interleaved, so a unit in a home competes with
+    /// the global user units of the same name; the global ones never compete
+    /// with each other across accounts.
     fn note_shadowing(&self, out: &mut [Entry]) {
-        let mut groups: BTreeMap<(&Scope, &str), Vec<usize>> = BTreeMap::new();
+        let mut groups: BTreeMap<(Scope, &str), Vec<usize>> = BTreeMap::new();
         for (i, f) in self.units.iter().enumerate() {
-            groups.entry((&f.scope, f.unit.as_str())).or_default().push(i);
+            groups.entry((f.scope.clone(), f.unit.as_str())).or_default().push(i);
         }
-        for idx in groups.into_values().filter(|g| g.len() > 1) {
-            for n in 0..idx.len() {
-                if n > 0 {
-                    let above = out[idx[n - 1]].source.to_string_lossy().into_owned();
-                    out[idx[n]].note("shadowed_by", above);
-                }
-                if n + 1 < idx.len() {
-                    let below = out[idx[n + 1]].source.to_string_lossy().into_owned();
-                    out[idx[n]].note("shadows", below);
+        let global_user: BTreeMap<&str, Vec<usize>> = groups
+            .iter()
+            .filter(|((scope, _), _)| *scope == Scope::User)
+            .map(|((_, unit), idx)| (*unit, idx.clone()))
+            .collect();
+        for ((scope, unit), idx) in groups.iter_mut() {
+            if matches!(scope, Scope::Home(_)) {
+                if let Some(global) = global_user.get(unit) {
+                    idx.extend(global);
                 }
             }
+        }
+
+        let mut shadows: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+        let mut shadowed_by: BTreeMap<usize, BTreeSet<String>> = BTreeMap::new();
+        for mut idx in groups.into_values().filter(|g| g.len() > 1) {
+            idx.sort_by_key(|&i| self.units[i].rank);
+            for pair in idx.windows(2) {
+                let (above, below) = (pair[0], pair[1]);
+                // Two names for one directory share a rank; neither shadows.
+                if self.units[above].rank == self.units[below].rank {
+                    continue;
+                }
+                shadows.entry(above).or_default().insert(out[below].source.to_string_lossy().into_owned());
+                shadowed_by.entry(below).or_default().insert(out[above].source.to_string_lossy().into_owned());
+            }
+        }
+        for (i, paths) in shadows {
+            out[i].note("shadows", paths.into_iter().collect::<Vec<_>>().join(", "));
+        }
+        for (i, paths) in shadowed_by {
+            out[i].note("shadowed_by", paths.into_iter().collect::<Vec<_>>().join(", "));
         }
     }
 
@@ -316,7 +384,7 @@ impl Walk {
             let describe = |want: bool| -> Option<String> {
                 let paths: Vec<String> = links?
                     .iter()
-                    .filter(|(rank, _)| ADMIN_RANKS.contains(rank) == want)
+                    .filter(|(admin, _)| *admin == want)
                     .map(|(_, p)| p.to_string_lossy().into_owned())
                     .collect();
                 (!paths.is_empty()).then(|| paths.join(", "))
@@ -340,7 +408,7 @@ impl Walk {
         e
     }
 
-    fn enabling_links(&self, f: &Found, suffix: Option<&str>) -> Option<&Vec<(u8, PathBuf)>> {
+    fn enabling_links(&self, f: &Found, suffix: Option<&str>) -> Option<&Vec<(bool, PathBuf)>> {
         if let Some(l) = self.links.get(&(f.scope.clone(), f.unit.clone())) {
             return Some(l);
         }
@@ -920,14 +988,99 @@ mod tests {
 
         let by_rank: BTreeMap<&str, &Entry> =
             all.iter().map(|e| (e.raw["search_path_rank"].as_str(), *e)).collect();
-        assert_eq!(by_rank["0"].source, dir.join("etc/systemd/system/sshd.service"));
-        assert_eq!(by_rank["2"].source, dir.join("usr/lib/systemd/system/sshd.service"));
-        assert_eq!(by_rank["0"].raw["shadows"], by_rank["1"].source.to_string_lossy());
-        assert_eq!(by_rank["1"].raw["shadowed_by"], by_rank["0"].source.to_string_lossy());
-        assert_eq!(by_rank["2"].raw["shadowed_by"], by_rank["1"].source.to_string_lossy());
-        assert!(!by_rank["2"].raw.contains_key("shadows"));
+        let (etc, run, vendor) = (by_rank["4"], by_rank["6"], by_rank["10"]);
+        assert_eq!(etc.source, dir.join("etc/systemd/system/sshd.service"));
+        assert_eq!(run.source, dir.join("run/systemd/system/sshd.service"));
+        assert_eq!(vendor.source, dir.join("usr/lib/systemd/system/sshd.service"));
+        assert_eq!(etc.raw["shadows"], run.source.to_string_lossy());
+        assert_eq!(run.raw["shadowed_by"], etc.source.to_string_lossy());
+        assert_eq!(vendor.raw["shadowed_by"], run.source.to_string_lossy());
+        assert!(!vendor.raw.contains_key("shadows"));
         // The flag itself belongs to the enrichment pass.
         assert!(all.iter().all(|e| !e.has_flag(Flag::ShadowsVendorUnit)));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn precedence_follows_the_search_path_systemd_actually_uses() {
+        // generator.early outranks /etc, generator.late sits below every
+        // vendor directory, and /usr/local/lib is a search-path directory in
+        // its own right between /run and /usr/lib.
+        let dir = tree("order");
+        write(&dir, "run/systemd/generator.early/a.service", b"[Service]\nExecStart=/bin/early\n");
+        write(&dir, "etc/systemd/system/a.service", b"[Service]\nExecStart=/bin/etc\n");
+        write(&dir, "usr/lib/systemd/system/b.service", VENDOR);
+        write(&dir, "run/systemd/generator.late/b.service", b"[Service]\nExecStart=/bin/late\n");
+        write(&dir, "usr/local/lib/systemd/system/c.service", b"[Service]\nExecStart=/opt/c\n[Install]\nWantedBy=multi-user.target\n");
+        write(&dir, "usr/lib/systemd/system/c.service", VENDOR);
+
+        let s = scan(&dir);
+        let src = |e: &Entry| e.source.strip_prefix(&dir).unwrap().to_string_lossy().into_owned();
+        let find = |name: &str, at: &str| {
+            named(&s, name).into_iter().find(|e| src(e) == at).unwrap_or_else(|| panic!("{at} not reported"))
+        };
+
+        let early = find("a.service", "run/systemd/generator.early/a.service");
+        assert!(early.raw["shadows"].ends_with("etc/systemd/system/a.service"), "{:?}", early.raw);
+        let late = find("b.service", "run/systemd/generator.late/b.service");
+        assert!(late.raw["shadowed_by"].ends_with("usr/lib/systemd/system/b.service"), "{:?}", late.raw);
+        assert!(!late.raw.contains_key("shadows"));
+
+        let local = find("c.service", "usr/local/lib/systemd/system/c.service");
+        assert!(local.raw["shadows"].ends_with("usr/lib/systemd/system/c.service"));
+        assert_eq!(local.command.as_deref(), Some(&b"/opt/c"[..]));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_unit_in_a_home_overrides_the_global_user_unit_of_the_same_name() {
+        // Each account's user manager reads ~/.config/systemd/user before
+        // /etc/systemd/user and /usr/lib/systemd/user, so dropping a unit
+        // there replaces the packaged one for that account.
+        let dir = tree("homeorder");
+        write(&dir, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/sh\nbob:x:1001:1001::/home/bob:/bin/sh\n");
+        write(&dir, "usr/lib/systemd/user/pipewire.service", VENDOR);
+        write(&dir, "home/alice/.config/systemd/user/pipewire.service", b"[Service]\nExecStart=/tmp/x\n");
+        write(&dir, "home/bob/.local/share/systemd/user/pipewire.service", b"[Service]\nExecStart=/tmp/y\n");
+        write(&dir, "etc/systemd/user/pipewire.service", b"[Service]\nExecStart=/opt/admin\n");
+
+        let s = scan(&dir);
+        let all = named(&s, "pipewire.service");
+        assert_eq!(all.len(), 4);
+        let at = |p: &str| *all.iter().find(|e| e.source.ends_with(p)).unwrap();
+
+        let alice = at("home/alice/.config/systemd/user/pipewire.service");
+        assert!(alice.raw["shadows"].ends_with("etc/systemd/user/pipewire.service"), "{:?}", alice.raw);
+        // ~/.local/share ranks below /etc/systemd/user: bob's copy is itself
+        // overridden, and overrides only the vendor one.
+        let bob = at("home/bob/.local/share/systemd/user/pipewire.service");
+        assert!(bob.raw["shadowed_by"].ends_with("etc/systemd/user/pipewire.service"), "{:?}", bob.raw);
+        assert!(bob.raw["shadows"].ends_with("usr/lib/systemd/user/pipewire.service"));
+        let admin = at("etc/systemd/user/pipewire.service");
+        assert!(admin.raw["shadowed_by"].contains("home/alice"), "{:?}", admin.raw);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_unit_in_a_home_search_directory_is_where_units_belong() {
+        // Both per-account directories are on the user manager's search
+        // path. Flagging every unit found there as non-standard would bury
+        // the one that is actually out of place.
+        let dir = tree("homeloc");
+        write(&dir, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/sh\n");
+        write(&dir, "home/alice/.config/systemd/user/sync.service", b"[Service]\nExecStart=/usr/bin/true\n");
+        write(&dir, "home/alice/.local/share/systemd/user/app.service", b"[Service]\nExecStart=/usr/bin/true\n");
+        write(&dir, "home/alice/elsewhere/rogue.service", b"[Service]\nExecStart=/usr/bin/true\n");
+        link(&dir, "/home/alice/elsewhere/rogue.service", "home/alice/.config/systemd/user/rogue.service");
+
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Systemd)];
+        let mut s = crate::scan::run(&root, &Options { deep: false }, &collectors);
+        crate::enrich::enrich(&root, &mut s);
+        for name in ["sync.service", "app.service"] {
+            assert!(!one(&s, name).has_flag(Flag::NonStandardLocation), "{name}");
+        }
+        assert!(one(&s, "rogue.service").has_flag(Flag::NonStandardLocation));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

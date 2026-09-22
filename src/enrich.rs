@@ -262,10 +262,13 @@ fn standard_roots(kind: Kind) -> &'static [&'static str] {
     match kind {
         Kind::SystemdUnit | Kind::SystemdTimer | Kind::SystemdGenerator => &[
             "/etc/systemd/",
+            "/etc/xdg/systemd/user/",
             "/run/systemd/",
             "/usr/lib/systemd/",
             "/lib/systemd/",
             "/usr/local/lib/systemd/",
+            "/usr/share/systemd/user/",
+            "/usr/local/share/systemd/user/",
         ],
         Kind::Udev => &["/etc/udev/", "/run/udev/", "/usr/lib/udev/", "/lib/udev/"],
         Kind::KernelModule => &[
@@ -292,9 +295,17 @@ fn apply_location(root: &Root, entry: &mut Entry) {
     // Per-user autostart lives under each home, so the acceptable prefixes
     // are built from the homes actually found rather than matched loosely.
     let mut acceptable: Vec<String> = roots.iter().map(|r| (*r).to_string()).collect();
-    if entry.kind == Kind::XdgAutostart {
-        for home in root.homes() {
-            acceptable.push(format!("{}/.config/autostart/", Path::new("/").join(root.rel(home)).display()));
+    let per_home: &[&str] = match entry.kind {
+        Kind::XdgAutostart => &[".config/autostart/"],
+        // The per-account half of the user manager's search path.
+        Kind::SystemdUnit | Kind::SystemdTimer => {
+            &[".config/systemd/user/", ".config/systemd/user.control/", ".local/share/systemd/user/"]
+        }
+        _ => &[],
+    };
+    for home in root.homes() {
+        for sub in per_home {
+            acceptable.push(format!("{}/{sub}", Path::new("/").join(root.rel(home)).display()));
         }
     }
     // A prefix test, not a substring one. `contains` let an attacker keep the

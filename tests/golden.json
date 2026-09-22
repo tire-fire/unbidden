@@ -20,7 +20,7 @@
       "raw": {
         "dangling_symlink": "true",
         "scope": "system",
-        "search_path_rank": "0",
+        "search_path_rank": "4",
         "symlink_target": "/dev/null",
         "unit_type": "service"
       },
@@ -50,7 +50,7 @@
         "dropin_for": "ssh.service",
         "exec.ExecStartPre": "/opt/pre.sh",
         "scope": "system",
-        "search_path_rank": "0"
+        "search_path_rank": "4"
       },
       "source": "<ROOT>/etc/systemd/system/ssh.service.d/override.conf",
       "source_utf8": true,
@@ -82,7 +82,7 @@
         "env.LD_PRELOAD": "/tmp/hook.so",
         "exec.ExecStart": "/opt/telemetry --quiet",
         "scope": "system",
-        "search_path_rank": "0",
+        "search_path_rank": "4",
         "target_provenance": "unpackaged",
         "unit_type": "service",
         "user": "root",
@@ -149,7 +149,7 @@
       "raw": {
         "exec.ExecStart": "/usr/sbin/sshd -D",
         "scope": "system",
-        "search_path_rank": "2",
+        "search_path_rank": "10",
         "target_provenance": "unpackaged",
         "unit_type": "service",
         "wanted_by": "multi-user.target"
@@ -180,7 +180,7 @@
       },
       "raw": {
         "scope": "system",
-        "search_path_rank": "2",
+        "search_path_rank": "10",
         "timer.OnCalendar": "daily",
         "timer.Persistent": "true",
         "unit_type": "timer",
