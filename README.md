@@ -8,15 +8,17 @@ Finds everything that runs on Linux without anyone asking.
 
 ![unbidden finding planted persistence on a Debian host](docs/scan.svg)
 
-Boot, login, authentication, timers, device events, package operations, shell
-startup — systemd, cron, udev, PAM, sudoers, SSH keys, XDG autostart, GNOME and
-Cinnamon extensions, and a dozen other things. One tool, one record.
+systemd units and timers, cron and at, udev rules, PAM, sudoers, SSH keys, XDG
+autostart, GNOME and Cinnamon extensions, package manager hooks, shell startup
+files, rc.local, SysV init. If it runs without a person typing something, it
+should turn up here.
 
-The useful part is what it leaves out. A desktop has well over a thousand
-autostart entries, nearly all of them shipped by a package and unmodified.
-unbidden reads the dpkg and rpm databases directly and hides those, so the
-default view is the handful that are actually worth reading. In the screenshot
-above, 1,690 entries were hidden to show those eight.
+Most of what it finds is boring, and that's the problem it actually solves. A
+desktop carries well over a thousand autostart entries. Nearly all of them came
+from a package and nobody has touched them since. unbidden reads the dpkg and
+rpm databases itself and hides those, so you get the short list instead. On the
+host in the screenshot a plain `unbidden` hid 1,690 entries; the command shown
+narrows it further to two flags worth caring about.
 
 ## Install
 
@@ -24,40 +26,44 @@ above, 1,690 entries were hidden to show those eight.
 cargo install unbidden
 ```
 
-Or grab a static binary from [releases](https://github.com/tire-fire/unbidden/releases) —
-it's musl, so it runs anywhere from RHEL 7 to Alpine with nothing installed.
+There are static binaries in [releases](https://github.com/tire-fire/unbidden/releases)
+too. They're musl, so they'll run on anything from RHEL 7 to Alpine without
+installing a thing first.
 
 ## Use
 
 ```sh
-unbidden                          # the readable view
+unbidden                          # the short list
 unbidden --all --json             # everything, one record per line
-unbidden --flag unpackaged        # filter: packaged-modified, world-writable, ...
+unbidden --flag unpackaged        # also packaged-modified, world-writable, ...
 unbidden --kind cron --trigger login
-unbidden --deep                   # + SUID, file caps, git hooks (walks the disk)
+unbidden --deep                   # adds SUID, file caps, git hooks (walks the disk)
 unbidden --save base.json         # and later:
 unbidden --against base.json      # what changed?
-unbidden explain 8f4e03c59dff     # everything about one entry, with its source
+unbidden explain 8f4e03c59dff     # one entry in full, with the text it came from
 ```
 
-Entry ids are stable, so a backdoor that rewrites its own `ExecStart` diffs as
-one *changed* entry naming the fields, not as an unrelated add and remove.
+An entry's id doesn't move when the entry's contents do. A backdoor that
+rewrites its own `ExecStart` shows up as one changed row telling you which
+fields moved, instead of a removal and an addition you have to notice are the
+same thing.
 
 ## What it won't do
 
-It never runs anything on the host it's examining — `rpm`, `dpkg`, `systemctl`
-and friends are all binaries an attacker can wrap. Everything comes from
-reading files, directories and kernel interfaces, or talking to systemd over a
-socket. It's statically linked for the same reason: `/etc/ld.so.preload` is
-itself a persistence mechanism.
+It doesn't run anything on the machine it's looking at. `rpm`, `dpkg` and
+`systemctl` are binaries an attacker can replace, so everything here comes from
+reading files and kernel interfaces, or from talking to systemd over a socket.
+Same reason it's statically linked: `/etc/ld.so.preload` is a persistence
+mechanism in its own right, and a dynamically linked scanner loads whatever it
+says before `main()`.
 
-**It cannot see past a kernel-level compromise.** A module that hides itself
-defeats userspace enumeration by construction. unbidden is useful against the
-overwhelming majority of real persistence, which is file-backed, and a clean
-report is not proof of a clean host.
+**A kernel-level compromise beats it.** A module that unlinks itself isn't
+visible to anything running in userspace, this included. It's good against the
+file-backed persistence that makes up almost everything real. Don't read a
+clean report as a clean machine.
 
-Accounts come from `/etc/passwd`, since a static binary has no NSS — an LDAP or
-SSSD account with no local trace won't be enumerated.
+Accounts come out of `/etc/passwd`, because a static binary has no NSS. An LDAP
+or SSSD account with nothing on local disk won't be picked up.
 
 ## Supported
 
@@ -68,24 +74,25 @@ SSSD account with no local trace won't be enumerated.
 | Linux Mint | 21.x, LMDE | dpkg, Cinnamon |
 | Fedora | current, current-1 | rpm (sqlite) |
 
-Everything else runs best-effort. With no package database it reports
-provenance as unknown rather than calling every file unpackaged.
+Anything else works on a best-effort basis. With no package database it reports
+provenance as unknown rather than calling every file on the box unpackaged.
 
-Mint 22.x isn't in the matrix: no image exists that is genuinely Mint 22, and
-it's Ubuntu noble underneath with Cinnamon on top — both already covered.
+Mint 22.x isn't tested. Nobody publishes an image that's actually Mint 22, and
+underneath it's Ubuntu noble with Cinnamon on top. Both are already covered.
 
 ## Testing
 
-`cargo test` is unit tests plus a golden record of a whole scan and a mutation
-pass that takes a synthetic tree apart 120 ways. CI runs the packaging checks
-against eight real distro images, boots actual GNOME and Cinnamon sessions, and
-fuzzes the five parsers.
+`cargo test` covers the collectors, and adds a golden record of a full scan plus
+a mutation pass that takes a synthetic tree apart 120 different ways. CI runs
+the packaging checks against eight distro images, boots real GNOME and Cinnamon
+sessions, and fuzzes the parsers.
 
-The real one is `ci/vm-harness.sh`, which boots a throwaway VM, installs
-[PANIX](https://github.com/Aegrah/PANIX), and for each of its persistence
-mechanisms does plant → scan → assert → revert → assert the diff is clean. That
-last step is the one that catches a tool reporting things that aren't there
-any more.
+`ci/vm-harness.sh` is the one that matters. It boots a throwaway VM, installs
+[PANIX](https://github.com/Aegrah/PANIX), and for every mechanism PANIX can
+plant it does the same loop: plant it, scan, check it showed up with the right
+kind, revert it, scan again, check the diff came back clean. That second scan is
+there because a tool that keeps reporting a mechanism after it's gone stops
+getting read.
 
 ## Licence
 
