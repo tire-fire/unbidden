@@ -1075,6 +1075,79 @@
       "target_path": null,
       "target_sha256": "835c761f6976b7555b8b674933bc871e4d8b6a98dcec69637b8e30f5f81603df",
       "trigger": "boot"
+    },
+    {
+      "command": null,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "325b8be7226f8a6d0ad7eb5b56f66a075f6ee6ca359ab41ff3133dfaca232a89",
+      "kind": "desktop_extension",
+      "mode": 493,
+      "mtime": "<normalised>",
+      "name": "notes@alice",
+      "owner_uid": "<normalised>",
+      "principal": "alice",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "dconf_key": "/org/cinnamon/enabled-applets",
+        "dconf_profile": "user-db:user, system-db:local",
+        "enabled_by": "panel1:right:0:notes@alice:3",
+        "enabled_for": "alice",
+        "enablement_source": "user-db:user",
+        "entry_point": "applet.js",
+        "extension_kind": "cinnamon-applet",
+        "metadata_name": "notes@alice",
+        "target_provenance": "unpackaged",
+        "user": "alice",
+        "user_discovered_via": "passwd",
+        "uuid": "notes@alice"
+      },
+      "source": "<ROOT>/home/alice/.local/share/cinnamon/applets/notes@alice",
+      "source_utf8": true,
+      "target_path": "<ROOT>/home/alice/.local/share/cinnamon/applets/notes@alice/applet.js",
+      "target_path_utf8": true,
+      "target_sha256": "620cb062d372a50d356675452323e4eb6832fadf9e51d88ac8ea29e434ec7532",
+      "trigger": "login"
+    },
+    {
+      "command": null,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "d29a5ca48edf2171fac90a5c22e069d3aec3d5a05230cdf961d61a066b1f8db9",
+      "kind": "desktop_extension",
+      "mode": 493,
+      "mtime": "<normalised>",
+      "name": "pinned@corp",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "dconf_key": "/org/gnome/shell/enabled-extensions",
+        "dconf_lock": "/org/gnome/shell/enabled-extensions (system-db:local)",
+        "dconf_profile": "user-db:user, system-db:local",
+        "enabled_by": "pinned@corp",
+        "enabled_for": "alice, bob, root",
+        "enablement_source": "system-db:local",
+        "entry_point": "extension.js",
+        "extension_kind": "gnome-shell-extension",
+        "metadata_name": "pinned@corp",
+        "target_provenance": "unpackaged",
+        "uuid": "pinned@corp"
+      },
+      "source": "<ROOT>/usr/share/gnome-shell/extensions/pinned@corp",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/share/gnome-shell/extensions/pinned@corp/extension.js",
+      "target_path_utf8": true,
+      "target_sha256": "620cb062d372a50d356675452323e4eb6832fadf9e51d88ac8ea29e434ec7532",
+      "trigger": "login"
     }
   ],
   "header": {
@@ -1096,7 +1169,7 @@
         "status": "skipped"
       },
       {
-        "entries": 2,
+        "entries": 4,
         "name": "desktop",
         "status": "complete"
       },

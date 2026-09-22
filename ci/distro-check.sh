@@ -166,12 +166,14 @@ if [ -n "${UNBIDDEN_DESKTOP:-}" ]; then
         cinnamon)
             session=cinnamon-session;  want_kind=cinnamon-applet
             extdir=".local/share/cinnamon/applets"; entry_file=applet.js
+            sysdir=/usr/share/cinnamon/applets
             schema=org.cinnamon; key=enabled-applets; unlock=""
             # Cinnamon keys an applet by panel, side, order, uuid and instance.
             value="panel1:right:0:$planted:99" ;;
         gnome)
             session=gnome-session;  want_kind=gnome-shell-extension
             extdir=".local/share/gnome-shell/extensions"; entry_file=extension.js
+            sysdir=/usr/share/gnome-shell/extensions
             schema=org.gnome.shell; key=enabled-extensions
             value="$planted"
             # A session that has never run an extension leaves the kill switch
@@ -258,6 +260,56 @@ if [ -n "${UNBIDDEN_DESKTOP:-}" ]; then
     case "$mine" in
         *'"enablement_source":"user-db'*) note "the planted extension reads as enabled from the session's own dconf database" ;;
         *) fail "the planted extension's enablement did not come from a user database: $mine" ;;
+    esac
+
+    # A user database is half of dconf. /etc/dconf/profile/user names a stack,
+    # a system database answers for every account on the host, and a lock in
+    # one stops the databases above it answering at all — an administrator
+    # making a setting mandatory, and equally an attacker with root pinning an
+    # extension on for everybody. dconf compiles the database here, so the
+    # binary layout and the lock encoding are the ones the tool will meet
+    # rather than this project's idea of them.
+    # Compiling one needs dconf itself, which a desktop image carries only
+    # sometimes: gsettings reaches dconf through a library, not the binary.
+    command -v dconf >/dev/null ||
+        { apt-get -qq update >/dev/null 2>&1; apt-get -qq install -y dconf-cli >/dev/null 2>&1 || true; }
+    command -v dconf >/dev/null || fail "dconf is not installed and dconf-cli could not be added"
+
+    pinned="unbidden-pinned@example.test"
+    schemapath=$(echo "$schema" | tr . /)
+    mkdir -p "$sysdir/$pinned" /etc/dconf/profile /etc/dconf/db/local.d/locks
+    printf '{"uuid":"%s","name":"unbidden pin"}\n' "$pinned" > "$sysdir/$pinned/metadata.json"
+    : > "$sysdir/$pinned/$entry_file"
+    printf 'user-db:user\nsystem-db:local\n' > /etc/dconf/profile/user
+    printf "[%s]\n%s=['%s']\n" "$schemapath" "$key" "$(echo "$value" | sed "s/$planted/$pinned/")" \
+        > /etc/dconf/db/local.d/00-unbidden
+    printf '/%s/%s\n' "$schemapath" "$key" > /etc/dconf/db/local.d/locks/00-unbidden
+    dconf compile /etc/dconf/db/local /etc/dconf/db/local.d ||
+        fail "dconf could not compile the system database"
+
+    ext=$("$BIN" --json --all | tail -n +2 | grep '"kind":"desktop_extension"' || true)
+    mine=$(echo "$ext" | grep "\"name\":\"$pinned\"" || true)
+    [ -n "$mine" ] || fail "the extension pinned by a system database was not reported"
+    case "$mine" in
+        *'"enabled":"enabled"'*) ;;
+        *) fail "a system database enables $pinned, but it reads as not enabled: $mine" ;;
+    esac
+    case "$mine" in
+        *'"enablement_source":"system-db:local"'*) note "the pinned extension reads as enabled from the system database" ;;
+        *) fail "the pinned extension's enablement did not come from the system database: $mine" ;;
+    esac
+    case "$mine" in
+        *'"dconf_lock"'*) note "and the lock on /$schemapath/$key is reported" ;;
+        *) fail "the lock on /$schemapath/$key was not reported: $mine" ;;
+    esac
+
+    # dconf(7): no database listed above the locking one may supply that key,
+    # so the account's own choice stops counting the moment the lock lands.
+    mine=$(echo "$ext" | grep "\"name\":\"$planted\"" || true)
+    [ -n "$mine" ] || fail "the extension planted in $appdir stopped being reported"
+    case "$mine" in
+        *'"enabled":"enabled"'*) fail "the locked key still reads out of the user database: $mine" ;;
+        *) note "the locked key demotes the account's own database, as dconf does" ;;
     esac
 fi
 
