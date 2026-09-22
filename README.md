@@ -13,12 +13,11 @@ autostart, GNOME and Cinnamon extensions, package manager hooks, shell startup
 files, rc.local, SysV init. If it runs without a person typing something, it
 should turn up here.
 
-Most of what it finds is boring, and that's the problem it actually solves. A
-desktop carries well over a thousand autostart entries. Nearly all of them came
-from a package and nobody has touched them since. unbidden reads the dpkg and
-rpm databases itself and hides those, so you get the short list instead. On the
-host in the screenshot a plain `unbidden` hid 1,690 entries; the command shown
-narrows it further to two flags worth caring about.
+Most of what it finds is boring. A desktop has well over a thousand autostart
+entries. Nearly all of them came from a package and nobody has touched them
+since. unbidden reads the dpkg and rpm databases itself and hides those, so you
+get the short list instead. On the host in the screenshot a plain `unbidden`
+hid 1,690 entries; the command shown narrows what's left to two flags.
 
 ## Install
 
@@ -87,12 +86,11 @@ a mutation pass that takes a synthetic tree apart 120 different ways. CI runs
 the packaging checks against eight distro images, boots real GNOME and Cinnamon
 sessions, and fuzzes the parsers.
 
-`ci/vm-harness.sh` is the one that matters. It boots a throwaway VM, installs
+`ci/vm-harness.sh` boots a throwaway VM, installs
 [PANIX](https://github.com/Aegrah/PANIX), and for every mechanism PANIX can
 plant it does the same loop: plant it, scan, check it showed up with the right
-kind, revert it, scan again, check the diff came back clean. That second scan is
-there because a tool that keeps reporting a mechanism after it's gone stops
-getting read.
+kind, revert it, scan again, check the diff came back clean. The second scan is
+the one that catches entries still being reported after the mechanism is gone.
 
 ## Licence
 
