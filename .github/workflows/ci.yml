@@ -254,12 +254,34 @@ jobs:
             cur=$(echo "$cur" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
           fi
           echo "version=$cur" >> "$GITHUB_OUTPUT"
-      - name: commit the bump
+      - name: set the version the binaries will report
+        if: steps.v.outputs.skip != '1' && github.ref_type != 'tag'
+        run: |
+          sed -i "0,/^version = /s/^version = .*/version = \"${{ steps.v.outputs.version }}\"/" Cargo.toml
+          cargo metadata --no-deps --format-version 1 > /dev/null
+      - name: build the binaries this release ships
+        if: steps.v.outputs.skip != '1'
+        # Not the artifacts from the static job: those were built before the
+        # bump and would report the previous version to --version. Each target
+        # gets its own directory because cross runs each one in a different
+        # container, and a host build script compiled against one image's
+        # glibc will not run inside the other's.
+        run: |
+          cargo install cross --locked
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            rustup target add "$t"
+            cross build --locked --release --target "$t" --target-dir "build-$t"
+            bin=build-$t/$t/release/unbidden
+            file "$bin" | grep -qE 'static-pie linked|statically linked' \
+              || { echo "$t: not statically linked"; exit 1; }
+            cp "$bin" "unbidden-$t"
+          done
+          sha256sum unbidden-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: tag it, now that the binaries exist
         if: steps.v.outputs.skip != '1' && github.ref_type != 'tag'
         run: |
           v=${{ steps.v.outputs.version }}
-          sed -i "0,/^version = /s/^version = .*/version = \"$v\"/" Cargo.toml
-          cargo metadata --no-deps --format-version 1 > /dev/null
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # The first release takes the version Cargo.toml already holds, so
@@ -270,22 +292,6 @@ jobs:
           git tag "v$v"
           # Pushed with GITHUB_TOKEN, which by design starts no further run.
           git push -q origin HEAD:main "v$v"
-      - name: build the binaries this release ships
-        if: steps.v.outputs.skip != '1'
-        # Not the artifacts from the static job: those were built before the
-        # bump and would report the previous version to --version.
-        run: |
-          cargo install cross --locked
-          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-            rustup target add "$t"
-            cross build --locked --release --target "$t"
-            bin=target/$t/release/unbidden
-            file "$bin" | grep -qE 'static-pie linked|statically linked' \
-              || { echo "$t: not statically linked"; exit 1; }
-            cp "$bin" "unbidden-$t"
-          done
-          sha256sum unbidden-* > SHA256SUMS
-          cat SHA256SUMS
       - name: post it
         if: steps.v.outputs.skip != '1'
         env:
