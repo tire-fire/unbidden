@@ -196,8 +196,15 @@ fn banners(w: &mut impl Write, scan: &Scan) -> io::Result<()> {
     Ok(())
 }
 
+/// Findings first, caveats last. The column is narrow, so whatever is least
+/// important has to be the part that gets clipped — and `degraded-enablement`
+/// is a note about how an answer was reached, not a finding about the host.
+/// Leading with it once hid `packaged-modified`, which is the single
+/// highest-signal thing this tool reports.
 fn flags_text(e: &Entry) -> String {
-    e.flags.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(",")
+    let mut flags: Vec<&str> = e.flags.iter().map(|f| f.as_str()).collect();
+    flags.sort_by_key(|f| *f == Flag::DegradedEnablement.as_str());
+    flags.join(",")
 }
 
 fn width_of(lens: impl Iterator<Item = usize>, min: usize, max: usize) -> usize {
@@ -279,6 +286,14 @@ mod tests {
         assert!(!suppressed(&entry("ssh.service", packaged(Integrity::Unknown), &[])));
         assert!(!suppressed(&entry("evil.service", Provenance::Unpackaged, &[Flag::Unpackaged])));
         assert!(!suppressed(&entry("ssh.service", packaged(Integrity::Intact), &[Flag::WorldWritable])));
+    }
+
+    #[test]
+    fn the_narrow_flag_column_clips_the_caveat_not_the_finding() {
+        let mut e = entry("cron.service", packaged(Integrity::Modified), &[]);
+        e.flag(Flag::DegradedEnablement);
+        e.flag(Flag::PackagedModified);
+        assert!(flags_text(&e).starts_with("packaged-modified"), "got {}", flags_text(&e));
     }
 
     #[test]
