@@ -1,0 +1,57 @@
+# Deliberately its own workspace: §13 wants fuzz targets, but cargo-fuzz needs
+# nightly for its sanitizer flags and the crate this repo publishes must build
+# on the pinned stable in Cargo.toml. Keeping the two apart is what lets
+# `cargo test --all-targets` and `cargo publish` at the root stay unaware of it.
+[package]
+name = "unbidden-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+unbidden = { path = ".." }
+
+[workspace]
+members = ["."]
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "unit_file"
+path = "fuzz_targets/unit_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crontab"
+path = "fuzz_targets/crontab.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "desktop_file"
+path = "fuzz_targets/desktop_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "udev_rules"
+path = "fuzz_targets/udev_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pam_config"
+path = "fuzz_targets/pam_config.rs"
+test = false
+doc = false
+bench = false

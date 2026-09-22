@@ -16,6 +16,44 @@ jobs:
       - name: no warnings
         run: cargo build --locked --release 2>&1 | tee /tmp/build.log && ! grep -q '^warning' /tmp/build.log
 
+  fuzz:
+    # §13: every parser gets a cargo-fuzz target, and §3 is why — parser input
+    # is adversarial, so "it does not panic" has to be exercised rather than
+    # asserted. cargo-fuzz needs nightly for its sanitizer flags, which is the
+    # one place this repository leaves the toolchain in Cargo.toml.
+    #
+    # Nothing depends on this job and it depends on nothing, so it never holds
+    # up the matrix below. It does fail the run, though: a collector that
+    # panics is a whole mechanism class the operator silently loses, and a
+    # fuzzer that cannot redden a build is decoration.
+    #
+    # A minute a target is a smoke run, not a soak. It catches a shallow panic
+    # on every push; finding the deep ones is what a corpus and a real fuzzing
+    # host are for.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo install cargo-fuzz --locked
+      - run: cargo +nightly fuzz build
+      - name: a minute on each target
+        run: |
+          for t in $(cargo +nightly fuzz list); do
+            echo "::group::$t"
+            # -timeout turns a hang into a reported crash rather than a job
+            # that runs until GitHub kills it; the two memory limits are how
+            # "no unbounded memory" gets checked at all.
+            cargo +nightly fuzz run "$t" -- \
+              -max_total_time=60 -timeout=10 -rss_limit_mb=2048 -malloc_limit_mb=512
+            echo "::endgroup::"
+          done
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+
   static:
     # /etc/ld.so.preload is a persistence mechanism: a dynamically linked
     # scanner runs the attacker's code before main(). A regression here is a

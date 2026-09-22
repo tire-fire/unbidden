@@ -1,2 +1,8 @@
 /target
 unbidden-musl
+
+# cargo-fuzz artefacts; the seed corpora in fuzz/corpus are committed.
+fuzz/target
+fuzz/Cargo.lock
+fuzz/artifacts
+fuzz/coverage

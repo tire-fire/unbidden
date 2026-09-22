@@ -1,0 +1,4 @@
+[Other Group]
+Exec=/not/here
+[Desktop Entry]
+Exec=sh -c "a\sb"

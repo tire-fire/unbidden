@@ -1,0 +1,2 @@
+*/5 * * * * root /usr/bin/x %percent-is-stdin
+0 0 1 1 1 root /bin/sh
