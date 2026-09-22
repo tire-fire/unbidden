@@ -14,6 +14,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 unbidden = { path = ".." }
+# Only for the rpm_header target, which writes the rpmdb its input goes into.
+# The same version and features as the root crate, so the one libsqlite3-sys
+# is shared.
+rusqlite = { version = "0.37", features = ["bundled", "serialize"] }
 
 [workspace]
 members = ["."]
@@ -52,6 +56,230 @@ bench = false
 [[bin]]
 name = "pam_config"
 path = "fuzz_targets/pam_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sudoers"
+path = "fuzz_targets/sudoers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sshd_config"
+path = "fuzz_targets/sshd_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "authorized_keys"
+path = "fuzz_targets/authorized_keys.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "modprobe"
+path = "fuzz_targets/modprobe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "modules_load"
+path = "fuzz_targets/modules_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "apt_conf"
+path = "fuzz_targets/apt_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dnf_plugin"
+path = "fuzz_targets/dnf_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dbus_service"
+path = "fuzz_targets/dbus_service.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dbus_policy"
+path = "fuzz_targets/dbus_policy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dpkg_triggers"
+path = "fuzz_targets/dpkg_triggers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dpkg_status"
+path = "fuzz_targets/dpkg_status.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dpkg_md5sums"
+path = "fuzz_targets/dpkg_md5sums.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dpkg_list"
+path = "fuzz_targets/dpkg_list.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "script_head"
+path = "fuzz_targets/script_head.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "passwd"
+path = "fuzz_targets/passwd.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "os_release"
+path = "fuzz_targets/os_release.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dconf_user"
+path = "fuzz_targets/dconf_user.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dconf_profile"
+path = "fuzz_targets/dconf_profile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gschemas"
+path = "fuzz_targets/gschemas.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "extension_metadata"
+path = "fuzz_targets/extension_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "at_job"
+path = "fuzz_targets/at_job.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "anacrontab"
+path = "fuzz_targets/anacrontab.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "init_script"
+path = "fuzz_targets/init_script.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rc_local"
+path = "fuzz_targets/rc_local.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nm_dispatcher"
+path = "fuzz_targets/nm_dispatcher.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "motd"
+path = "fuzz_targets/motd.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shell_profile"
+path = "fuzz_targets/shell_profile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pam_environment"
+path = "fuzz_targets/pam_environment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pam_env_conf"
+path = "fuzz_targets/pam_env_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ld_so_preload"
+path = "fuzz_targets/ld_so_preload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gitconfig"
+path = "fuzz_targets/gitconfig.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rpm_header"
+path = "fuzz_targets/rpm_header.rs"
 test = false
 doc = false
 bench = false

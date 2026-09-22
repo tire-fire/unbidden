@@ -1,4 +1,4 @@
-//! One harness for all five targets.
+//! One harness for every target.
 //!
 //! The parsers are private to their collector modules, and §3's property is
 //! about what a collector does with a hostile file rather than about any one
@@ -28,10 +28,44 @@ static ROOT: OnceLock<(PathBuf, Root)> = OnceLock::new();
 /// memory. Arbitrary bytes have no correct parse, so nothing here checks
 /// what came out — only that the collector came back.
 pub fn feed(rel: &str, collector: Box<dyn Collector>, data: &[u8]) {
-    let (dir, root) = ROOT.get_or_init(|| plant(rel));
-    std::fs::write(dir.join(rel), data).expect("fuzz root is writable");
+    feed_with(rel, &[], collector, false, data);
+}
 
-    let scan = scan::run(root, &Options { deep: false }, std::slice::from_ref(&collector));
+/// As `feed`, with fixed files planted beside the fuzzed one and, where
+/// `enrich` is set, the enrichment pass run afterwards.
+///
+/// Some parsers only run on a file another file points them at — a dpkg
+/// status file is read only for the packages that claim a path an entry
+/// named — and some parse in enrichment rather than in a collector: package
+/// databases, script interpreter lines. `setup` supplies the pointing files;
+/// `enrich` reaches the second group.
+pub fn feed_with(rel: &str, setup: &[(&str, &[u8])], collector: Box<dyn Collector>, enrich: bool, data: &[u8]) {
+    let (dir, root) = ROOT.get_or_init(|| plant(rel, setup));
+    std::fs::write(dir.join(rel), data).expect("fuzz root is writable");
+    run(root, collector, enrich);
+}
+
+/// As `feed_with`, for a parser whose input is not a file's bytes but a
+/// record inside one: `write` turns the fuzzed bytes into what goes on disk.
+pub fn feed_encoded(
+    rel: &str,
+    setup: &[(&str, &[u8])],
+    collector: Box<dyn Collector>,
+    enrich: bool,
+    data: &[u8],
+    write: impl FnOnce(&Path, &[u8]),
+) {
+    let (dir, root) = ROOT.get_or_init(|| plant(rel, setup));
+    write(&dir.join(rel), data);
+    run(root, collector, enrich);
+}
+
+fn run(root: &Root, collector: Box<dyn Collector>, enrich: bool) {
+    let mut scan = scan::run(root, &Options { deep: false }, std::slice::from_ref(&collector));
+    if enrich {
+        unbidden::enrich::enrich(root, &mut scan);
+        unbidden::enrich::enrich_late(root, &mut scan);
+    }
 
     // libfuzzer-sys aborts from its panic hook before unwinding, so a panic
     // inside the collector is a crash the fuzzer reports with a stack trace
@@ -43,9 +77,15 @@ pub fn feed(rel: &str, collector: Box<dyn Collector>, data: &[u8]) {
             panic!("collector {} failed on fuzzed input: {error}", c.name);
         }
     }
+    // The same holds for an enrichment stage: isolated, it costs the
+    // operator a provenance verdict rather than the scan, but it is still a
+    // panic on hostile input.
+    if let Some(f) = scan.header.enrichment_failures.first() {
+        panic!("enrichment failed on fuzzed input: {f}");
+    }
 }
 
-fn plant(rel: &str) -> (PathBuf, Root) {
+fn plant(rel: &str, setup: &[(&str, &[u8])]) -> (PathBuf, Root) {
     // ponytail: never removed. The process is the fuzzer's, the directory is
     // a handful of files, and a Drop that ran on abort is not a thing.
     let dir = std::env::temp_dir().join(format!("unbidden-fuzz-{}", std::process::id()));
@@ -56,6 +96,12 @@ fn plant(rel: &str) -> (PathBuf, Root) {
     // answer would send every collector down its "unknown distro" path for
     // every iteration.
     std::fs::write(dir.join("etc/os-release"), b"ID=debian\nVERSION_ID=\"12\"\n").unwrap();
+
+    for (path, bytes) in setup {
+        let p = dir.join(path);
+        std::fs::create_dir_all(p.parent().unwrap_or(Path::new("."))).unwrap();
+        std::fs::write(p, bytes).unwrap();
+    }
 
     let target = dir.join(rel);
     std::fs::create_dir_all(target.parent().unwrap_or(Path::new("."))).unwrap();

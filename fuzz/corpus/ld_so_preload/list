@@ -1,0 +1,3 @@
+/usr/lib/x86_64-linux-gnu/libfoo.so
+# comment
+/tmp/.x/lib.so /opt/$LIB/y.so

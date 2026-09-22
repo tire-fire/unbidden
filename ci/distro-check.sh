@@ -3,7 +3,11 @@
 # the facts §13 of the spec names as the ones a generic test misses.
 #
 # Usage: distro-check.sh <path-to-static-binary>
-# Expects to be running INSIDE the distribution container, as root.
+# Expects to be running INSIDE the distribution container (or VM), as root.
+#
+# The checks here may run the host's own package tools — rpm, dpkg-query.
+# unbidden itself never does (§3); this script is the test, and asking the
+# package manager what it thinks is how the test knows unbidden is right.
 set -eu
 
 BIN="$1"
@@ -15,10 +19,13 @@ echo "== $ID $VERSION_ID"
 
 # Several images named after a distribution are built on its upstream and
 # still carry the upstream's os-release — linuxmintd/mint22-amd64 reports
-# Ubuntu 24.04. Running the checks against one of those is not a failure, it
-# is a silent hole in the matrix, so the caller says what it expects.
+# Ubuntu 24.04 until Mint's own base-files is installed. Running the checks
+# against one of those is not a failure, it is a silent hole in the matrix,
+# so the caller says what it expects.
 [ -z "${UNBIDDEN_EXPECT_ID:-}" ] || [ "$ID" = "$UNBIDDEN_EXPECT_ID" ] ||
     fail "this image reports ID=$ID, not the $UNBIDDEN_EXPECT_ID it was added to the matrix for"
+[ -z "${UNBIDDEN_EXPECT_VERSION:-}" ] || [ "$VERSION_ID" = "$UNBIDDEN_EXPECT_VERSION" ] ||
+    fail "this image reports VERSION_ID=$VERSION_ID, not the $UNBIDDEN_EXPECT_VERSION it was added for"
 
 # The package backend follows from os-release rather than from a list of
 # distribution names: a derivative inherits its parent's backend through
@@ -29,24 +36,10 @@ case "$ID ${ID_LIKE:-}" in
     *)                        FAMILY=none ;;
 esac
 
-# §13: mainline Mint and LMDE both report ID=linuxmint and differ only in the
-# base they are built on, which os-release spells in ID_LIKE. An LMDE read as
-# Ubuntu would have the rest of this script asserting Ubuntu behaviour, snap
-# included, on a system that has never had snapd.
-if [ "$ID" = linuxmint ]; then
-    case "$NAME" in
-        LMDE*) want=debian ;;
-        *)     want=ubuntu ;;
-    esac
-    base=none
-    case "${ID_LIKE:-}" in
-        *ubuntu*) base=ubuntu ;;
-        *debian*) base=debian ;;
-    esac
-    [ "$base" = "$want" ] ||
-        fail "$PRETTY_NAME reports ID_LIKE='${ID_LIKE:-}', so its base reads as $base, not $want"
-    note "$PRETTY_NAME is $base-based"
-fi
+# Pull one string field out of a JSON line. The records are flat enough, and
+# the images minimal enough (no python on Fedora's), that sed is the tool.
+field() { sed -n "s/.*\"$1\":\"\([^\"]*\)\".*/\1/p"; }
+ESC=$(printf '\033')
 
 out=$(mktemp)
 "$BIN" --json > "$out"
@@ -58,6 +51,7 @@ note "$entries entries"
 
 echo "$header" | grep -q '"schema_version"' || fail "no scan header on the first line"
 echo "$header" | grep -q '"status":"failed"' && fail "a collector failed: $header"
+echo "$header" | grep -q '"enrichment_failures"' && fail "an enrichment stage failed: $header"
 
 # §11 has distro detection read the scan root and nothing else, so the header
 # must repeat what /etc/os-release on that root says.
@@ -66,10 +60,50 @@ echo "$header" | grep -q "\"distro_id\":\"$ID\"" ||
 echo "$header" | grep -q "\"distro_version\":\"$VERSION_ID\"" ||
     fail "the header does not report distro_version $VERSION_ID: $header"
 
-# Every supported distribution ships merged /usr, so a vendor unit reached
-# through both /lib and /usr/lib must be reported exactly once.
-dupes=$(tail -n +2 "$out" | sed -n 's/.*"id":"\([0-9a-f]*\)".*/\1/p' | sort | uniq -d | wc -l)
-[ "$dupes" -eq 0 ] || fail "$dupes duplicate entry ids — merged-usr deduplication is broken"
+# §13: mainline Mint and LMDE both report ID=linuxmint and differ only in the
+# base they are built on. What matters is that unbidden reads the difference,
+# so the check is on its header, not on the image's own os-release: an LMDE
+# read as Ubuntu would be expected to have snap, and never has.
+if [ "$ID" = linuxmint ]; then
+    case "$NAME" in
+        LMDE*) want=debian ;;
+        *)     want=ubuntu ;;
+    esac
+    like=$(echo "$header" | field distro_like)
+    case " $like " in
+        *" $want "*) note "unbidden reads $PRETTY_NAME as $want-based" ;;
+        *) fail "unbidden reads $PRETTY_NAME as based on '$like', not $want" ;;
+    esac
+    [ "$want" = debian ] && case " $like " in *" ubuntu "*) fail "LMDE read as Ubuntu-based: '$like'" ;; esac
+fi
+
+# --- merged /usr ---------------------------------------------------------
+# Every supported distribution ships /lib, /bin and /sbin as links into
+# /usr. A vendor unit reached through both names must be reported once, and
+# under the name the package database and an administrator use. Comparing
+# entry ids cannot catch the failure, because the id includes the path: a
+# unit reported under /lib and again under /usr/lib has two distinct ids.
+sources=$(tail -n +2 "$out" | field source)
+for d in lib bin sbin lib64; do
+    [ -L "/$d" ] || continue
+    aliased=$(echo "$sources" | grep -c "^/$d/" || true)
+    [ "$aliased" -eq 0 ] ||
+        fail "$aliased entries are reported under /$d, a link into /usr: $(echo "$sources" | grep "^/$d/" | head -3 | tr '\n' ' ')"
+done
+[ -L /lib ] && note "no entry is reported under a merged-usr alias"
+
+vendor=$(find /usr/lib/systemd/system -maxdepth 1 \( -name '*.service' -o -name '*.timer' -o -name '*.socket' -o -name '*.path' \) 2>/dev/null | sort)
+if [ -n "$vendor" ]; then
+    # A unit's own entries only: a script it runs is followed to its
+    # interpreter by an entry that keeps the unit's source, on purpose.
+    reported=$(tail -n +2 "$out" | grep -E '"kind":"systemd_(unit|timer)"' | grep -v '"declared_by_entry"' |
+        field source | grep -E '^/usr/lib/systemd/system/[^/]+$' | sort)
+    missing=$(printf '%s\n' "$vendor" | while read -r u; do echo "$reported" | grep -qx "$u" || echo "$u"; done)
+    [ -z "$missing" ] || fail "vendor units not reported under /usr/lib/systemd/system: $(echo "$missing" | head -3 | tr '\n' ' ')"
+    twice=$(echo "$reported" | uniq -d)
+    [ -z "$twice" ] || fail "vendor units reported more than once: $(echo "$twice" | head -3 | tr '\n' ' ')"
+    note "each of $(echo "$vendor" | wc -l) vendor units is reported exactly once"
+fi
 
 # In a container /proc/modules reports the HOST's loaded modules, which no
 # package in this image owns. They would swamp every ratio below, so the
@@ -97,61 +131,225 @@ if [ "$packaged" -gt 0 ]; then
     [ "$intact" -gt 0 ] || fail "no entry verified intact; digest checking is not working"
 fi
 
-# An edited configuration file is expected to differ from what the package
-# shipped. Without conffile handling, every host with a customised config
-# lights up with the tool's highest-signal finding.
-# A conffile that is also an autostart source is what this needs, and a
-# minimal image may ship none. cron provides /etc/crontab as one on every
-# supported distribution.
+# --- the package manager as referee ------------------------------------
+# The unit tests check the backends against databases this project wrote.
+# This checks them against the real database, through the real tool: every
+# file-backed entry's owner as unbidden reports it must be the owner rpm or
+# dpkg reports, and a file unbidden calls intact must be one the package
+# manager's own verification passes. Entries about something other than
+# their source file — a script's interpreter, a scriptlet read out of the
+# database, a maintainer script dpkg lists nowhere — are left out, since the
+# tool has no answer about them to compare.
+owner_of() {
+    case "$FAMILY" in
+        rpm)  rpm -qf --qf '%{NAME}\n' "$1" 2>/dev/null | grep -v 'not owned' ;;
+        dpkg)
+            # dpkg records whichever spelling the package shipped, so a
+            # merged-usr path is asked about both ways.
+            for p in "$1" "$(echo "$1" | sed -E 's#^/usr/(lib|bin|sbin|lib64)/#/\1/#')"; do
+                dpkg-query -S "$p" 2>/dev/null | sed -n "s#^\([^:]*\)\(:[^:]*\)\{0,1\}: $p\$#\1#p" | tr ',' '\n' | sed 's/^ *//'
+            done | sort -u ;;
+    esac
+}
+verify_failed() {
+    # The digest column of rpm -V, and the digest column of dpkg --verify.
+    case "$FAMILY" in
+        rpm)  rpm -Vf "$1" 2>/dev/null | grep -E "^..5.* $1\$|^....L.* $1\$" ;;
+        dpkg) dpkg --verify "$2" 2>/dev/null | grep -E "^..5.* $1\$" ;;
+    esac
+}
+case "$FAMILY" in
+    rpm)  referee=rpm ;;
+    dpkg) referee=dpkg-query ;;
+    *)    referee="" ;;
+esac
+if [ -n "$referee" ] && command -v "$referee" >/dev/null 2>&1; then
+    : > "$out.checked"
+    echo "$files" | grep -v -e '"declared_by_entry"' -e '"read_from"' -e '"digest_unavailable"' -e '"kind":"ld_preload"' |
+    while IFS= read -r line; do
+        src=$(echo "$line" | field source)
+        [ -f "$src" ] && [ ! -L "$src" ] || continue
+        case "$line" in
+            *'"verdict":"packaged"'*)
+                pkg=$(echo "$line" | field package)
+                owners=$(owner_of "$src")
+                echo "$owners" | grep -qx "$pkg" ||
+                    { echo "FAIL: unbidden says $pkg owns $src; $referee says: $(echo "$owners" | tr '\n' ' ')" >&2; exit 1; }
+                case "$line" in
+                    *'"integrity":"intact"'*)
+                        bad=$(verify_failed "$src" "$pkg")
+                        [ -z "$bad" ] || { echo "FAIL: unbidden calls $src intact; the package manager says: $bad" >&2; exit 1; }
+                        ;;
+                esac
+                echo "$src" >> "$out.checked"
+                ;;
+            *'"verdict":"unpackaged"'*)
+                owners=$(owner_of "$src")
+                [ -z "$owners" ] ||
+                    { echo "FAIL: unbidden calls $src unpackaged; $referee says $(echo "$owners" | tr '\n' ' ')owns it" >&2; exit 1; }
+                echo "$src" >> "$out.checked"
+                ;;
+        esac
+    done || fail "provenance disagrees with the package manager"
+    checked=$(wc -l < "$out.checked")
+    rm -f "$out.checked"
+    [ "$checked" -gt 10 ] || fail "only $checked verdicts could be checked against $referee"
+    note "all $checked file-backed verdicts agree with $referee and the package manager's verification"
+fi
+
+# --- an edited configuration file ------------------------------------------
+# Expected to differ from what the package shipped. Without conffile
+# handling, every host with a customised config lights up with the tool's
+# highest-signal finding. A conffile that is also an autostart source is what
+# this needs, and a minimal image may ship none: cron provides /etc/crontab
+# as one on every supported distribution.
 if [ ! -f /etc/crontab ]; then
     case "$FAMILY" in
-        dpkg)
-            apt-get -qq update >/dev/null 2>&1 && apt-get -qq install -y cron >/dev/null 2>&1 || true
-            ;;
-        rpm)
-            (dnf -q -y install cronie >/dev/null 2>&1 || yum -q -y install cronie >/dev/null 2>&1) || true
-            ;;
+        dpkg) apt-get -qq update >/dev/null 2>&1 && apt-get -qq install -y cron >/dev/null 2>&1 || true ;;
+        rpm)  (dnf -q -y install cronie >/dev/null 2>&1 || yum -q -y install cronie >/dev/null 2>&1) || true ;;
     esac
     [ -f /etc/crontab ] && "$BIN" --json --all > "$out"
 fi
 
 conf=""
-for c in /etc/crontab /etc/ssh/sshd_config /etc/sudoers /etc/profile; do
-    if [ -f "$c" ] && tail -n +2 "$out" | grep -q "\"source\":\"$c\""; then conf="$c"; break; fi
+for c in /etc/crontab /etc/ssh/sshd_config /etc/sudoers /etc/bash.bashrc /etc/profile; do
+    if [ -f "$c" ] && tail -n +2 "$out" | grep "\"source\":\"$c\"" | grep -q '"integrity":"intact"'; then
+        conf="$c"
+        break
+    fi
 done
 if [ -n "$conf" ]; then
-    cp "$conf" "$conf.unbidden-backup"
+    cp -p "$conf" "$conf.unbidden-backup"
     printf '\n# edited by the distro check\n' >> "$conf"
     edited=$("$BIN" --json --all | tail -n +2 | grep "\"source\":\"$conf\"" | head -1)
-    cp "$conf.unbidden-backup" "$conf"; rm -f "$conf.unbidden-backup"
+    cp -p "$conf.unbidden-backup" "$conf"; rm -f "$conf.unbidden-backup"
     case "$edited" in
         *packaged-modified*) fail "editing $conf raised packaged-modified; conffile handling is broken" ;;
-        *conffile-modified*) note "an edited $conf reads as conffile-modified, not a finding" ;;
-        *) note "$conf carries no manifest digest; integrity is reported unknown" ;;
+        *'"integrity":"conffile-modified"'*) note "an edited $conf reads as conffile-modified, not a finding" ;;
+        *) fail "the packaged conffile $conf was edited and does not read as conffile-modified: $edited" ;;
     esac
 else
-    note "no packaged config file to test conffile handling against"
+    [ "$FAMILY" = none ] || fail "no packaged, intact configuration file to test conffile handling against"
 fi
 
-# A planted unit must be found, and must not be claimed by any package.
-mkdir -p /etc/systemd/system
-cat > /etc/systemd/system/unbidden-check.service <<'UNIT'
+# --- a package with no digests ---------------------------------------------
+# §7: not every package ships md5sums, and a file whose package has none has
+# integrity unknown — never intact, and never hidden from the default view,
+# because that is exactly the file an attacker replaced. The case is made by
+# taking a real package's manifest away.
+if [ "$FAMILY" = dpkg ]; then
+    line=$(echo "$files" | grep '"integrity":"intact"' | grep -v -e '"read_from"' -e '"digest_unavailable"' -e '"declared_by_entry"' |
+        while IFS= read -r l; do
+            src=$(echo "$l" | field source); pkg=$(echo "$l" | field package)
+            [ -f "$src" ] && [ ! -L "$src" ] || continue
+            # A conffile is checked against status, not md5sums.
+            dpkg-query -W -f='${Conffiles}\n' "$pkg" 2>/dev/null | grep -q " $src " && continue
+            echo "$l"; break
+        done)
+    [ -n "$line" ] || fail "no packaged, non-conffile entry to take the manifest away from"
+    id=$(echo "$line" | field id); src=$(echo "$line" | field source); pkg=$(echo "$line" | field package)
+    manifest=$(ls /var/lib/dpkg/info/"$pkg".md5sums /var/lib/dpkg/info/"$pkg":*.md5sums 2>/dev/null | head -1)
+    [ -n "$manifest" ] || fail "$pkg has no md5sums to take away"
+    mv "$manifest" "$manifest.unbidden-away"
+    after=$("$BIN" --json --all | tail -n +2 | grep "\"id\":\"$id\"")
+    shown=$(COLUMNS=250 "$BIN" | grep -c "^$(echo "$id" | cut -c1-12)" || true)
+    mv "$manifest.unbidden-away" "$manifest"
+    case "$after" in
+        *'"integrity":"unknown"'*) ;;
+        *) fail "$src lost its package's md5sums and does not read as integrity unknown: $after" ;;
+    esac
+    [ "$shown" -eq 1 ] || fail "$src has no digest to check against, and the default view hid it"
+    note "with $pkg's md5sums gone, $src reads integrity unknown and is shown by default"
+fi
+
+# --- maintainer scripts ------------------------------------------------
+# dpkg writes a package's .list and its scripts in one unpack; a script
+# changed well after its list is noted as changed after install. On an image
+# nobody has touched, and after a real apt-get install, that must be none of
+# them — the ordering is dpkg's, and this is where it is checked against dpkg.
+if [ "$FAMILY" = dpkg ]; then
+    late=$(tail -n +2 "$out" | grep '"kind":"pkg_hook"' | grep -c '"changed_after_install"' || true)
+    [ "$late" -eq 0 ] ||
+        fail "$late maintainer scripts on a pristine image read as changed after install: $(tail -n +2 "$out" | grep '"changed_after_install"' | field source | head -3 | tr '\n' ' ')"
+    note "no maintainer script reads as changed after its package was installed"
+
+    if [ "${UNBIDDEN_SLOW_CHECKS:-}" = 1 ]; then
+        script=$(ls /var/lib/dpkg/info/*.postinst | head -1)
+        # Past the two-minute install window: ctime cannot be set any other way.
+        sleep 125
+        printf '\n# edited by the distro check\n' >> "$script"
+        edited=$("$BIN" --json --all | tail -n +2 | grep "\"source\":\"$script\"")
+        sed -i '$d' "$script"; sed -i '$d' "$script"
+        case "$edited" in
+            *'"changed_after_install"'*) note "a postinst edited after install is noted as such" ;;
+            *) fail "$script was edited long after its package was installed and is not noted: $edited" ;;
+        esac
+    fi
+fi
+
+# --- planted persistence -------------------------------------------------
+# A unit planted in each writable system search directory must be found, and
+# must not be claimed by any package.
+for dir in /etc/systemd/system /usr/local/lib/systemd/system; do
+    mkdir -p "$dir"
+    cat > "$dir/unbidden-check.service" <<'UNIT'
 [Service]
 ExecStart=/tmp/not-a-real-payload
 [Install]
 WantedBy=multi-user.target
 UNIT
-planted=$("$BIN" --json --all | tail -n +2 | grep '"name":"unbidden-check.service"' || true)
-rm -f /etc/systemd/system/unbidden-check.service
-[ -n "$planted" ] || fail "a unit planted in /etc/systemd/system was not reported"
-case "$planted" in
-    *'"unpackaged"'*) note "the planted unit reports unpackaged" ;;
-    *) [ "$packaged" -gt 0 ] && fail "the planted unit was not flagged unpackaged: $planted" ;;
+    planted=$("$BIN" --json --all | tail -n +2 | grep "\"source\":\"$dir/unbidden-check.service\"" || true)
+    rm -f "$dir/unbidden-check.service"
+    [ -n "$planted" ] || fail "a unit planted in $dir was not reported"
+    case "$planted" in
+        *'"unpackaged"'*) note "a unit planted in $dir reports unpackaged" ;;
+        *) [ "$packaged" -gt 0 ] && fail "the unit planted in $dir was not flagged unpackaged: $planted" ;;
+    esac
+    case "$planted" in
+        *target-missing*) ;;
+        *) fail "the absent target of the unit planted in $dir was not flagged" ;;
+    esac
+done
+
+# A command carrying terminal control sequences must reach the operator as
+# text. ESC[2K ESC[1A erases the row above; printed raw, it rewrites the
+# table line that reports it.
+mkdir -p /etc/cron.d
+printf '* * * * * root /tmp/x %s[2K%s[1Ahidden\n' "$ESC" "$ESC" > /etc/cron.d/unbidden-escape
+table=$(COLUMNS=250 "$BIN" --kind cron)
+explained=$("$BIN" explain "$(echo "$table" | grep 'unbidden-escape\|/tmp/x' | head -1 | cut -c1-12)" 2>&1 || true)
+rm -f /etc/cron.d/unbidden-escape
+case "$table$explained" in
+    *"$ESC"*) fail "a control sequence from a scanned file reached the terminal raw" ;;
 esac
-case "$planted" in
-    *target-missing*) note "and its missing target is flagged" ;;
-    *) fail "the planted unit's absent target was not flagged" ;;
+echo "$table" | grep -q '\\x1b\[2K' || fail "the control sequence was not shown escaped: $table"
+note "terminal control sequences in a command are shown, not obeyed"
+
+# --- a home that reaches outside itself ----------------------------------
+# Any account can link its own ~/.bashrc at /etc/shadow. The link must be
+# reported and not read, and doing it must not turn the scan partial —
+# which would make every later --against refuse to run.
+cp -p /etc/passwd /etc/passwd.unbidden-backup
+mkdir -p /home/unbidden-link
+echo "unbidden-link:x:4242:4242::/home/unbidden-link:/bin/sh" >> /etc/passwd
+ln -sf /etc/shadow /home/unbidden-link/.bashrc
+"$BIN" --save "$out.base" > /dev/null
+linkscan=$("$BIN" --json --all)
+diffed=$("$BIN" --against "$out.base" --json 2>&1) || diffrc=$?
+cp -p /etc/passwd.unbidden-backup /etc/passwd; rm -f /etc/passwd.unbidden-backup "$out.base"
+rm -rf /home/unbidden-link
+echo "$linkscan" | head -1 | grep -q '"name":"shell","status":"complete"' ||
+    fail "a home link to /etc/shadow made the shell collector partial: $(echo "$linkscan" | head -1)"
+bashrc=$(echo "$linkscan" | grep '"source":"/home/unbidden-link/.bashrc"')
+case "$bashrc" in
+    *'"not_followed"'*) ;;
+    *) fail "the link out of the home was not recorded as not followed: $bashrc" ;;
 esac
+case "$bashrc" in
+    *'"env.'*) fail "the target of a link out of the home was read: $bashrc" ;;
+esac
+[ "${diffrc:-0}" -eq 0 ] || fail "a scan with a home link out of the home would not diff: $diffed"
+note "a home link to /etc/shadow is recorded, not followed, and leaves the scan comparable"
 
 # --- a desktop session -------------------------------------------------
 # §13: an extension present on disk runs only if dconf says so, and nothing

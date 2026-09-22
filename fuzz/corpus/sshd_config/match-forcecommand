@@ -1,0 +1,6 @@
+Include /etc/ssh/sshd_config.d/*.conf
+PermitRootLogin prohibit-password
+ForceCommand /usr/local/bin/audit
+Match User backup
+	ForceCommand internal-sftp
+	AuthorizedKeysCommand /usr/bin/fetch %u

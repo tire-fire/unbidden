@@ -125,7 +125,20 @@ impl Collector for Shell {
         // session. Neither runs a command itself, which is exactly why an
         // LD_PRELOAD parked here is quiet.
         profile(cx, Path::new(PAM_ENV_CONF), None, Syntax::PamEnvConf, &mut seen, &mut out);
+        // /lib/environment.d and /usr/lib/environment.d are one directory on
+        // a merged-usr host. Walked by name, every drop-in in it was reported
+        // twice, once under the alias (§5).
+        let mut walked: BTreeSet<(u64, u64)> = BTreeSet::new();
         for dir in ENVIRONMENT_D {
+            match cx.root.dir_identity(dir) {
+                Ok(id) if walked.insert(id) => {}
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    cx.note_unreadable(format!("{dir}: {e}"));
+                    continue;
+                }
+            }
             for ent in cx.dir(dir) {
                 if ent.is_dir || !ent.name.to_string_lossy().ends_with(".conf") {
                     continue;
@@ -1031,6 +1044,20 @@ mod tests {
             assert!(e.raw["not_followed"].contains("etc/shadow"), "{:?}", e.raw);
             assert!(e.raw.keys().all(|k| !k.starts_with("env.")), "the target was not read");
         }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_environment_drop_in_reached_through_merged_usr_is_reported_once() {
+        let dir = tmpdir("envd");
+        fs::create_dir_all(dir.join("usr/lib/environment.d")).unwrap();
+        fs::write(dir.join("usr/lib/environment.d/99-environment.conf"), "PATH=/usr/bin\n").unwrap();
+        symlink("usr/lib", dir.join("lib")).unwrap();
+
+        let scan = run(&dir);
+        let found: Vec<_> = scan.entries.iter().filter(|e| e.name == "99-environment.conf").collect();
+        assert_eq!(found.len(), 1, "{:?}", found.iter().map(|e| &e.source).collect::<Vec<_>>());
+        assert_eq!(found[0].source, dir.join("usr/lib/environment.d/99-environment.conf"));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

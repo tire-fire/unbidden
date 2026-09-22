@@ -1,0 +1,500 @@
+Package: adduser
+Status: install ok installed
+Priority: important
+Section: admin
+Installed-Size: 608
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Multi-Arch: foreign
+Version: 3.118ubuntu5
+Depends: passwd, debconf (>= 0.5) | debconf-2.0
+Suggests: liblocale-gettext-perl, perl, ecryptfs-utils (>= 67-1)
+Conffiles:
+ /etc/deluser.conf 773fb95e98a27947de4a95abb3d3f2a2
+Description: add and remove users and groups
+ This package includes the 'adduser' and 'deluser' commands for creating
+ and removing users.
+ .
+  - 'adduser' creates new users and groups and adds existing users to
+    existing groups;
+  - 'deluser' removes users and groups and removes users from a given
+    group.
+ .
+ Adding users with 'adduser' is much easier than adding them manually.
+ Adduser will choose appropriate UID and GID values, create a home
+ directory, copy skeletal user configuration, and automate setting
+ initial values for the user's password, real name and so on.
+ .
+ Deluser can back up and remove users' home directories
+ and mail spool or all the files they own on the system.
+ .
+ A custom script can be executed after each of the commands.
+Original-Maintainer: Debian Adduser Developers <adduser@packages.debian.org>
+
+Package: adwaita-icon-theme
+Status: install ok installed
+Priority: optional
+Section: gnome
+Installed-Size: 5234
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Multi-Arch: foreign
+Version: 41.0-1ubuntu1
+Replaces: adwaita-icon-theme-full (<< 41.0-1ubuntu1), gnome-themes-standard-data (<< 3.18.0-2~)
+Depends: hicolor-icon-theme, gtk-update-icon-cache, ubuntu-mono | adwaita-icon-theme-full
+Recommends: librsvg2-common
+Breaks: adwaita-icon-theme-full (<< 41.0-1ubuntu1), gnome-themes-standard-data (<< 3.18.0-2~)
+Description: default icon theme of GNOME (small subset)
+ This package contains the default icon theme used by the GNOME desktop.
+ The icons are used in many of the official gnome applications like eog,
+ evince, system monitor, and many more.
+ .
+ This package only contains a small subset of the original GNOME icons which
+ are not provided by the Humanity icon theme, to avoid installing many
+ duplicated icons. Please install adwaita-icon-theme-full if you want the full
+ set.
+Original-Maintainer: Debian GNOME Maintainers <pkg-gnome-maintainers@lists.alioth.debian.org>
+
+Package: alsa-topology-conf
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 420
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Multi-Arch: foreign
+Version: 1.2.5.1-2
+Replaces: libasound2-data (<< 1.2.1)
+Breaks: libasound2-data (<< 1.2.1)
+Enhances: libasound2-data
+Description: ALSA topology configuration files
+ This package contains ALSA topology configuration files that can be used
+ by libasound2 for specific audio hardware.
+ .
+ ALSA is the Advanced Linux Sound Architecture.
+Original-Maintainer: Debian ALSA Maintainers <pkg-alsa-devel@lists.alioth.debian.org>
+Homepage: https://www.alsa-project.org/
+
+Package: alsa-ucm-conf
+Status: install ok installed
+Priority: optional
+Section: libs
+Installed-Size: 553
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Multi-Arch: foreign
+Version: 1.2.6.3-1ubuntu1
+Depends: libasound2 (>= 1.2.4)
+Description: ALSA Use Case Manager configuration files
+ This package contains ALSA Use Case Manager configuration of audio
+ input/output names and routing for specific audio hardware. They can be
+ used with the alsaucm tool.
+ .
+ ALSA is the Advanced Linux Sound Architecture.
+Original-Maintainer: Debian ALSA Maintainers <pkg-alsa-devel@lists.alioth.debian.org>
+Homepage: https://www.alsa-project.org/
+
+Package: apt
+Status: install ok installed
+Priority: important
+Section: admin
+Installed-Size: 4156
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: amd64
+Version: 2.4.5
+Replaces: apt-transport-https (<< 1.5~alpha4~), apt-utils (<< 1.3~exp2~)
+Provides: apt-transport-https (= 2.4.5)
+Depends: adduser, gpgv | gpgv2 | gpgv1, libapt-pkg6.0 (>= 2.4.5), ubuntu-keyring, libc6 (>= 2.34), libgcc-s1 (>= 3.3.1), libgnutls30 (>= 3.7.0), libseccomp2 (>= 2.4.2), libstdc++6 (>= 11), libsystemd0
+Recommends: ca-certificates
+Suggests: apt-doc, aptitude | synaptic | wajig, dpkg-dev (>= 1.17.2), gnupg | gnupg2 | gnupg1, powermgmt-base
+Breaks: apt-transport-https (<< 1.5~alpha4~), apt-utils (<< 1.3~exp2~), aptitude (<< 0.8.10)
+Conffiles:
+ /etc/apt/apt.conf.d/01-vendor-ubuntu c69ce53f5f0755e5ac4441702e820505
+ /etc/apt/apt.conf.d/01autoremove ab6540f7278a05a4b7f9e58afcaa5f46
+ /etc/cron.daily/apt-compat 1400ab07a4a2905b04c33e3e93d42b7b
+ /etc/logrotate.d/apt 179f2ed4f85cbaca12fa3d69c2a4a1c3
+Description: commandline package manager
+ This package provides commandline tools for searching and
+ managing as well as querying information about packages
+ as a low-level access to all features of the libapt-pkg library.
+ .
+ These include:
+  * apt-get for retrieval of packages and information about them
+    from authenticated sources and for installation, upgrade and
+    removal of packages together with their dependencies
+  * apt-cache for querying available information about installed
+    as well as installable packages
+  * apt-cdrom to use removable media as a source for packages
+  * apt-config as an interface to the configuration settings
+  * apt-key as an interface to manage authentication keys
+Original-Maintainer: APT Development Team <deity@lists.debian.org>
+
+Package: aptdaemon
+Status: install ok installed
+Priority: extra
+Section: admin
+Installed-Size: 176
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Version: 1.1.1+bzr982-0ubuntu39
+Replaces: python3-aptdaemon.pkcompat
+Depends: python3:any (>= 3.2~), gir1.2-glib-2.0, python3-aptdaemon (= 1.1.1+bzr982-0ubuntu39), python3-gi, policykit-1
+Breaks: python3-aptdaemon.pkcompat, software-center (<< 1.1.21)
+Conffiles:
+ /etc/apt/apt.conf.d/20dbus ea231d256caa030328bee60cc4e9b56c
+ /etc/dbus-1/system.d/org.debian.apt.conf e0c8a5d2fbd0a727bdea215e32061e58
+Description: transaction based package management service
+ Aptdaemon allows normal users to perform package management tasks, e.g.
+ refreshing the cache, upgrading the system, installing or removing software
+ packages.
+ .
+ Currently it comes with the following main features:
+ .
+  - Programming language independent D-Bus interface, which allows one to
+    write clients in several languages
+  - Runs only if required (D-Bus activation)
+  - Fine grained privilege management using PolicyKit, e.g. allowing all
+    desktop user to query for updates without entering a password
+  - Support for media changes during installation from DVD/CDROM
+  - Support for debconf (Debian's package configuration system)
+  - Support for attaching a terminal to the underlying dpkg call
+ .
+ This package contains the aptd script and all the data files required to run
+ the daemon. Moreover it contains the aptdcon script, which is a command
+ line client for aptdaemon. The API is not stable yet.
+Homepage: https://launchpad.net/aptdaemon
+Original-Maintainer: Julian Andres Klode <jak@debian.org>
+
+Package: aptdaemon-data
+Status: install ok installed
+Priority: extra
+Section: admin
+Installed-Size: 248
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Source: aptdaemon
+Version: 1.1.1+bzr982-0ubuntu39
+Replaces: python-aptdaemon-gtk (<= 0.41+bzr580-0ubuntu1)
+Description: data files for clients
+ Aptdaemon is a transaction based package management daemon. It allows
+ normal users to perform package management tasks, e.g. refreshing the
+ cache, upgrading the system, installing or removing software packages.
+ .
+ This package provides common data files (e.g. icons) for aptdaemon
+ clients.
+Homepage: https://launchpad.net/aptdaemon
+Original-Maintainer: Julian Andres Klode <jak@debian.org>
+
+Package: arch-test
+Status: install ok installed
+Priority: optional
+Section: admin
+Installed-Size: 240
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Multi-Arch: foreign
+Version: 0.17-2
+Description: detect architectures supported by your machine/kernel
+ This package lets you enumerate architectures that your kernel can run.
+ The check is for the ability to run machine code and supporting appropriate
+ syscall ABI -- you may need to install userland libraries in a chroot,
+ container or via multiarch to actually execute non-static binaries of such
+ architectures.
+ .
+ Also provided is "elf-arch", a tool to determine the architecture of an ELF
+ binary (program or library).
+ .
+ Architectures detected by this version of arch-test are:
+  * amd64, i386, x32
+  * mips, mipsel, mips64, mips64el
+  * arm, armel, armhf, arm64, arm64ilp32
+  * powerpc, ppc64, ppc64el, powerpcspe
+  * m68k
+  * sh4
+  * s390x
+  * sparc, sparc64
+  * illumos-amd64
+  * win32, win64
+  * kfreebsd-amd64, kfreebsd-i386
+  * alpha
+  * hppa
+  * ia64
+  * riscv64
+Original-Maintainer: Adam Borowski <kilobyte@angband.pl>
+
+Package: aspell
+Status: install ok installed
+Priority: optional
+Section: text
+Installed-Size: 344
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: amd64
+Multi-Arch: foreign
+Version: 0.60.8-4build1
+Replaces: aspell-bin (<< 0.60.3-2)
+Provides: aspell-bin
+Depends: libaspell15 (= 0.60.8-4build1), libc6 (>= 2.34), libncursesw6 (>= 6), libstdc++6 (>= 5), libtinfo6 (>= 6), dictionaries-common
+Recommends: aspell-en | aspell-dictionary | aspell6a-dictionary
+Suggests: aspell-doc, spellutils
+Breaks: aspell-bin (<< 0.60.3-2)
+Description: GNU Aspell spell-checker
+ GNU Aspell is a spell-checker which can be used either as a standalone
+ application or embedded in other programs.  Its main feature is that it
+ does a much better job of suggesting possible spellings than just about
+ any other spell-checker available for the English language, including
+ Ispell and Microsoft Word.  It also has many other technical
+ enhancements over Ispell such as using shared memory for dictionaries
+ and intelligently handling personal dictionaries when more than one
+ Aspell process is open at once.
+ .
+ Aspell is designed to be a drop-in replacement for Ispell.
+Original-Maintainer: Agustin Martin Domingo <agmartin@debian.org>
+Homepage: http://aspell.net/
+
+Package: aspell-en
+Status: install ok installed
+Priority: optional
+Section: text
+Installed-Size: 424
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Multi-Arch: foreign
+Version: 2018.04.16-0-1
+Provides: aspell-dictionary
+Depends: aspell (>= 0.60.3-2), dictionaries-common (>= 0.49.2)
+Description: English dictionary for GNU Aspell
+ This package contains all the required files to add support for English
+ language to the GNU Aspell spell checker.
+ .
+ American, British, Canadian and Australian spellings are included.
+Original-Maintainer: Brian Nelson <pyro@debian.org>
+Homepage: http://aspell.net/
+
+Package: at-spi2-core
+Status: install ok installed
+Priority: optional
+Section: misc
+Installed-Size: 276
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: amd64
+Multi-Arch: foreign
+Version: 2.44.0-3
+Depends: libatspi2.0-0 (>= 2.9.90), libc6 (>= 2.34), libdbus-1-3 (>= 1.9.14), libglib2.0-0 (>= 2.67.4), libsystemd0, libx11-6, libxtst6, gsettings-desktop-schemas
+Conffiles:
+ /etc/X11/Xsession.d/90qt-a11y afc7b6dfce4d98efa295023045b20424
+ /etc/environment.d/90qt-a11y.conf 4f76c97d1817370071bed644d921f142
+ /etc/xdg/Xwayland-session.d/00-at-spi da53e8f602edbb788b3cd6dbb056e45d
+ /etc/xdg/autostart/at-spi-dbus-bus.desktop b97f071f92cfc4af379984b27cbb7304
+Description: Assistive Technology Service Provider Interface (dbus core)
+ This package contains the core components of GNOME Accessibility.
+Original-Maintainer: Debian Accessibility Team <pkg-a11y-devel@alioth-lists.debian.net>
+Homepage: https://wiki.gnome.org/Accessibility
+
+Package: autoconf
+Status: install ok installed
+Priority: optional
+Section: devel
+Installed-Size: 2032
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Multi-Arch: foreign
+Version: 2.71-2
+Depends: perl (>> 5.005), m4 (>= 1.4.13), debianutils (>= 1.8)
+Recommends: automake | automaken
+Suggests: autoconf-archive, gnu-standards, autoconf-doc, libtool, gettext
+Breaks: gettext (<< 0.10.39), pkg-config (<< 0.25-1.1)
+Conffiles:
+ /etc/emacs/site-start.d/50autoconf.el 297521889d690871ec9d89c5eeff745a
+Description: automatic configure script builder
+ The standard for FSF source packages.  This is only useful if you
+ write your own programs or if you extensively modify other people's
+ programs.
+ .
+ For an extensive library of additional Autoconf macros, install the
+ `autoconf-archive' package.
+ .
+ This version of autoconf is not compatible with scripts meant for
+ Autoconf 2.13 or earlier.
+Original-Maintainer: Debian QA Group <packages@qa.debian.org>
+Homepage: https://www.gnu.org/software/autoconf/
+
+Package: automake
+Status: install ok installed
+Priority: optional
+Section: devel
+Installed-Size: 1581
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Multi-Arch: foreign
+Source: automake-1.16
+Version: 1:1.16.5-1.3
+Provides: automake-1.16, automaken
+Depends: autoconf, autotools-dev
+Suggests: autoconf-doc, gnu-standards
+Description: Tool for generating GNU Standards-compliant Makefiles
+ Automake is a tool for automatically generating `Makefile.in's from
+ files called `Makefile.am'.
+ .
+ The goal of Automake is to remove the burden of Makefile maintenance
+ from the back of the individual GNU maintainer (and put it on the back
+ of the Automake maintainer).
+ .
+ The `Makefile.am' is basically a series of `make' macro definitions
+ (with rules being thrown in occasionally).  The generated
+ `Makefile.in's are compliant with the GNU Makefile standards.
+ .
+ Automake 1.16 fails to work in a number of situations that Automake
+ 1.11, and 1.15 did, so some previous versions are available as separate
+ packages.
+Original-Maintainer: Eric Dorland <eric@debian.org>
+Homepage: https://www.gnu.org/software/automake/
+
+Package: autopoint
+Status: install ok installed
+Priority: optional
+Section: devel
+Installed-Size: 458
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Multi-Arch: foreign
+Source: gettext
+Version: 0.21-4ubuntu4
+Replaces: gettext (<= 0.17-11)
+Depends: xz-utils
+Description: tool for setting up gettext infrastructure in a source package
+ The `autopoint' program copies standard gettext infrastructure files
+ into a source package.  It extracts from a macro call of the form
+ `AM_GNU_GETTEXT_VERSION(VERSION)', found in the package's
+ `configure.in' or `configure.ac' file, the gettext version used by the
+ package, and copies the infrastructure files belonging to this version
+ into the package.
+Homepage: https://www.gnu.org/software/gettext/
+Original-Maintainer: Santiago Vila <sanvila@debian.org>
+
+Package: autotools-dev
+Status: install ok installed
+Priority: optional
+Section: devel
+Installed-Size: 134
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: all
+Multi-Arch: foreign
+Version: 20220109.1
+Replaces: autoconf (<< 2.70~)
+Breaks: autoconf (<< 2.70~)
+Enhances: cdbs, debhelper
+Description: Update infrastructure for config.{guess,sub} files
+ This package installs an up-to-date version of config.guess and
+ config.sub, used by the automake and libtool packages.  It provides
+ the canonical copy of those files for other packages as well.
+ .
+ It also documents in /usr/share/doc/autotools-dev/README.Debian.gz
+ best practices and guidelines for using autoconf, automake and
+ friends on Debian packages.  This is a must-read for any developers
+ packaging software that uses the GNU autotools, or GNU gettext.
+ .
+ Additionally this package provides seamless integration into Debhelper
+ or CDBS, allowing maintainers to easily update config.{guess,sub} files
+ in their packages.
+Original-Maintainer: Henrique de Moraes Holschuh <hmh@debian.org>
+Homepage: https://savannah.gnu.org/projects/config/
+
+Package: base-files
+Essential: yes
+Status: install ok installed
+Priority: required
+Section: admin
+Installed-Size: 387
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: amd64
+Multi-Arch: foreign
+Version: 21.0.0
+Replaces: base, dpkg (<= 1.15.0), miscutils
+Provides: base
+Depends: libc6 (>= 2.34), libcrypt1 (>= 1:4.4.10-10ubuntu3)
+Pre-Depends: awk
+Breaks: debian-security-support (<< 2019.04.25), initscripts (<< 2.88dsf-13.3), sendfile (<< 2.1b.20080616-5.2~), ubuntu-server (<< 1.453)
+Conffiles:
+ /etc/debian_version 62f807f9edf48f460110889c2ecc3db6
+ /etc/dpkg/origins/debian c47b6815f67ad1aeccb0d4529bd0b990
+ /etc/dpkg/origins/ubuntu ea35901c45553c3451f60476be94d2d8
+ /etc/host.conf 89408008f2585c957c031716600d5a80
+ /etc/issue 60a9a9e1dd761237e8e3dc53b209ab6e
+ /etc/issue.net 9089ed88c638dc81433d858763aba17b
+ /etc/legal d41d8cd98f00b204e9800998ecf8427e
+ /etc/lsb-release 37f2478ea721a7a32342458dd7f06d6b
+ /etc/profile.d/01-locale-fix.sh 870346d97b16faac4a371b04ffe4cc2f
+ /etc/update-motd.d/00-header 3e2b31c72181b87149ff995e7202c0e3
+ /etc/update-motd.d/10-help-text 3e2b31c72181b87149ff995e7202c0e3
+ /etc/update-motd.d/50-motd-news 3e2b31c72181b87149ff995e7202c0e3
+Description: Debian base system miscellaneous files
+ This package contains the basic filesystem hierarchy of a Debian system, and
+ several important miscellaneous files, such as /etc/debian_version,
+ /etc/host.conf, /etc/issue, /etc/motd, /etc/profile, and others,
+ and the text of several common licenses in use on Debian systems.
+Original-Maintainer: Santiago Vila <sanvila@debian.org>
+
+Package: base-passwd
+Essential: yes
+Status: install ok installed
+Priority: required
+Section: admin
+Installed-Size: 243
+Maintainer: Colin Watson <cjwatson@debian.org>
+Architecture: amd64
+Multi-Arch: foreign
+Version: 3.5.52build1
+Replaces: base
+Depends: libc6 (>= 2.34), libdebconfclient0 (>= 0.145)
+Recommends: debconf (>= 0.5) | debconf-2.0
+Description: Debian base system master password and group files
+ These are the canonical master copies of the user database files
+ (/etc/passwd and /etc/group), containing the Debian-allocated user and
+ group IDs. The update-passwd tool is provided to keep the system databases
+ synchronized with these master files.
+
+Package: bash
+Essential: yes
+Status: install ok installed
+Priority: required
+Section: shells
+Installed-Size: 1864
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: amd64
+Multi-Arch: foreign
+Version: 5.1-6ubuntu1
+Replaces: bash-completion (<< 20060301-0), bash-doc (<= 2.05-1)
+Depends: base-files (>= 2.1.12), debianutils (>= 2.15)
+Pre-Depends: libc6 (>= 2.34), libtinfo6 (>= 6)
+Recommends: bash-completion (>= 20060301-0)
+Suggests: bash-doc
+Conflicts: bash-completion (<< 20060301-0)
+Conffiles:
+ /etc/bash.bashrc 3aa8b92d1dd6ddf4daaedc019662f1dc
+ /etc/skel/.bash_logout 22bfb8c1dd94b5f3813a2b25da67463f
+ /etc/skel/.bashrc 1f98b8f3f3c8f8927eca945d59dcc1c6
+ /etc/skel/.profile f4e81ade7d6f9fb342541152d08e7a97
+Description: GNU Bourne Again SHell
+ Bash is an sh-compatible command language interpreter that executes
+ commands read from the standard input or from a file.  Bash also
+ incorporates useful features from the Korn and C shells (ksh and csh).
+ .
+ Bash is ultimately intended to be a conformant implementation of the
+ IEEE POSIX Shell and Tools specification (IEEE Working Group 1003.2).
+ .
+ The Programmable Completion Code, by Ian Macdonald, is now found in
+ the bash-completion package.
+Homepage: http://tiswww.case.edu/php/chet/bash/bashtop.html
+Original-Maintainer: Matthias Klose <doko@debian.org>
+
+Package: bind9-dnsutils
+Status: install ok installed
+Priority: standard
+Section: net
+Installed-Size: 484
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Architecture: amd64
+Source: bind9
+Version: 1:9.18.1-1ubuntu1.1
+Provides: dnsutils
+Depends: bind9-host | host, bind9-libs (= 1:9.18.1-1ubuntu1.1), 

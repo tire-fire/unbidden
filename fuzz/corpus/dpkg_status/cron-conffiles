@@ -1,0 +1,8 @@
+Package: cron
+Status: install ok installed
+Priority: important
+Version: 3.0pl1-162
+Conffiles:
+ /etc/crontab 1b5ba9fbd1ce57cd4b8ac2e5bba8d85f
+ /etc/cron.d/.placeholder 00000000000000000000000000000000 obsolete
+
