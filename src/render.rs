@@ -235,6 +235,9 @@ fn banners(w: &mut impl Write, scan: &Scan) -> io::Result<()> {
         // A panic message can quote the input that caused it.
         writeln!(w, "! Collector {name} failed: {}", visible(error, false))?;
     }
+    for failure in &scan.header.enrichment_failures {
+        writeln!(w, "! Enrichment failed, flags may be missing: {}", visible(failure, false))?;
+    }
     if !partial.is_empty() {
         let list: Vec<String> = partial.iter().map(|(n, c)| format!("{n} ({c} paths)")).collect();
         writeln!(w, "! Incomplete collectors: {}. See the JSON header for the paths.", list.join(", "))?;
@@ -243,7 +246,11 @@ fn banners(w: &mut impl Write, scan: &Scan) -> io::Result<()> {
         let list: Vec<String> = skipped.iter().map(|(n, r)| format!("{n} ({r})")).collect();
         writeln!(w, "  Skipped: {}", list.join(", "))?;
     }
-    if !failed.is_empty() || !partial.is_empty() || !scan.header.privileged {
+    if !failed.is_empty()
+        || !partial.is_empty()
+        || !scan.header.privileged
+        || !scan.header.enrichment_failures.is_empty()
+    {
         writeln!(w)?;
     }
     Ok(())
@@ -327,6 +334,7 @@ mod tests {
                 privileged: true,
                 enablement: crate::scan::inferred(),
                 collectors: Vec::new(),
+                enrichment_failures: Vec::new(),
             },
             entries,
         }
@@ -463,6 +471,12 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("Running unprivileged"));
         assert!(text.contains("Incomplete collectors: cron (1 paths)"));
+
+        scan.header.enrichment_failures.push("provenance: rpm database: bad header".into());
+        let mut out = Vec::new();
+        table(&mut out, &scan, &Filters::default(), &TableOpts { all: false, width: 120 }).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("! Enrichment failed, flags may be missing: provenance: rpm database: bad header"));
     }
 }
 

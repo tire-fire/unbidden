@@ -270,6 +270,12 @@ pub struct Header {
     #[serde(default = "inferred")]
     pub enablement: String,
     pub collectors: Vec<CollectorStatus>,
+    /// Enrichment stages that panicked, and what each one left undone. The
+    /// entries are still reported, but the facts that stage adds — a
+    /// provenance verdict, a flag — may be missing from them, so a scan
+    /// carrying any of these is not comparable with one that carries none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enrichment_failures: Vec<String>,
 }
 
 pub fn inferred() -> String {
@@ -386,7 +392,7 @@ fn skipped(name: &str, reason: &str) -> CollectorStatus {
     }
 }
 
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+pub fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -427,6 +433,7 @@ fn header(root: &Root, opts: &Options, collectors: Vec<CollectorStatus>) -> Head
         privileged: rustix::process::geteuid().is_root(),
         enablement: inferred(),
         collectors,
+        enrichment_failures: Vec::new(),
     }
 }
 

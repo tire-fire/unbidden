@@ -65,6 +65,17 @@ pub fn comparable(baseline: &Scan, current: &Scan) -> Result<(), String> {
         ));
     }
 
+    // A stage that panicked left its facts off some entries, so its flags
+    // would read as changes that never happened on the host.
+    for (when, s) in [("the baseline", baseline), ("this scan", current)] {
+        if !s.header.enrichment_failures.is_empty() {
+            return Err(format!(
+                "enrichment failed in {when}, so its provenance and flags are incomplete:\n  {}",
+                s.header.enrichment_failures.join("\n  ")
+            ));
+        }
+    }
+
     let by_name = |s: &Scan| -> BTreeMap<String, CollectorStatus> {
         s.header.collectors.iter().map(|c| (c.name.clone(), c.clone())).collect()
     };
@@ -237,6 +248,7 @@ mod tests {
                 status: Status::Complete,
                 truncated: Vec::new(),
             }],
+            enrichment_failures: Vec::new(),
         }
     }
 
@@ -338,6 +350,12 @@ mod tests {
         let mut after = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
         after.header.deep = true;
         assert!(diff(&before, &after).unwrap_err().contains("deep"));
+
+        let mut after = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
+        after.header.enrichment_failures.push("provenance: rpm database: boom".into());
+        let err = diff(&before, &after).unwrap_err();
+        assert!(err.contains("enrichment failed in this scan"), "{err}");
+        assert!(diff(&after, &before).unwrap_err().contains("enrichment failed in the baseline"));
     }
 
     #[test]

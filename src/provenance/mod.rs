@@ -23,6 +23,14 @@ use crate::root::Root;
 
 pub type Answers = BTreeMap<PathBuf, Provenance>;
 
+/// What the provenance pass learned, and which backends it could not ask.
+pub struct Resolution {
+    pub answers: Answers,
+    /// Backends that panicked on their database. §3 treats every parsed file
+    /// as hostile, and a package database is a file.
+    pub failures: Vec<String>,
+}
+
 /// Paths are root-relative throughout, matching every other filesystem
 /// operation in the tool.
 ///
@@ -30,28 +38,52 @@ pub type Answers = BTreeMap<PathBuf, Provenance>;
 /// only ever asked about a path no package claims: the GeneratedBy verdict
 /// takes Unpackaged away, and a file a package ships must be checked against
 /// that package whatever it happens to be called.
-pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Answers {
+pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Resolution {
+    resolve_with(root, wanted, &[("dpkg", dpkg::resolve), ("rpm", rpm::resolve)])
+}
+
+type Backend = fn(&Root, &BTreeSet<PathBuf>) -> Option<Answers>;
+
+fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Backend)]) -> Resolution {
     let mut out = Answers::new();
+    let mut failures = Vec::new();
 
     // A backend returns None when its database is not on this root, which is
-    // a different fact from "the database says nothing owns that path".
+    // a different fact from "the database says nothing owns that path". One
+    // that panics is a third fact: its database is there, and what it would
+    // have said is unknown.
     let mut backend_ran = false;
-    for answers in [dpkg::resolve(root, wanted), rpm::resolve(root, wanted)].into_iter().flatten() {
-        out.extend(answers);
-        backend_ran = true;
+    let mut backend_failed = false;
+    for (name, backend) in backends {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| backend(root, wanted))) {
+            Ok(Some(answers)) => {
+                out.extend(answers);
+                backend_ran = true;
+            }
+            Ok(None) => {}
+            Err(payload) => {
+                failures.push(format!("{name} database: {}", crate::scan::panic_message(payload)));
+                backend_failed = true;
+            }
+        }
     }
 
     let unclaimed: BTreeSet<PathBuf> = wanted.iter().filter(|p| !out.contains_key(*p)).cloned().collect();
-    out.extend(generated::classify(root, &unclaimed));
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| generated::classify(root, &unclaimed))) {
+        Ok(answers) => out.extend(answers),
+        Err(payload) => failures.push(format!("runtime producers: {}", crate::scan::panic_message(payload))),
+    }
 
-    // A path no backend claimed is Unpackaged only if a backend actually ran.
-    // Without a package database the honest answer is Unknown — silently
-    // calling every file unpackaged would flag the whole system.
-    let verdict = if backend_ran { Provenance::Unpackaged } else { Provenance::Unknown };
+    // A path no backend claimed is Unpackaged only if a backend actually ran
+    // and none failed. Without a package database the honest answer is
+    // Unknown — silently calling every file unpackaged would flag the whole
+    // system — and the same holds when a database was there but could not be
+    // read to the end: any of these paths might have been in it.
+    let verdict = if backend_ran && !backend_failed { Provenance::Unpackaged } else { Provenance::Unknown };
     for p in wanted {
         out.entry(p.clone()).or_insert_with(|| verdict.clone());
     }
-    out
+    Resolution { answers: out, failures }
 }
 
 /// Aliased paths under merged /usr. Every supported distribution ships
@@ -139,7 +171,7 @@ mod tests {
         let root = Root::at(&dir).unwrap();
 
         let wanted: BTreeSet<PathBuf> = [PathBuf::from("etc/crontab")].into_iter().collect();
-        assert_eq!(resolve(&root, &wanted)[Path::new("etc/crontab")], Provenance::Unknown);
+        assert_eq!(resolve(&root, &wanted).answers[Path::new("etc/crontab")], Provenance::Unknown);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -170,12 +202,39 @@ mod tests {
         let root = Root::at(&dir).unwrap();
         let wanted: BTreeSet<PathBuf> =
             ["usr/lib/snapd/snap-confine", "etc/systemd/system/snap.evil.x.service"].iter().map(PathBuf::from).collect();
-        let answers = resolve(&root, &wanted);
+        let answers = resolve(&root, &wanted).answers;
         assert!(matches!(
             &answers[Path::new("usr/lib/snapd/snap-confine")],
             Provenance::Packaged { integrity: crate::entry::Integrity::Modified, .. }
         ));
         assert_eq!(answers[Path::new("etc/systemd/system/snap.evil.x.service")], Provenance::Unpackaged);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_backend_that_panics_leaves_its_paths_unknown_not_unpackaged() {
+        // A package database is a file an attacker can write. If reading it
+        // panics, every path it might have claimed is unknown; calling them
+        // unpackaged would flag the whole system on the attacker's say-so.
+        fn owns_one(_: &Root, _: &BTreeSet<PathBuf>) -> Option<Answers> {
+            let mut a = Answers::new();
+            a.insert(PathBuf::from("usr/bin/ok"), Provenance::Unpackaged);
+            Some(a)
+        }
+        fn explodes(_: &Root, _: &BTreeSet<PathBuf>) -> Option<Answers> {
+            panic!("header index 4294967295 out of range")
+        }
+        let dir = std::env::temp_dir().join(format!("unbidden-prov-panic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        let wanted: BTreeSet<PathBuf> = ["usr/bin/ok", "etc/other"].iter().map(PathBuf::from).collect();
+
+        let r = resolve_with(&root, &wanted, &[("dpkg", owns_one), ("rpm", explodes)]);
+        assert_eq!(r.failures.len(), 1);
+        assert!(r.failures[0].starts_with("rpm database: header index"), "{:?}", r.failures);
+        assert_eq!(r.answers[Path::new("usr/bin/ok")], Provenance::Unpackaged, "what dpkg said stands");
+        assert_eq!(r.answers[Path::new("etc/other")], Provenance::Unknown);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

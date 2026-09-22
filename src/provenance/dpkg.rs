@@ -466,6 +466,6 @@ mod tests {
         assert!(answers.is_empty(), "the backend reports only what it can claim");
 
         let wanted: BTreeSet<PathBuf> = [PathBuf::from("etc/systemd/system/evil.service")].into_iter().collect();
-        assert_eq!(super::super::resolve(&root, &wanted)[Path::new("etc/systemd/system/evil.service")], Provenance::Unpackaged);
+        assert_eq!(super::super::resolve(&root, &wanted).answers[Path::new("etc/systemd/system/evil.service")], Provenance::Unpackaged);
     }
 }

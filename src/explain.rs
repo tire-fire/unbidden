@@ -224,6 +224,7 @@ mod tests {
                 privileged: true,
                 enablement: crate::scan::inferred(),
                 collectors: Vec::new(),
+                enrichment_failures: Vec::new(),
             },
             entries,
         }

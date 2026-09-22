@@ -16,49 +16,95 @@ use crate::root::{Root, is_hidden_path};
 use crate::scan::Scan;
 
 pub fn enrich(root: &Root, scan: &mut Scan) {
-    normalise_targets(root, &mut scan.entries);
-    // Before anything reads target_path: a bare `ExecStart=backdoor` names a
-    // file just as surely as an absolute path does, and it needs the same
-    // provenance lookup and the same interpreter chain.
-    resolve_bare_targets(root, &mut scan.entries);
+    let mut failed = Vec::new();
+
+    stage(&mut failed, "targets", || {
+        normalise_targets(root, &mut scan.entries);
+        // Before anything reads target_path: a bare `ExecStart=backdoor`
+        // names a file just as surely as an absolute path does, and it needs
+        // the same provenance lookup and the same interpreter chain.
+        resolve_bare_targets(root, &mut scan.entries);
+    });
 
     // Before the paths are gathered, so the interpreters and sourced files
     // these name get their provenance resolved in the same pass as everything
     // else rather than needing a second one.
-    let chained = interpreter_chain(root, &scan.entries);
-    scan.entries.extend(chained);
+    if let Some(chained) = stage(&mut failed, "interpreter chain", || interpreter_chain(root, &scan.entries)) {
+        scan.entries.extend(chained);
+    }
 
     let wanted = paths_to_resolve(root, &scan.entries);
-    let answers = provenance::resolve(root, &wanted);
+    let resolution = stage(&mut failed, "provenance", || provenance::resolve(root, &wanted));
+    let answers = match resolution {
+        Some(r) => {
+            failed.extend(r.failures.into_iter().map(|f| format!("provenance: {f}")));
+            r.answers
+        }
+        None => provenance::Answers::new(),
+    };
 
-    for entry in &mut scan.entries {
+    per_entry(&mut failed, "provenance and targets", &mut scan.entries, |entry| {
         apply_provenance(root, entry, &answers);
         apply_target(root, entry);
         apply_location(root, entry);
-    }
+    });
 
     // Authoritative enablement goes on after provenance, so a generated
-    // unit can be re-attributed from Unpackaged to its generator.
-    if let Some(manager) = dbus::Manager::query(root) {
-        let answered = dbus::apply(&manager, &mut scan.entries);
-        if answered > 0 {
-            scan.header.enablement = "systemd-dbus".to_string();
+    // unit can be re-attributed from Unpackaged to its generator. A user
+    // manager answering on a socket in that user's own runtime directory is
+    // exactly as hostile as a file they wrote.
+    let entries = &mut scan.entries;
+    let header = &mut scan.header;
+    stage(&mut failed, "systemd enablement", || {
+        if let Some(manager) = dbus::Manager::query(root) {
+            let answered = dbus::apply(&manager, entries);
+            if answered > 0 {
+                header.enablement = "systemd-dbus".to_string();
+            }
         }
+    });
+
+    stage(&mut failed, "shadowing", || {
+        apply_shadowing(&mut scan.entries);
+        cross_reference_suid(&mut scan.entries);
+    });
+
+    if let Some(preloads) = stage(&mut failed, "preloads", || preload_entries(root, &scan.entries)) {
+        scan.entries.extend(preloads);
     }
-
-    apply_shadowing(&mut scan.entries);
-    cross_reference_suid(&mut scan.entries);
-
-    let preloads = preload_entries(root, &scan.entries);
-    scan.entries.extend(preloads);
 
     // Last, so the synthesised entries — a preload, a chained interpreter —
     // are measured by the same threshold as a collector's own.
-    for e in &mut scan.entries {
-        apply_encoding(e);
-    }
+    per_entry(&mut failed, "encoding", &mut scan.entries, apply_encoding);
 
     scan.entries.sort_by(|a, b| (a.kind, &a.source, &a.name).cmp(&(b.kind, &b.source, &b.name)));
+    scan.header.enrichment_failures.extend(failed);
+}
+
+/// One enrichment stage, isolated the way a collector is (§3). A stage that
+/// panics on hostile input loses its own facts, says so in the header, and
+/// the scan carries on: a scan that aborts on the file the attacker crafted
+/// is a scan the attacker controls.
+fn stage<T>(failed: &mut Vec<String>, name: &str, f: impl FnOnce() -> T) -> Option<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(v) => Some(v),
+        Err(payload) => {
+            failed.push(format!("{name}: {}", crate::scan::panic_message(payload)));
+            None
+        }
+    }
+}
+
+/// A stage applied entry by entry, so one entry's hostile bytes cost that
+/// entry its facts and nothing else. The entry itself is kept and marked.
+fn per_entry(failed: &mut Vec<String>, name: &str, entries: &mut [Entry], mut f: impl FnMut(&mut Entry)) {
+    for entry in entries {
+        if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(entry))) {
+            let why = crate::scan::panic_message(payload);
+            entry.note("enrichment_failed", format!("{name}: {why}"));
+            failed.push(format!("{name}, entry {}: {why}", entry.short_id()));
+        }
+    }
 }
 
 /// Collectors disagree about whether a target path is the literal string from
@@ -710,13 +756,21 @@ pub fn enrich_late(root: &Root, scan: &mut Scan) {
     if wanted.is_empty() {
         return;
     }
-    let answers = provenance::resolve(root, &wanted);
-    for e in &mut scan.entries {
+    let mut failed = Vec::new();
+    let answers = match stage(&mut failed, "preload provenance", || provenance::resolve(root, &wanted)) {
+        Some(r) => {
+            failed.extend(r.failures.into_iter().map(|f| format!("preload provenance: {f}")));
+            r.answers
+        }
+        None => provenance::Answers::new(),
+    };
+    per_entry(&mut failed, "preload provenance", &mut scan.entries, |e| {
         if e.kind == Kind::LdPreload && e.target_sha256.is_none() {
             apply_provenance(root, e, &answers);
             apply_target(root, e);
         }
-    }
+    });
+    scan.header.enrichment_failures.extend(failed);
 }
 
 /// Counts for the run summary, kept here so the renderer stays a renderer.
@@ -784,6 +838,31 @@ mod tests {
 
     fn find<'a>(scan: &'a Scan, name: &str) -> &'a Entry {
         scan.entries.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no entry named {name}"))
+    }
+
+    #[test]
+    fn a_panicking_stage_costs_its_own_facts_and_nothing_else() {
+        let mut failed = Vec::new();
+        assert_eq!(stage(&mut failed, "fine", || 7), Some(7));
+        assert_eq!(stage(&mut failed, "provenance", || -> u8 { panic!("rpm header lies about its length") }), None);
+        assert_eq!(failed, vec!["provenance: rpm header lies about its length".to_string()]);
+
+        let mut entries = vec![
+            Entry::new(Kind::Cron, "/etc/crontab", "a"),
+            Entry::new(Kind::Cron, "/etc/crontab", "b"),
+            Entry::new(Kind::Cron, "/etc/crontab", "c"),
+        ];
+        let mut failed = Vec::new();
+        per_entry(&mut failed, "encoding", &mut entries, |e| {
+            if e.name == "b" {
+                panic!("hostile bytes");
+            }
+            e.flag(Flag::EncodingAnomaly);
+        });
+        assert!(entries[0].has_flag(Flag::EncodingAnomaly) && entries[2].has_flag(Flag::EncodingAnomaly));
+        assert_eq!(entries[1].raw["enrichment_failed"], "encoding: hostile bytes");
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0].contains(entries[1].short_id()));
     }
 
     #[test]
