@@ -1209,6 +1209,7 @@
     ],
     "deep": false,
     "distro_id": "debian",
+    "distro_like": "",
     "distro_version": "12",
     "enablement": "inferred",
     "hostname": "golden",

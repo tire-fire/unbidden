@@ -103,6 +103,29 @@ pub fn usr_aliases(rel: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Every spelling a package database might have recorded for `rel`: the
+/// merged-usr aliases, and the same again for the path with its directories
+/// resolved on this root. The second catches layouts the fixed alias list
+/// does not know — Fedora's /usr/sbin is now a link to bin, so a unit naming
+/// /usr/sbin/nl means the /usr/bin/nl the package lists. The final component
+/// is never resolved: a link is a file of its own and is judged as one.
+pub fn spellings(root: &Root, rel: &Path) -> Vec<PathBuf> {
+    let mut out = usr_aliases(rel);
+    if let (Some(parent), Some(name)) = (rel.parent(), rel.file_name()) {
+        if let Ok(real) = root.resolve(parent) {
+            let resolved = real.join(name);
+            if resolved != rel {
+                for alias in usr_aliases(&resolved) {
+                    if !out.contains(&alias) {
+                        out.push(alias);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 pub struct FileDigests {
     pub sha256: String,
     pub md5: String,
@@ -160,6 +183,20 @@ mod tests {
         assert!(both.contains(&PathBuf::from("usr/bin/sh")));
 
         assert_eq!(usr_aliases(Path::new("etc/crontab")), vec![PathBuf::from("etc/crontab")]);
+    }
+
+    #[test]
+    fn a_directory_link_the_alias_list_does_not_know_is_still_followed() {
+        let dir = std::env::temp_dir().join(format!("unbidden-spell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("usr/bin")).unwrap();
+        std::os::unix::fs::symlink("bin", dir.join("usr/sbin")).unwrap();
+        let root = Root::at(&dir).unwrap();
+        let s = spellings(&root, Path::new("usr/sbin/nl"));
+        assert!(s.contains(&PathBuf::from("usr/sbin/nl")));
+        assert!(s.contains(&PathBuf::from("usr/bin/nl")), "{s:?}");
+        assert!(s.contains(&PathBuf::from("bin/nl")));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -190,8 +190,11 @@ impl<'a> Ctx<'a> {
 
         // A world-writable directory is as good as a world-writable file:
         // anyone can replace what is inside it.
+        // The directory that actually holds the entry: a parent reached
+        // through a link is judged by what the link leads to, since a
+        // symlink's own mode is always 0777 and means nothing.
         if let Some(parent) = rel.parent() {
-            if let Ok(meta) = self.root.stat(parent) {
+            if let Ok(meta) = self.root.stat_follow(parent) {
                 if meta.world_writable() && !is_sticky(meta.mode) {
                     e.flag(Flag::WorldWritable);
                 }
@@ -260,6 +263,11 @@ pub struct Header {
     pub kernel: String,
     pub distro_id: String,
     pub distro_version: String,
+    /// os-release's ID_LIKE: the base a derivative is built on. Mint and LMDE
+    /// share an ID and differ only here, and which one a host is decides
+    /// whether snap is even possible on it.
+    #[serde(default)]
+    pub distro_like: String,
     pub root: PathBuf,
     pub live: bool,
     pub deep: bool,
@@ -404,7 +412,7 @@ pub fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 
 fn header(root: &Root, opts: &Options, collectors: Vec<CollectorStatus>) -> Header {
     let uname = rustix::system::uname();
-    let (distro_id, distro_version) = os_release(root);
+    let (distro_id, distro_version, distro_like) = os_release(root);
     Header {
         unbidden_version: env!("CARGO_PKG_VERSION").to_string(),
         schema_version: SCHEMA_VERSION,
@@ -427,6 +435,7 @@ fn header(root: &Root, opts: &Options, collectors: Vec<CollectorStatus>) -> Head
         },
         distro_id,
         distro_version,
+        distro_like,
         root: root.abs(""),
         live: root.is_live(),
         deep: opts.deep,
@@ -438,9 +447,10 @@ fn header(root: &Root, opts: &Options, collectors: Vec<CollectorStatus>) -> Head
 }
 
 /// Distro detection reads the scan root, never the running system (§11).
-fn os_release(root: &Root) -> (String, String) {
+fn os_release(root: &Root) -> (String, String, String) {
     let mut id = String::new();
     let mut version = String::new();
+    let mut like = String::new();
     for path in ["etc/os-release", "usr/lib/os-release"] {
         let Ok((bytes, _)) = root.read_capped(path, 64 * 1024) else { continue };
         for line in String::from_utf8_lossy(&bytes).lines() {
@@ -449,6 +459,7 @@ fn os_release(root: &Root) -> (String, String) {
             match k {
                 "ID" if id.is_empty() => id = v,
                 "VERSION_ID" if version.is_empty() => version = v,
+                "ID_LIKE" if like.is_empty() => like = v,
                 _ => {}
             }
         }
@@ -456,7 +467,7 @@ fn os_release(root: &Root) -> (String, String) {
             break;
         }
     }
-    (id, version)
+    (id, version, like)
 }
 
 #[cfg(test)]
@@ -492,14 +503,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::write(dir.join("etc/rc.local"), "#!/bin/sh\n/tmp/x\n").unwrap();
-        std::fs::write(dir.join("etc/os-release"), "ID=debian\nVERSION_ID=\"12\"\n").unwrap();
+        std::fs::write(dir.join("etc/os-release"), "ID=linuxmint\nID_LIKE=debian\nVERSION_ID=\"6\"\n").unwrap();
 
         let root = Root::at(&dir).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Panicky), Box::new(Fine)];
         let scan = run(&root, &Options { deep: false }, &collectors);
 
         assert_eq!(scan.entries.len(), 1, "the healthy collector still reported");
-        assert_eq!(scan.header.distro_id, "debian");
+        assert_eq!(scan.header.distro_id, "linuxmint");
+        assert_eq!(scan.header.distro_like, "debian", "LMDE is told from mainline Mint by its base");
         let failed = scan.header.collectors.iter().find(|c| c.name == "panicky").unwrap();
         match &failed.status {
             Status::Failed { error } => assert!(error.contains("hostile input")),

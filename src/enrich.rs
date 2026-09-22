@@ -131,7 +131,9 @@ fn is_kernel_interface(rel: &Path) -> bool {
 /// search path the mechanism would use.
 fn resolve_bare_targets(root: &Root, entries: &mut [Entry]) {
     for entry in entries {
-        if entry.target_path.is_some() {
+        // A collector that already knows there is no program to find says
+        // so. The first word of a lua scriptlet is lua, not a command name.
+        if entry.target_path.is_some() || entry.raw.contains_key("target_unverifiable") {
             continue;
         }
         let Some(command) = &entry.command else { continue };
@@ -162,6 +164,38 @@ fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
         }
     }
     out
+}
+
+/// A link whose own verdict says nothing useful is judged by the file it
+/// leads to, and the entry says so. That covers two ordinary cases: a link no
+/// package owns (/usr/bin/editor -> /etc/alternatives/editor ->
+/// /usr/bin/vim.basic is vim), and a packaged link dpkg cannot verify because
+/// it records no digest for links at all (/usr/bin/python3 -> python3.10,
+/// which another package ships). The same links pointed at /tmp end at an
+/// unpackaged file, and that is the verdict that comes back.
+fn through_link(
+    root: &Root,
+    entry: &mut Entry,
+    rel: &Path,
+    verdict: Provenance,
+    answers: &provenance::Answers,
+    note: &str,
+) -> Provenance {
+    let uninformative = matches!(
+        verdict,
+        Provenance::Unpackaged | Provenance::Packaged { integrity: Integrity::Unknown, .. }
+    );
+    if !uninformative {
+        return verdict;
+    }
+    let Some(end) = link_end(root, rel) else { return verdict };
+    match answers.get(&end) {
+        Some(v) => {
+            entry.note(note, root.abs(&end).to_string_lossy());
+            v.clone()
+        }
+        None => verdict,
+    }
 }
 
 /// The file a symlinked target finally resolves to, inside the scan root.
@@ -196,6 +230,11 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
     // decided. Writing Unknown over a resolved verdict would make a later,
     // narrower pass undo the work of the first one.
     if let Some(verdict) = answers.get(&source_rel).cloned() {
+        // Only for an entry whose subject is its target. A link that is the
+        // entry's own source — an alias in /etc/systemd/system — is itself
+        // the evidence, and taking its target's verdict would hide it.
+        let verdict =
+            if about_target { through_link(root, entry, &source_rel, verdict, answers, "resolves_to") } else { verdict };
         match &verdict {
             Provenance::Unpackaged => entry.flag(Flag::Unpackaged),
             Provenance::Packaged { integrity: Integrity::Modified, .. } => entry.flag(Flag::PackagedModified),
@@ -213,23 +252,22 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
     if let Some(target) = entry.target_path.clone() {
         let target_rel = root.rel(&target);
         if target_rel != source_rel {
-            let mut verdict = answers.get(&target_rel);
-            // A link no package owns is judged by the file it leads to, and
-            // says so. /usr/bin/editor -> /etc/alternatives/editor ->
-            // /usr/bin/vim.basic is vim; the same links pointed at /tmp are
-            // an unpackaged target, which the lookup below then reports.
-            if matches!(verdict, Some(Provenance::Unpackaged)) {
-                if let Some(end) = link_end(root, &target_rel) {
-                    if let Some(v) = answers.get(&end) {
-                        entry.note("target_resolves_to", root.abs(&end).to_string_lossy());
-                        verdict = Some(v);
-                    }
-                }
-            }
-            match verdict {
+            let verdict = answers
+                .get(&target_rel)
+                .cloned()
+                .map(|v| through_link(root, entry, &target_rel, v, answers, "target_resolves_to"));
+            match &verdict {
                 Some(Provenance::Unpackaged) => {
                     entry.note("target_provenance", "unpackaged");
                     entry.flag(Flag::Unpackaged);
+                }
+                // A directory has no contents to hold a digest of. Its
+                // integrity is not unknown so much as not a question, and
+                // saying "unknown" would keep every `#includedir` in view.
+                Some(Provenance::Packaged { package, .. })
+                    if root.stat_follow(&target_rel).is_ok_and(|m| m.is_dir) =>
+                {
+                    entry.note("target_provenance", format!("{package} (directory)"));
                 }
                 Some(Provenance::Packaged { package, integrity, .. }) => {
                     entry.note("target_provenance", format!("{package} ({integrity})"));
@@ -876,19 +914,40 @@ mod tests {
         for d in ["etc/cron.d", "etc/alternatives", "usr/local/bin", "usr/bin", "tmp", "var/lib/dpkg/info"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
-        std::fs::write(dir.join("etc/cron.d/job"), b"* * * * * root backdoor\n* * * * * root editor\n").unwrap();
+        std::fs::write(dir.join("etc/cron.d/job"), b"* * * * * root backdoor\n* * * * * root editor\n* * * * * root tracker\n").unwrap();
+        std::fs::write(dir.join("usr/bin/tracker"), b"#!/usr/bin/python3\n").unwrap();
+        std::fs::write(dir.join("usr/bin/python3.10"), b"py").unwrap();
+        std::os::unix::fs::symlink("python3.10", dir.join("usr/bin/python3")).unwrap();
+        std::fs::write(dir.join("usr/bin/shipped-job"), b"* * * * * root /bin/true\n").unwrap();
+        std::os::unix::fs::symlink("/usr/bin/shipped-job", dir.join("etc/cron.d/alias")).unwrap();
         std::fs::write(dir.join("usr/local/bin/backdoor"), b"#!/tmp/interp\nexit 0\n").unwrap();
         std::fs::write(dir.join("tmp/interp"), b"elf").unwrap();
         std::fs::write(dir.join("usr/bin/vim.basic"), b"vim").unwrap();
         std::os::unix::fs::symlink("/etc/alternatives/editor", dir.join("usr/bin/editor")).unwrap();
         std::os::unix::fs::symlink("/usr/bin/vim.basic", dir.join("etc/alternatives/editor")).unwrap();
-        std::fs::write(dir.join("var/lib/dpkg/status"), b"Package: vim\nStatus: install ok installed\nVersion: 9\n\n").unwrap();
-        std::fs::write(dir.join("var/lib/dpkg/info/vim.list"), b"/usr/bin/vim.basic\n").unwrap();
-        let md5 = {
+        let md5 = |b: &[u8]| {
             use md5::Digest as _;
-            crate::entry::hex(&md5::Md5::digest(b"vim"))
+            crate::entry::hex(&md5::Md5::digest(b))
         };
-        std::fs::write(dir.join("var/lib/dpkg/info/vim.md5sums"), format!("{md5}  usr/bin/vim.basic\n")).unwrap();
+        std::fs::write(
+            dir.join("var/lib/dpkg/status"),
+            b"Package: vim\nStatus: install ok installed\nVersion: 9\n\n\
+              Package: python3-minimal\nStatus: install ok installed\nVersion: 3.10\n\n\
+              Package: python3.10-minimal\nStatus: install ok installed\nVersion: 3.10.4\n\n\
+              Package: jobs\nStatus: install ok installed\nVersion: 1\n\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/vim.list"), b"/usr/bin/vim.basic\n").unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/vim.md5sums"), format!("{}  usr/bin/vim.basic\n", md5(b"vim"))).unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/python3-minimal.list"), b"/usr/bin/python3\n").unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/python3.10-minimal.list"), b"/usr/bin/python3.10\n").unwrap();
+        std::fs::write(
+            dir.join("var/lib/dpkg/info/python3.10-minimal.md5sums"),
+            format!("{}  usr/bin/python3.10\n", md5(b"py")),
+        )
+        .unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/jobs.list"), b"/usr/bin/shipped-job\n").unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/jobs.md5sums"), format!("{}  usr/bin/shipped-job\n", md5(b"* * * * * root /bin/true\n"))).unwrap();
 
         let root = Root::at(&dir).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(crate::collect::cron::Cron)];
@@ -912,6 +971,21 @@ mod tests {
             .expect("the script behind the bare name is followed to its interpreter");
         assert_eq!(chained.name, "/tmp/interp");
         assert!(chained.has_flag(Flag::Unpackaged));
+
+        // A script's interpreter reached through a link dpkg cannot verify:
+        // /usr/bin/python3 -> python3.10 is listed by one package and the
+        // file it names is shipped, with a digest, by another.
+        let chained = scan.entries.iter().find(|e| e.name == "/usr/bin/python3").expect("the shebang is followed");
+        assert!(matches!(
+            &chained.provenance,
+            Provenance::Packaged { package, integrity: Integrity::Intact, .. } if package == "python3.10-minimal"
+        ), "{:?}", chained.provenance);
+        assert_eq!(chained.raw["resolves_to"], dir.join("usr/bin/python3.10").to_string_lossy());
+
+        // An alias link that is an entry's own source keeps its own verdict:
+        // the link is the evidence.
+        let alias = scan.entries.iter().find(|e| e.source == dir.join("etc/cron.d/alias")).expect("alias");
+        assert!(alias.has_flag(Flag::Unpackaged));
 
         // An update-alternatives link belongs to no package; the file at the
         // end of it does, and is what runs.

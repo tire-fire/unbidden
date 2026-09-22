@@ -196,6 +196,16 @@ impl Collector for Systemd {
 impl Walk {
     fn scan(&mut self, cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>, scope: &Scope, dir: &Path, at: &SearchDir) {
         let (rank, admin) = (at.rank, at.admin);
+        // A search-path directory that is a link is walked under the name it
+        // resolves to. Debian ships /etc/xdg/systemd/user as a link to
+        // /etc/systemd/user and merged-usr makes /lib one to /usr/lib;
+        // walking the link's name would report every unit under a path no
+        // administrator uses, and re-key them all in the process (§5).
+        let canonical = match cx.root.stat(dir) {
+            Ok(m) if m.is_symlink => cx.root.resolve(dir).ok(),
+            _ => None,
+        };
+        let dir = canonical.as_deref().unwrap_or(dir);
         match cx.root.dir_identity(dir) {
             Ok(id) => {
                 if !seen.insert(id) {
@@ -1074,6 +1084,25 @@ mod tests {
         assert!(bob.raw["shadows"].ends_with("usr/lib/systemd/user/pipewire.service"));
         let admin = at("etc/systemd/user/pipewire.service");
         assert!(admin.raw["shadowed_by"].contains("home/alice"), "{:?}", admin.raw);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_search_directory_that_is_a_link_is_walked_under_the_name_it_resolves_to() {
+        // Debian ships /etc/xdg/systemd/user -> ../../systemd/user. Walked
+        // under the link's name, every /etc/systemd/user unit was reported
+        // somewhere no administrator looks, took a new id, and read as
+        // world-writable because a symlink's own mode is 0777.
+        let dir = tree("xdglink");
+        write(&dir, "etc/systemd/user/pipewire.service", VENDOR);
+        std::fs::create_dir_all(dir.join("etc/xdg/systemd")).unwrap();
+        link(&dir, "../../systemd/user", "etc/xdg/systemd/user");
+
+        let s = scan(&dir);
+        let e = one(&s, "pipewire.service");
+        assert_eq!(e.source, dir.join("etc/systemd/user/pipewire.service"));
+        assert_eq!(e.id, crate::entry::entry_id(Kind::SystemdUnit, Path::new("etc/systemd/user/pipewire.service"), "pipewire.service"));
+        assert!(!e.has_flag(Flag::WorldWritable));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

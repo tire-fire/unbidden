@@ -218,6 +218,7 @@ mod tests {
                 kernel: "k".into(),
                 distro_id: "debian".into(),
                 distro_version: "12".into(),
+                distro_like: String::new(),
                 root: "/".into(),
                 live: true,
                 deep: false,

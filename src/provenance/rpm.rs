@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use crate::entry::{Integrity, Provenance};
 use crate::root::Root;
 
-use super::{Answers, usr_aliases};
+use super::{Answers, spellings};
 
 const DB: &str = "var/lib/rpm/rpmdb.sqlite";
 
@@ -44,6 +44,7 @@ const TAG_RELEASE: u32 = 1002;
 const TAG_EPOCH: u32 = 1003;
 const TAG_ARCH: u32 = 1022;
 const TAG_FILEDIGESTS: u32 = 1035;
+const TAG_FILELINKTOS: u32 = 1036;
 const TAG_FILEFLAGS: u32 = 1037;
 const TAG_DIRINDEXES: u32 = 1116;
 const TAG_BASENAMES: u32 = 1117;
@@ -187,7 +188,7 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
     // which reads as Unpackaged, the flag the tool leads with.
     let mut alias_to_wanted: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     for w in wanted {
-        for alias in usr_aliases(w) {
+        for alias in spellings(root, w) {
             alias_to_wanted.entry(alias).or_default().push(w.clone());
         }
     }
@@ -257,6 +258,10 @@ struct Claim {
     algo: u32,
     config: bool,
     ghost: bool,
+    /// What the package shipped this path as a symlink to, if it shipped a
+    /// symlink. rpm records no digest for one — there are no contents — but
+    /// it does record the target, and `rpm -V` checks exactly that.
+    link_to: Option<String>,
 }
 
 fn collect_claims(
@@ -272,6 +277,7 @@ fn collect_claims(
     let dirindexes = header.int_array(TAG_DIRINDEXES);
     let digests = header.string_array(TAG_FILEDIGESTS);
     let flags = header.int_array(TAG_FILEFLAGS);
+    let links = header.string_array(TAG_FILELINKTOS);
     let algo = header.int(TAG_FILEDIGESTALGO).unwrap_or(0);
 
     let name = header.string(TAG_NAME).unwrap_or_default();
@@ -294,6 +300,7 @@ fn collect_claims(
             algo,
             config: file_flags & RPMFILE_CONFIG != 0,
             ghost: file_flags & RPMFILE_GHOST != 0,
+            link_to: links.get(i).filter(|l| !l.is_empty()).cloned(),
         };
         for w in wanted {
             claims.entry(w.clone()).or_default().push(claim.clone());
@@ -467,6 +474,18 @@ fn verify(root: &Root, path: &Path, candidates: &[Claim]) -> Provenance {
     for claim in candidates {
         let integrity = match (&actual, digest_of(&actual, claim.algo)) {
             _ if claim.ghost => Integrity::Unknown,
+            // A shipped symlink is intact when it is still a symlink to what
+            // the package said. `/usr/bin/sh -> bash` is how every scriptlet
+            // reaches its interpreter; reported unknown, it kept every one of
+            // them in the default view.
+            _ if claim.link_to.is_some() => {
+                let on_disk = root.stat(path).is_ok_and(|m| m.is_symlink).then(|| root.read_link(path).ok()).flatten();
+                match on_disk {
+                    Some(t) if Some(t.to_string_lossy().as_ref()) == claim.link_to.as_deref() => Integrity::Intact,
+                    _ if claim.config => Integrity::ConffileModified,
+                    _ => Integrity::Modified,
+                }
+            }
             (Some(_), Some(actual_digest)) if !claim.digest.is_empty() => {
                 if claim.digest.eq_ignore_ascii_case(actual_digest) {
                     Integrity::Intact
@@ -799,7 +818,7 @@ pub(crate) mod tests {
         let mut claims = BTreeMap::new();
         let wanted = PathBuf::from("usr/lib/systemd/system/target.service");
         let aliases: BTreeMap<PathBuf, Vec<PathBuf>> =
-            usr_aliases(&wanted).into_iter().map(|a| (a, vec![wanted.clone()])).collect();
+            crate::provenance::usr_aliases(&wanted).into_iter().map(|a| (a, vec![wanted.clone()])).collect();
         collect_claims(&header, &aliases, &mut claims);
 
         assert_eq!(claims.len(), 1, "the path after the empty basename must still resolve");
@@ -841,6 +860,45 @@ pub(crate) mod tests {
             answers[Path::new("usr/bin/clean")],
             Provenance::Packaged { integrity: Integrity::Intact, .. }
         ));
+    }
+
+    #[test]
+    fn a_shipped_symlink_is_verified_by_where_it_points() {
+        // rpm records no digest for a symlink, but it records the target, and
+        // that is what `rpm -V` checks. /usr/bin/sh -> bash is the
+        // interpreter of nearly every scriptlet on a Fedora host.
+        let f = Fixture::new("symlink");
+        f.write("usr/bin/bash", b"elf");
+        std::os::unix::fs::symlink("bash", f.0.join("usr/bin/sh")).unwrap();
+        std::os::unix::fs::symlink("/tmp/evil", f.0.join("usr/bin/rbash")).unwrap();
+        f.write("usr/bin/bashbug", b"now a regular file");
+        // Merged /usr: the package lists /usr/bin/sh, scripts say /bin/sh.
+        std::os::unix::fs::symlink("usr/bin", f.0.join("bin")).unwrap();
+
+        let mut b = HeaderBuilder::default();
+        b.string(TAG_NAME, "bash")
+            .string(TAG_VERSION, "5.3")
+            .string(TAG_RELEASE, "1.fc44")
+            .string_array(TAG_DIRNAMES, &["/usr/bin/"])
+            .string_array(TAG_BASENAMES, &["sh", "rbash", "bashbug"])
+            .ints(TAG_DIRINDEXES, &[0, 0, 0])
+            .string_array(TAG_FILEDIGESTS, &["", "", ""])
+            .string_array(TAG_FILELINKTOS, &["bash", "bash", "bash"])
+            .ints(TAG_FILEFLAGS, &[0, 0, 0])
+            .ints(TAG_FILEDIGESTALGO, &[8]);
+        f.rpmdb(&[b.build()]);
+
+        let root = f.root();
+        let answers = ask(&root, &["usr/bin/sh", "bin/sh", "usr/bin/rbash", "usr/bin/bashbug"]);
+        let integrity = |p: &str| match &answers[Path::new(p)] {
+            Provenance::Packaged { integrity, .. } => *integrity,
+            other => panic!("{p}: {other:?}"),
+        };
+        assert_eq!(integrity("usr/bin/sh"), Integrity::Intact);
+        assert_eq!(integrity("bin/sh"), Integrity::Intact);
+        assert_eq!(integrity("usr/bin/rbash"), Integrity::Modified, "repointed");
+        assert_eq!(integrity("usr/bin/bashbug"), Integrity::Modified, "no longer a link at all");
+        std::fs::remove_dir_all(&f.0).ok();
     }
 
     #[test]
