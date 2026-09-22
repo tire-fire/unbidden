@@ -326,7 +326,12 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
             e.note("generated", "true");
             if matches!(e.provenance, Provenance::Unpackaged | Provenance::Unknown) {
                 e.provenance = Provenance::GeneratedBy { by: "systemd-generator".into() };
-                e.flags.retain(|f| *f != Flag::Unpackaged);
+                // The unit file was written by a generator; what it runs is a
+                // separate file with its own verdict. An Unpackaged flag that
+                // came from the target is still true and stays.
+                if e.raw.get("target_provenance").map(String::as_str) != Some("unpackaged") {
+                    e.flags.retain(|f| *f != Flag::Unpackaged);
+                }
             }
         }
     }
@@ -444,6 +449,20 @@ mod tests {
         assert!(!entries[0].has_flag(Flag::Unpackaged));
         assert_eq!(entries[0].raw["generated"], "true");
         assert!(matches!(&entries[0].provenance, Provenance::GeneratedBy { by } if by == "systemd-generator"));
+    }
+
+    #[test]
+    fn a_generated_unit_keeps_the_unpackaged_flag_its_target_earned() {
+        let mut e = Entry::new(Kind::SystemdUnit, "/run/systemd/generator/x.service", "x.service");
+        e.provenance = Provenance::Unpackaged;
+        e.note("target_provenance", "unpackaged");
+        e.flag(Flag::Unpackaged);
+
+        let manager = manager_of(vec![("/run/systemd/generator/x.service", answers(&[("system", "generated")]))]);
+        let mut entries = vec![e];
+        apply(&manager, &mut entries);
+        assert!(matches!(&entries[0].provenance, Provenance::GeneratedBy { .. }));
+        assert!(entries[0].has_flag(Flag::Unpackaged), "what the unit runs is still unpackaged");
     }
 
     #[test]
