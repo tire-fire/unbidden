@@ -607,8 +607,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("etc/init.d")).unwrap();
         std::fs::create_dir_all(dir.join("etc/rc2.d")).unwrap();
-        std::fs::write(dir.join("etc/init.d/ssh"), "#!/bin/sh
-").unwrap();
+        std::fs::write(dir.join("etc/init.d/ssh"), "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(
             dir.join("etc/init.d/ssh"),
             std::os::unix::fs::PermissionsExt::from_mode(0o755),

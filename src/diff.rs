@@ -60,7 +60,8 @@ pub fn comparable(baseline: &Scan, current: &Scan) -> Result<(), String> {
 
     if baseline.header.enablement != current.header.enablement {
         return Err(format!(
-            "baseline enablement came from {} and this scan's from {};              every unit would appear to have changed",
+            "baseline enablement came from {} and this scan's from {}; \
+             every unit would appear to have changed",
             baseline.header.enablement, current.header.enablement
         ));
     }
@@ -350,6 +351,14 @@ mod tests {
         let mut after = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
         after.header.deep = true;
         assert!(diff(&before, &after).unwrap_err().contains("deep"));
+
+        let mut after = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
+        after.header.enablement = "systemd-dbus".into();
+        assert_eq!(
+            diff(&before, &after).unwrap_err(),
+            "baseline enablement came from inferred and this scan's from systemd-dbus; \
+             every unit would appear to have changed"
+        );
 
         let mut after = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
         after.header.enrichment_failures.push("provenance: rpm database: boom".into());

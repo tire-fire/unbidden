@@ -562,6 +562,10 @@ mod tests {
         );
         let err = root.read("home/alice/.bashrc").unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(
+            err.to_string(),
+            "home/alice/.bashrc leads out of its owner's home to /etc/shadow; recorded as a link, not followed"
+        );
 
         // A link inside the same home is how every dotfile manager works and
         // is still followed.
