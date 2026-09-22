@@ -3,6 +3,7 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
@@ -216,3 +217,32 @@ jobs:
           pull ${{ matrix.image }}
           docker run --rm -v "$PWD:/w" -w /w -e UNBIDDEN_EXPECT_ID ${{ matrix.image }} \
             sh ci/distro-check.sh /w/bin/unbidden
+
+  release:
+    # The README sends people here for a static binary, so the release is cut
+    # from the artifacts the static job already proved static rather than from
+    # a fresh build nobody checked. §1's matrix gates it: a distro failure has
+    # to stop the release, not just colour a badge.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, fuzz, static, desktop, distros]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unbidden-*
+          path: dist
+      - name: name each binary after its target
+        run: |
+          for d in dist/unbidden-*; do
+            t=$(basename "$d")
+            cp "$d/unbidden" "$t"
+            chmod +x "$t"
+          done
+          sha256sum unbidden-* > SHA256SUMS
+          cat SHA256SUMS
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes unbidden-* SHA256SUMS
