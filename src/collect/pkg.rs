@@ -322,6 +322,11 @@ fn dpkg_scripts(cx: &mut Ctx) -> Vec<Entry> {
         e.target_path = Some(cx.root.abs(&rel));
         e.note("manager", "dpkg");
         e.note("script", script.clone());
+        // dpkg records digests for the files a package ships, never for its
+        // own metadata, so no scan can ever verify a maintainer script
+        // against anything. That is a property of the ecosystem rather than a
+        // gap in this run, and the renderer needs to know the difference.
+        e.note("digest_unavailable", "dpkg keeps no digest for maintainer scripts");
         match lossy(stem).split_once(':') {
             Some((pkg, arch)) => {
                 e.note("package", pkg.to_string());

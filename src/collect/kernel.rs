@@ -323,6 +323,37 @@ fn attribute_of<'a>(key: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
 
 // ------------------------------------------------------- kernel modules ----
 
+/// Every module's file, from `modules.dep` — one read per installed kernel
+/// rather than a walk of `/lib/modules`.
+///
+/// Without this a loaded module's only source is `/proc/modules`, which no
+/// package owns, so a couple of hundred perfectly ordinary modules arrive in
+/// the operator's view unattributed. The `.ko` behind each one is packaged,
+/// and saying which file a module came from is the useful fact anyway.
+fn module_files(cx: &mut Ctx) -> BTreeMap<String, PathBuf> {
+    let mut out = BTreeMap::new();
+    for ent in cx.dir("lib/modules") {
+        if !ent.is_dir {
+            continue;
+        }
+        let base = Path::new("lib/modules").join(&ent.name);
+        let Some(bytes) = cx.read_capped(base.join("modules.dep"), 8 << 20) else { continue };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let Some((rel, _)) = line.split_once(':') else { continue };
+            let file = Path::new(rel.trim());
+            let Some(stem) = file.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            // foo.ko, foo.ko.zst, foo.ko.xz all name the module foo.
+            let name = stem.split(".ko").next().unwrap_or(&stem).replace('-', "_");
+            if !name.is_empty() {
+                out.entry(name).or_insert_with(|| base.join(file));
+            }
+        }
+    }
+    out
+}
+
 /// /proc/modules is the only live-only source here. Its absence is recorded
 /// rather than passed over: on an offline root every module below reports an
 /// unknown loaded state, and the operator has to be able to tell that from a
@@ -349,6 +380,7 @@ fn loaded_modules(cx: &mut Ctx) -> Option<Loaded> {
 }
 
 fn loaded_entries(cx: &mut Ctx, loaded: &Loaded) -> Vec<Entry> {
+    let files = module_files(cx);
     let mut out = Vec::new();
     for (name, fields) in loaded {
         let mut e = cx.entry(Kind::KernelModule, "proc/modules", name.clone());
@@ -356,6 +388,9 @@ fn loaded_entries(cx: &mut Ctx, loaded: &Loaded) -> Vec<Entry> {
         e.enabled = Enablement::Enabled;
         e.note("directive", "loaded");
         e.note("module", name.clone());
+        if let Some(file) = files.get(&name.replace('-', "_")) {
+            e.target_path = Some(cx.root.abs(file));
+        }
         // Prefixed `live.` because these move on their own: a module's
         // reference count and dependants change as the machine is used, and
         // a diff that reported every loaded module as changed on every run

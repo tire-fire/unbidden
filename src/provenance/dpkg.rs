@@ -20,6 +20,12 @@ const STATUS: &str = "var/lib/dpkg/status";
 /// root-owned system files; the cap is a backstop, not a parsing limit.
 const DB_CAP: usize = 64 << 20;
 
+/// The per-package files dpkg keeps in its info directory. The executable
+/// ones run as root on a package operation, which is why they are collected
+/// at all.
+const MAINTAINER_SCRIPTS: [&str; 6] =
+    ["preinst", "postinst", "prerm", "postrm", "config", "triggers"];
+
 pub fn present(root: &Root) -> bool {
     root.exists(STATUS)
 }
@@ -44,6 +50,20 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
     }
 
     let mut owner: BTreeMap<PathBuf, String> = BTreeMap::new();
+
+    // dpkg's own metadata directory is not listed in anybody's .list, so
+    // every maintainer script in it reads as unpackaged — a hundred rows of
+    // noise on an ordinary Debian host. The layout names the owner: the file
+    // is `<package>[:<arch>].<script>` and dpkg put it there.
+    for w in wanted {
+        let Ok(name) = w.strip_prefix(INFO) else { continue };
+        let name = name.to_string_lossy();
+        let Some((stem, ext)) = name.rsplit_once('.') else { continue };
+        if MAINTAINER_SCRIPTS.contains(&ext) && !stem.is_empty() {
+            owner.insert(w.clone(), stem.to_string());
+        }
+    }
+
     for ent in root.read_dir_optional(INFO).unwrap_or_default() {
         let name = ent.name.to_string_lossy().into_owned();
         let Some(pkg) = name.strip_suffix(".list") else { continue };
@@ -163,6 +183,28 @@ fn verify(root: &Root, path: &Path, pkg: &str, info: &PkgInfo) -> Integrity {
             } else {
                 Integrity::ConffileModified
             };
+        }
+    }
+
+    // A symlink has no contents of its own, and dpkg records no digest for
+    // one — `/bin/sh` is owned by dash and listed in its file list, but the
+    // md5sums line is for `bin/dash`. Verifying through the link is what
+    // makes an ordinary `#!/bin/sh` resolve instead of reporting unverifiable
+    // on every script on the host.
+    if root.stat(path).is_ok_and(|m| m.is_symlink) {
+        if let Ok(target) = root.read_link(path) {
+            let resolved = if target.is_absolute() {
+                root.rel(&target)
+            } else {
+                path.parent().map(|d| root.rel(&d.join(&target))).unwrap_or_else(|| root.rel(&target))
+            };
+            if let Some(expected) = shipped_digest(root, pkg, &resolved) {
+                return if expected.eq_ignore_ascii_case(&actual.md5) {
+                    Integrity::Intact
+                } else {
+                    Integrity::Modified
+                };
+            }
         }
     }
 
@@ -368,6 +410,23 @@ mod tests {
                 assert_eq!(version, "2.1");
             }
             other => panic!("expected the arch-qualified package to resolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_maintainer_script_belongs_to_the_package_that_names_it() {
+        // dpkg lists no owner for its own info directory, so without this
+        // every .postinst on the host reads as attacker-authored.
+        let f = Fixture::new("maintainer");
+        f.write(STATUS, b"Package: openssh-server\nArchitecture: amd64\nVersion: 1:9.2p1-2\n\n");
+        f.write(&format!("{INFO}/openssh-server.postinst"), b"#!/bin/sh\nsystemctl restart ssh\n");
+        f.write(&format!("{INFO}/openssh-server.list"), b"/usr/sbin/sshd\n");
+
+        let root = f.root();
+        let answers = ask(&root, &[&format!("{INFO}/openssh-server.postinst")]);
+        match &answers[Path::new(&format!("{INFO}/openssh-server.postinst"))] {
+            Provenance::Packaged { package, .. } => assert_eq!(package, "openssh-server"),
+            other => panic!("expected the naming package to own it, got {other:?}"),
         }
     }
 

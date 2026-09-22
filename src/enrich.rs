@@ -69,10 +69,22 @@ fn normalise_targets(root: &Root, entries: &mut [Entry]) {
     }
 }
 
+/// A kernel interface is not a file any package could own. Asking the
+/// provenance question about `/proc/modules` and answering "unpackaged" is a
+/// category error that puts every loaded module — a couple of hundred on an
+/// ordinary host — into the default view as a finding.
+fn is_kernel_interface(rel: &Path) -> bool {
+    rel.starts_with("proc") || rel.starts_with("sys")
+}
+
 fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
     let mut out = BTreeSet::new();
     for e in entries {
-        out.insert(root.rel(&e.source));
+        let source = root.rel(&e.source);
+        if is_kernel_interface(&source) {
+            continue;
+        }
+        out.insert(source);
         if let Some(t) = &e.target_path {
             out.insert(root.rel(t));
         }
@@ -86,12 +98,19 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
     // carrier's source so the location rules judge the right file, but the
     // package verdict has to be the target's, or an ordinary /bin/sh reached
     // through an unpackaged crontab would itself read as unpackaged.
-    let subject = if entry.raw.contains_key("declared_by_entry") {
-        entry.target_path.clone().map(|t| root.rel(&t))
-    } else {
-        None
-    };
+    // An entry is about its target rather than its source in two cases: one
+    // synthesised out of another entry, and one whose source is a kernel
+    // interface no package can own. A loaded module's subject is the .ko it
+    // came from, and that file is packaged like any other.
+    let about_target = entry.raw.contains_key("declared_by_entry")
+        || is_kernel_interface(&root.rel(&entry.source));
+    let subject = about_target.then(|| entry.target_path.clone().map(|t| root.rel(&t))).flatten();
+
     let source_rel = subject.unwrap_or_else(|| root.rel(&entry.source));
+    if is_kernel_interface(&source_rel) {
+        entry.note("provenance_caveat", "read from a kernel interface, not a file a package can own");
+        return;
+    }
 
     // A path this pass was not asked about keeps whatever an earlier pass
     // decided. Writing Unknown over a resolved verdict would make a later,

@@ -49,10 +49,16 @@ pub fn suppressed(e: &Entry) -> bool {
     quiet && (e.provenance.is_packaged_intact() || from_package_database(e))
 }
 
-/// An entry read out of a package database rather than off the filesystem —
-/// an rpm scriptlet, a file trigger. Its integrity is reported Unknown
-/// because there is no file to hash: the record and the claim about it are
-/// the same artifact.
+/// An entry that is the package manager's own machinery: an rpm scriptlet or
+/// file trigger read out of the header, a dpkg maintainer script. Integrity
+/// comes back Unknown for both, and for the same reason — no package manager
+/// records a digest of its own metadata, so no scan can ever verify one.
+///
+/// That is different from §7's "missing md5sums" case, which is a gap in the
+/// evidence about a shipped file and must never be hidden. Here there is no
+/// evidence for anyone, ever, and an ordinary Debian host carries 851 of
+/// them. Reporting all of them on every run teaches an operator to skip the
+/// category, which costs more than it buys.
 ///
 /// Those are suppressed when a package owns them, which needs justifying
 /// because §8 otherwise refuses to hide an unverified entry. The reasoning is
@@ -66,7 +72,8 @@ pub fn suppressed(e: &Entry) -> bool {
 /// A scriptlet carrying any finding at all is still shown, so an encoded
 /// payload or an unresolvable target in one reaches the operator.
 fn from_package_database(e: &Entry) -> bool {
-    e.raw.contains_key("read_from") && matches!(e.provenance, crate::entry::Provenance::Packaged { .. })
+    let metadata = e.raw.contains_key("read_from") || e.raw.contains_key("digest_unavailable");
+    metadata && matches!(e.provenance, crate::entry::Provenance::Packaged { .. })
 }
 
 /// Newline-delimited: the header on the first line, then one entry per line,
@@ -289,8 +296,14 @@ mod tests {
         payload.flag(Flag::EncodingAnomaly);
         assert!(!suppressed(&payload), "a scriptlet carrying a finding must still be shown");
 
-        // The rule is narrow: an ordinary file whose integrity is unknown is
-        // still never hidden.
+        // A dpkg maintainer script is the same case by a different route.
+        let mut maintainer = shipped.clone();
+        maintainer.raw.remove("read_from");
+        maintainer.note("digest_unavailable", "dpkg keeps no digest for maintainer scripts");
+        assert!(suppressed(&maintainer));
+
+        // The rule stays narrow: a shipped file whose md5sums line is simply
+        // missing is still never hidden, which is §7's rule.
         let mut on_disk = shipped.clone();
         on_disk.raw.remove("read_from");
         assert!(!suppressed(&on_disk));
