@@ -76,9 +76,15 @@ pub fn suppressed(e: &Entry) -> bool {
 ///
 /// A scriptlet carrying any finding at all is still shown, so an encoded
 /// payload or an unresolvable target in one reaches the operator.
+///
+/// The one thing that can be established about a maintainer script is when
+/// it last changed, and one changed after its package was installed is shown:
+/// dpkg did not write it, and that is exactly the script worth reading.
 fn from_package_database(e: &Entry) -> bool {
     let metadata = e.raw.contains_key("read_from") || e.raw.contains_key("digest_unavailable");
-    metadata && matches!(e.provenance, crate::entry::Provenance::Packaged { .. })
+    metadata
+        && !e.raw.contains_key("changed_after_install")
+        && matches!(e.provenance, crate::entry::Provenance::Packaged { .. })
 }
 
 /// Text from a hostile disk, made safe to print to a terminal.
@@ -386,6 +392,9 @@ mod tests {
         maintainer.raw.remove("read_from");
         maintainer.note("digest_unavailable", "dpkg keeps no digest for maintainer scripts");
         assert!(suppressed(&maintainer));
+        let mut edited = maintainer.clone();
+        edited.note("changed_after_install", "inode changed 86400s after /var/lib/dpkg/info/cron.list was written");
+        assert!(!suppressed(&edited), "a script dpkg did not write is the one worth reading");
 
         // The rule stays narrow: a shipped file whose md5sums line is simply
         // missing is still never hidden, which is §7's rule.

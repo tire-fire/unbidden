@@ -290,6 +290,39 @@ const MAINTAINER_SCRIPTS: &[&str] = &["preinst", "postinst", "prerm", "postrm"];
 /// §8 suppresses a packaged, intact script by default, and a script that is
 /// *not* packaged or not intact in this directory is one of the loudest
 /// findings the tool can produce. Filtering here would delete that signal.
+/// How long after a package's file list is written its maintainer scripts
+/// may still be landing. dpkg writes the `.list` and then installs the new
+/// control files in the same unpack, moments apart; a restore or an image
+/// layer extracted in bulk spreads them by seconds. A script whose inode
+/// changed later than this was changed after its package was installed.
+const INSTALL_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// No digest exists for a maintainer script, so its contents cannot be
+/// checked — but when it changed can be. dpkg writes `<pkg>.list` and the
+/// package's scripts in one unpack, and an inode's change time cannot be set
+/// from userspace. A script whose ctime is well after its package's list was
+/// edited or planted since, by something other than dpkg.
+///
+/// On an image copied rather than mounted the ctimes are the copy's, and the
+/// comparison says nothing; it only ever adds a note, never takes one away.
+fn note_changed_after_install(cx: &Ctx, e: &mut Entry, rel: &Path, stem: &[u8]) {
+    let mut list = stem.to_vec();
+    list.extend_from_slice(b".list");
+    let list_rel = Path::new(DPKG_INFO).join(OsStr::from_bytes(&list));
+    let (Ok(script), Ok(list)) = (cx.root.stat(rel), cx.root.stat(&list_rel)) else { return };
+    let (Some(changed), Some(installed)) = (script.ctime, list.ctime) else { return };
+    if let Some(after) = changed_after_install(changed, installed) {
+        e.note(
+            "changed_after_install",
+            format!("inode changed {}s after {} was written", after.as_secs(), cx.root.abs(&list_rel).display()),
+        );
+    }
+}
+
+fn changed_after_install(script: std::time::SystemTime, list: std::time::SystemTime) -> Option<std::time::Duration> {
+    script.duration_since(list).ok().filter(|after| *after > INSTALL_WINDOW)
+}
+
 fn dpkg_scripts(cx: &mut Ctx) -> Vec<Entry> {
     let listing = cx.dir(DPKG_INFO);
     let with_triggers: BTreeSet<Vec<u8>> = listing
@@ -327,6 +360,7 @@ fn dpkg_scripts(cx: &mut Ctx) -> Vec<Entry> {
         // against anything. That is a property of the ecosystem rather than a
         // gap in this run, and the renderer needs to know the difference.
         e.note("digest_unavailable", "dpkg keeps no digest for maintainer scripts");
+        note_changed_after_install(cx, &mut e, &rel, stem);
         match lossy(stem).split_once(':') {
             Some((pkg, arch)) => {
                 e.note("package", pkg.to_string());
@@ -1333,6 +1367,7 @@ mod tests {
         assert_eq!(postinst.command, None, "dpkg execs the file; there is no command string");
         assert_eq!(postinst.target_path, Some(dir.join("var/lib/dpkg/info/bash.postinst")));
         assert_eq!(postinst.raw.get("package").map(String::as_str), Some("bash"));
+        assert!(!postinst.raw.contains_key("changed_after_install"), "written with its list, as dpkg does");
 
         let multiarch = one(&s, |e| e.name == "fontconfig:amd64:postinst");
         assert_eq!(multiarch.raw.get("package").map(String::as_str), Some("fontconfig"));
@@ -1343,6 +1378,20 @@ mod tests {
             "a file trigger is why a postinst runs when nobody installed anything"
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_maintainer_script_changed_long_after_its_package_list_is_noted() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let list = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        // dpkg writes the list and then the scripts, moments apart.
+        assert_eq!(changed_after_install(list + Duration::from_secs(3), list), None);
+        // A layer extracted in bulk, or a restore, spreads them a little.
+        assert_eq!(changed_after_install(list + INSTALL_WINDOW, list), None);
+        // Removal rewrites the list and leaves the postrm older than it.
+        assert_eq!(changed_after_install(list - Duration::from_secs(86_400), list), None);
+        // Edited or planted a day later: dpkg did not write that.
+        assert_eq!(changed_after_install(list + Duration::from_secs(86_400), list), Some(Duration::from_secs(86_400)));
     }
 
     #[test]

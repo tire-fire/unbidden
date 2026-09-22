@@ -27,6 +27,10 @@ pub struct Meta {
     pub mode: u32,
     pub size: u64,
     pub mtime: Option<SystemTime>,
+    /// When the inode last changed. Unlike mtime, nothing short of setting
+    /// the system clock moves it to a chosen value, so it can order two
+    /// writes an attacker would rather were not ordered.
+    pub ctime: Option<SystemTime>,
     pub is_dir: bool,
     pub is_symlink: bool,
     pub is_file: bool,
@@ -386,18 +390,23 @@ impl Root {
 
 fn meta_of(st: &rustix::fs::Stat) -> Meta {
     let mode = st.st_mode as u32;
-    let secs = st.st_mtime as i64;
-    let mtime = Some(if secs >= 0 {
-        UNIX_EPOCH + Duration::from_secs(secs as u64)
-    } else {
-        UNIX_EPOCH - Duration::from_secs(secs.unsigned_abs())
-    });
+    let at = |secs: i64, nanos: i64| {
+        let whole = if secs >= 0 {
+            UNIX_EPOCH + Duration::from_secs(secs as u64)
+        } else {
+            UNIX_EPOCH - Duration::from_secs(secs.unsigned_abs())
+        };
+        Some(whole + Duration::from_nanos(nanos.clamp(0, 999_999_999) as u64))
+    };
+    let mtime = at(st.st_mtime as i64, 0);
+    let ctime = at(st.st_ctime as i64, st.st_ctime_nsec as i64);
     Meta {
         uid: st.st_uid as u32,
         gid: st.st_gid as u32,
         mode,
         size: st.st_size as u64,
         mtime,
+        ctime,
         is_dir: mode & rustix::fs::FileType::Directory.as_raw_mode() as u32 != 0
             && mode & 0o170000 == rustix::fs::FileType::Directory.as_raw_mode() as u32,
         is_symlink: mode & 0o170000 == rustix::fs::FileType::Symlink.as_raw_mode() as u32,
