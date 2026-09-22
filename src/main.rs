@@ -14,7 +14,7 @@ use unbidden::{collect, diff, enrich, explain, render, scan};
 #[command(
     name = "unbidden",
     version,
-    about = "Enumerate what runs on a Linux host without anyone asking",
+    about = "Enumerate what runs automatically on a Linux host",
     long_about = "Reports every mechanism by which code executes without a human invoking it: \
                   boot, login, authentication, elapsed time, device attachment, package \
                   operations and shell startup.\n\n\
