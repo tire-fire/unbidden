@@ -166,9 +166,14 @@ UNBIDDEN_DESKTOP=cinnamon docker run ... sh ci/distro-check.sh /w/unbidden
 ```
 
 Boots a real Cinnamon or GNOME session under Xvfb, so the extension collector
-reads a dconf database a session actually wrote rather than a synthetic one.
-This is the mechanism the spec says no other Linux tool enumerates, and it is
-the only way to exercise it end to end.
+reads a dconf database a session actually wrote rather than a synthetic one,
+then has dconf compile a system database with a lock in it. That second half
+is the layered stack: a profile names the databases, a system one answers for
+every account, and a lock stops the account's own database answering at all —
+which is how an administrator makes a setting mandatory and how an attacker
+with root pins an extension on for everybody. This is the mechanism the spec
+says no other Linux tool enumerates, and it is the only way to exercise it end
+to end.
 
 ```sh
 ci/vm-harness.sh                          # Debian 12, the whole matrix
