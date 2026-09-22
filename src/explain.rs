@@ -13,6 +13,7 @@ use std::io::{self, Write};
 
 use crate::entry::{Entry, Provenance};
 use crate::provenance;
+use crate::render::visible;
 use crate::root::Root;
 use crate::scan::Scan;
 
@@ -32,40 +33,48 @@ pub fn find<'a>(scan: &'a Scan, prefix: &str) -> Result<&'a Entry, String> {
         0 => Err(format!("no entry with id starting {prefix}")),
         n => Err(format!(
             "{n} entries start with {prefix}: {}",
-            matches.iter().take(6).map(|e| format!("{} ({})", e.short_id(), e.name)).collect::<Vec<_>>().join(", ")
+            matches
+                .iter()
+                .take(6)
+                .map(|e| format!("{} ({})", e.short_id(), visible(&e.name, false)))
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
     }
 }
 
 pub fn write(w: &mut impl Write, root: &Root, entry: &Entry, show_source: bool) -> io::Result<()> {
+    // Everything below except the fixed labels came off the scanned disk.
+    let t = |s: &str| visible(s, false).into_owned();
+    let p = |p: &std::path::Path| t(&p.to_string_lossy());
     writeln!(w, "id          {}", entry.id)?;
     writeln!(w, "kind        {}", entry.kind)?;
-    writeln!(w, "name        {}", entry.name)?;
-    writeln!(w, "source      {}", entry.source.display())?;
+    writeln!(w, "name        {}", t(&entry.name))?;
+    writeln!(w, "source      {}", p(&entry.source))?;
     writeln!(w, "trigger     {}", entry.trigger)?;
     writeln!(w, "enabled     {}", entry.enabled)?;
-    if let Some(p) = &entry.principal {
-        writeln!(w, "runs as     {p}")?;
+    if let Some(who) = &entry.principal {
+        writeln!(w, "runs as     {}", t(who))?;
     }
     writeln!(w, "owner uid   {}", entry.owner_uid)?;
     writeln!(w, "mode        {:04o}", entry.mode)?;
-    if let Some(t) = entry.mtime {
-        writeln!(w, "mtime       {} (unix)", unix(t))?;
+    if let Some(m) = entry.mtime {
+        writeln!(w, "mtime       {} (unix)", unix(m))?;
     }
     match &entry.command {
         Some(c) => match std::str::from_utf8(c) {
-            Ok(s) => writeln!(w, "command     {s}")?,
+            Ok(s) => writeln!(w, "command     {}", t(s))?,
             Err(_) => writeln!(w, "command     <{} bytes, not valid UTF-8> {}", c.len(), crate::entry::hex(c))?,
         },
         None => writeln!(w, "command     (none — the entry is the script)")?,
     }
-    if let Some(t) = &entry.target_path {
-        writeln!(w, "target      {}", t.display())?;
+    if let Some(target) = &entry.target_path {
+        writeln!(w, "target      {}", p(target))?;
     }
     if let Some(h) = &entry.target_sha256 {
-        writeln!(w, "sha256      {h}")?;
+        writeln!(w, "sha256      {}", t(h))?;
     }
-    writeln!(w, "provenance  {}", describe(&entry.provenance))?;
+    writeln!(w, "provenance  {}", t(&describe(&entry.provenance)))?;
     if entry.flags.is_empty() {
         writeln!(w, "flags       (none)")?;
     } else {
@@ -75,7 +84,7 @@ pub fn write(w: &mut impl Write, root: &Root, entry: &Entry, show_source: bool) 
         writeln!(w)?;
         writeln!(w, "collector notes")?;
         for (k, v) in &entry.raw {
-            writeln!(w, "  {k} = {v}")?;
+            writeln!(w, "  {} = {}", t(k), t(v))?;
         }
     }
 
@@ -96,16 +105,22 @@ fn verify_unchanged(w: &mut impl Write, root: &Root, entry: &Entry) -> io::Resul
     match provenance::digests(root, &rel) {
         Some(now) if &now.sha256 != recorded => {
             writeln!(w)?;
-            writeln!(w, "!! {} changed since the scan: recorded {recorded}, now {}", hashed.display(), now.sha256)?;
+            writeln!(
+                w,
+                "!! {} changed since the scan: recorded {}, now {}",
+                visible(&hashed.to_string_lossy(), false),
+                visible(recorded, false),
+                now.sha256
+            )?;
             writeln!(w, "   On a host under investigation that is itself a finding.")?;
         }
         None if root.exists(&rel) => {
             writeln!(w)?;
-            writeln!(w, "!! {} can no longer be hashed", hashed.display())?;
+            writeln!(w, "!! {} can no longer be hashed", visible(&hashed.to_string_lossy(), false))?;
         }
         None => {
             writeln!(w)?;
-            writeln!(w, "!! {} has gone since the scan", hashed.display())?;
+            writeln!(w, "!! {} has gone since the scan", visible(&hashed.to_string_lossy(), false))?;
         }
         _ => {}
     }
@@ -117,7 +132,12 @@ fn write_source(w: &mut impl Write, root: &Root, entry: &Entry) -> io::Result<()
     // Dumping twenty lines of mangled sqlite helps nobody, and the record
     // itself is already above in `command`.
     if let Some(from) = entry.raw.get("read_from") {
-        writeln!(w, "source is the {from} database at {}, not a text file", entry.source.display())?;
+        writeln!(
+            w,
+            "source is the {} database at {}, not a text file",
+            visible(from, false),
+            visible(&entry.source.to_string_lossy(), false)
+        )?;
         writeln!(w, "the record itself is the command shown above")?;
         return Ok(());
     }
@@ -132,9 +152,9 @@ fn write_source(w: &mut impl Write, root: &Root, entry: &Entry) -> io::Result<()
     let lines: Vec<&str> = text.lines().collect();
 
     if bytes.len() <= WHOLE_FILE_LIMIT && !truncated {
-        writeln!(w, "source text of {} ({} bytes)", entry.source.display(), bytes.len())?;
+        writeln!(w, "source text of {} ({} bytes)", visible(&entry.source.to_string_lossy(), false), bytes.len())?;
         for (n, line) in lines.iter().enumerate() {
-            writeln!(w, "{:>5}  {line}", n + 1)?;
+            writeln!(w, "{:>5}  {}", n + 1, visible(line, true))?;
         }
         return Ok(());
     }
@@ -152,14 +172,14 @@ fn write_source(w: &mut impl Write, root: &Root, entry: &Entry) -> io::Result<()
     writeln!(
         w,
         "source text of {} (lines {}-{} of {}{})",
-        entry.source.display(),
+        visible(&entry.source.to_string_lossy(), false),
         first + 1,
         last,
         lines.len(),
         if truncated { "+, file exceeds the read cap" } else { "" }
     )?;
     for (n, line) in lines[first..last].iter().enumerate() {
-        writeln!(w, "{:>5}  {line}", first + n + 1)?;
+        writeln!(w, "{:>5}  {}", first + n + 1, visible(line, true))?;
     }
     Ok(())
 }
@@ -252,6 +272,28 @@ mod tests {
         assert!(text.contains("changed since the scan"), "{text}");
         assert!(!text.contains("/tmp/evil"), "--no-source withholds the text");
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn explain_shows_control_bytes_in_the_source_as_escapes() {
+        let dir = std::env::temp_dir().join(format!("unbidden-explain-esc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc/rc.local"), b"#!/bin/sh\n\tindent\n/tmp/x \x1b[2K\x1b[1Aclean\n").unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let mut e = Entry::new(Kind::RcLocal, root.abs("etc/rc.local"), "rc.\u{1b}[31mlocal");
+        e.command = Some(b"/tmp/x \x1b[2K".to_vec());
+        e.note("line", "\u{1b}[1A");
+
+        let mut out = Vec::new();
+        write(&mut out, &root, &e, true).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(text.contains("/tmp/x \\x1b[2K\\x1b[1Aclean"));
+        assert!(text.contains("name        rc.\\x1b[31mlocal"));
+        assert!(text.contains("\tindent"), "a tab in a source line is layout, not an attack");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

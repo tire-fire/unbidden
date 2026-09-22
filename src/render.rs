@@ -76,6 +76,53 @@ fn from_package_database(e: &Entry) -> bool {
     metadata && matches!(e.provenance, crate::entry::Provenance::Packaged { .. })
 }
 
+/// Text from a hostile disk, made safe to print to a terminal.
+///
+/// A file name, a unit's ExecStart= or a line of a crontab can carry ESC and
+/// the rest of the C0 and C1 controls. Printed raw they are instructions to
+/// the operator's terminal, not text: `ESC[2K ESC[1A` erases the row above,
+/// so a crafted command can overwrite the table line that reports it. Bidi
+/// overrides and zero-width characters do the same job more quietly, making
+/// one string read as another.
+///
+/// Every such character is shown as an escape rather than dropped, because
+/// its presence is evidence. Tabs are kept only where the caller says a
+/// multi-column layout is not at stake.
+pub fn visible(s: &str, keep_tabs: bool) -> std::borrow::Cow<'_, str> {
+    if !s.chars().any(|c| unsafe_char(c, keep_tabs)) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len() + 16);
+    for c in s.chars() {
+        if !unsafe_char(c, keep_tabs) {
+            out.push(c);
+            continue;
+        }
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x100 => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push_str(&format!("\\u{{{:04x}}}", c as u32)),
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+fn unsafe_char(c: char, keep_tabs: bool) -> bool {
+    if c == '\t' {
+        return !keep_tabs;
+    }
+    c.is_control()
+        || matches!(c,
+            '\u{061c}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{feff}')
+}
+
 /// Newline-delimited: the header on the first line, then one entry per line,
 /// so the stream survives truncation and can be tailed.
 pub fn ndjson(w: &mut impl Write, scan: &Scan, filters: &Filters) -> io::Result<()> {
@@ -118,7 +165,7 @@ pub fn table(w: &mut impl Write, scan: &Scan, filters: &Filters, opts: &TableOpt
     }
 
     let kind_w = width_of(shown.iter().map(|e| e.kind.as_str().len()), 12, 20);
-    let name_w = width_of(shown.iter().map(|e| e.name.chars().count()), 12, 34);
+    let name_w = width_of(shown.iter().map(|e| visible(&e.name, false).chars().count()), 12, 34);
     let flag_w = width_of(shown.iter().map(|e| flags_text(e).chars().count()), 5, 28);
     let fixed = 12 + 2 + kind_w + 2 + 8 + 2 + name_w + 2 + flag_w + 2;
     let cmd_w = opts.width.saturating_sub(fixed).max(12);
@@ -131,7 +178,7 @@ pub fn table(w: &mut impl Write, scan: &Scan, filters: &Filters, opts: &TableOpt
 
     for e in &shown {
         let command = match &e.command {
-            Some(c) => String::from_utf8_lossy(c).replace(['\n', '\t', '\r'], " "),
+            Some(c) => String::from_utf8_lossy(c).into_owned(),
             None => e
                 .target_path
                 .as_ref()
@@ -144,9 +191,9 @@ pub fn table(w: &mut impl Write, scan: &Scan, filters: &Filters, opts: &TableOpt
             e.short_id(),
             clip(e.kind.as_str(), kind_w),
             clip(e.enabled.as_str(), 8),
-            clip(&e.name, name_w),
+            clip(&visible(&e.name, false), name_w),
             clip(&flags_text(e), flag_w),
-            clip(&command, cmd_w),
+            clip(&visible(&command, false), cmd_w),
         )?;
     }
 
@@ -180,7 +227,8 @@ fn banners(w: &mut impl Write, scan: &Scan) -> io::Result<()> {
         }
     }
     for (name, error) in &failed {
-        writeln!(w, "! Collector {name} failed: {error}")?;
+        // A panic message can quote the input that caused it.
+        writeln!(w, "! Collector {name} failed: {}", visible(error, false))?;
     }
     if !partial.is_empty() {
         let list: Vec<String> = partial.iter().map(|(n, c)| format!("{n} ({c} paths)")).collect();
@@ -363,6 +411,30 @@ mod tests {
     }
 
     #[test]
+    fn terminal_controls_from_the_scanned_disk_are_shown_not_obeyed() {
+        // ESC[2K ESC[1A erases the line above: printed raw, a crafted
+        // command rewrites the table row that reports it.
+        let mut e = entry("x\u{1b}]0;title\u{7}.service", Provenance::Unpackaged, &[Flag::Unpackaged]);
+        e.command = Some(b"/usr/bin/true \x1b[2K\x1b[1Afake\r\n\x9b31m \xe2\x80\xae evil".to_vec());
+        let scan = scan_of(vec![e]);
+
+        for all in [false, true] {
+            let mut out = Vec::new();
+            table(&mut out, &scan, &Filters::default(), &TableOpts { all, width: 400 }).unwrap();
+            let text = String::from_utf8(out).unwrap();
+            assert!(!text.contains('\u{1b}') && !text.contains('\u{7}') && !text.contains('\u{9b}'), "{text:?}");
+            assert!(!text.contains('\u{202e}'), "a bidi override reorders what the operator reads");
+            assert!(text.contains("\\x1b[2K\\x1b[1Afake\\r\\n"), "{text}");
+            assert!(text.contains("\\u{202e}"));
+            assert!(text.contains("x\\x1b]0;title\\x07.service"));
+        }
+
+        assert_eq!(visible("plain text", false), "plain text");
+        assert_eq!(visible("a\tb", true), "a\tb");
+        assert_eq!(visible("a\tb", false), "a\\tb");
+    }
+
+    #[test]
     fn an_unreadable_collector_is_announced_before_the_table() {
         let mut scan = scan_of(vec![entry("a.service", Provenance::Unpackaged, &[Flag::Unpackaged])]);
         scan.header.privileged = false;
@@ -402,7 +474,7 @@ pub fn diff_table(
     }
 
     let kind_w = width_of(shown.iter().map(|d| d.entry.kind.as_str().len()), 12, 20);
-    let name_w = width_of(shown.iter().map(|d| d.entry.name.chars().count()), 12, 34);
+    let name_w = width_of(shown.iter().map(|d| visible(&d.entry.name, false).chars().count()), 12, 34);
     let fixed = 9 + 2 + 12 + 2 + kind_w + 2 + name_w + 2;
     let detail_w = opts.width.saturating_sub(fixed).max(16);
 
@@ -411,7 +483,7 @@ pub fn diff_table(
         let detail = match &d.delta {
             crate::diff::Delta::Changed { fields } => fields.join(", "),
             _ => match &d.entry.command {
-                Some(c) => String::from_utf8_lossy(c).replace(['\n', '\t', '\r'], " "),
+                Some(c) => String::from_utf8_lossy(c).into_owned(),
                 None => d.entry.source.to_string_lossy().into_owned(),
             },
         };
@@ -421,8 +493,8 @@ pub fn diff_table(
             d.delta.label(),
             d.entry.short_id(),
             clip(d.entry.kind.as_str(), kind_w),
-            clip(&d.entry.name, name_w),
-            clip(&detail, detail_w),
+            clip(&visible(&d.entry.name, false), name_w),
+            clip(&visible(&detail, false), detail_w),
         )?;
     }
 
