@@ -172,7 +172,7 @@ the only way to exercise it end to end.
 
 ```sh
 ci/vm-harness.sh                          # Debian 12, the whole matrix
-ci/vm-harness.sh --image fedora-41
+ci/vm-harness.sh --image fedora-44
 ci/vm-harness.sh --modules "cron udev systemd"
 ci/vm-harness.sh --shell                  # boot and provision, then hand over
 ```
