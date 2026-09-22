@@ -359,7 +359,7 @@ impl Walk {
         let mut e = cx.entry(kind_for(suffix), &f.rel, f.unit.clone());
         name_from_os(&mut e, &f.file_name);
         e.trigger = trigger_for(suffix);
-        e.note("scope", f.scope.label());
+        note_scope(cx, &mut e, &f.scope);
         e.note("search_path_rank", f.rank.to_string());
         if let Some(s) = suffix {
             e.note("unit_type", s.trim_start_matches('.'));
@@ -431,7 +431,7 @@ fn dropin_entry(cx: &mut Ctx, f: &Found) -> Entry {
     // runs. Its ExecStartPre= runs all the same, which is the point.
     e.enabled = Enablement::NotApplicable;
     e.note("dropin_for", f.unit.clone());
-    e.note("scope", f.scope.label());
+    note_scope(cx, &mut e, &f.scope);
     e.note("search_path_rank", f.rank.to_string());
     note_template(&mut e, &f.unit, suffix);
 
@@ -440,11 +440,24 @@ fn dropin_entry(cx: &mut Ctx, f: &Found) -> Entry {
     e
 }
 
+/// The scope, and for a unit in someone's home the uid whose user manager is
+/// entitled to speak for it. D-Bus enrichment believes that manager and no
+/// other about the unit, so the uid comes from the account database here
+/// rather than from anything the unit file or its owner could set.
+fn note_scope(cx: &Ctx, e: &mut Entry, scope: &Scope) {
+    e.note("scope", scope.label());
+    if let Scope::Home(who) = scope {
+        if let Some(uid) = cx.users.iter().find(|u| &u.name == who).and_then(|u| u.uid) {
+            e.note("scope_uid", uid.to_string());
+        }
+    }
+}
+
 fn linked_entry(cx: &mut Ctx, l: &Link) -> Entry {
     let suffix = unit_suffix(&l.name);
     let mut e = cx.entry(kind_for(suffix), &l.rel, l.name.clone());
     e.trigger = trigger_for(suffix);
-    e.note("scope", l.scope.label());
+    note_scope(cx, &mut e, &l.scope);
     e.note("search_path_rank", l.rank.to_string());
     e.note("enabled_by", cx.root.abs(&l.rel).to_string_lossy().into_owned());
     e.note("from_wants_link", "true");
@@ -1051,6 +1064,9 @@ mod tests {
 
         let alice = at("home/alice/.config/systemd/user/pipewire.service");
         assert!(alice.raw["shadows"].ends_with("etc/systemd/user/pipewire.service"), "{:?}", alice.raw);
+        // The only manager D-Bus enrichment may believe about this file.
+        assert_eq!(alice.raw["scope_uid"], "1000");
+        assert!(!at("etc/systemd/user/pipewire.service").raw.contains_key("scope_uid"));
         // ~/.local/share ranks below /etc/systemd/user: bob's copy is itself
         // overridden, and overrides only the vendor one.
         let bob = at("home/bob/.local/share/systemd/user/pipewire.service");
