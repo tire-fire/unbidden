@@ -75,12 +75,6 @@ impl Root {
         let path = path.as_ref();
         let fd = rustix::fs::open(path, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?;
         let confined = probe_openat2(&fd);
-        if !confined && !live {
-            return Err(io::Error::other(
-                "offline scan roots need openat2 with RESOLVE_IN_ROOT (Linux 5.6+); \
-                 without it a symlink in the image can escape to the host filesystem",
-            ));
-        }
         Ok(Root {
             fd,
             base: path.to_path_buf(),
@@ -116,9 +110,89 @@ impl Root {
         if self.confined {
             let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS;
             Ok(rustix::fs::openat2(&self.fd, rel, flags, Mode::empty(), resolve)?)
-        } else {
+        } else if self.live {
+            // The root is `/`, where an absolute link and a `..` past the top
+            // land exactly where RESOLVE_IN_ROOT would put them.
             Ok(rustix::fs::openat(&self.fd, rel, flags, Mode::empty())?)
+        } else {
+            // A mounted image on a kernel without openat2 (RHEL 7, anything
+            // before 5.6): resolve every link by hand inside the root, then
+            // open the result one component at a time refusing links, so a
+            // link swapped in after the resolution fails rather than escapes.
+            let resolved = self.resolve(rel)?;
+            self.open_resolved(&resolved, flags)
         }
+    }
+
+    /// Where `rel` leads once every symlink along it has been followed, in
+    /// root coordinates, resolved the way `RESOLVE_IN_ROOT` resolves: an
+    /// absolute target restarts at the scan root and `..` stops there.
+    ///
+    /// Every prefix that is consulted has already been proven free of links,
+    /// so no lookup here can be redirected out of the root. The answer is a
+    /// description of the tree at one moment; anything that acts on it opens
+    /// it with `open_resolved`, which refuses links outright.
+    pub fn resolve(&self, rel: &Path) -> io::Result<PathBuf> {
+        let mut done: Vec<OsString> = Vec::new();
+        let mut todo: std::collections::VecDeque<OsString> = normal_components(rel).collect();
+        let mut hops = 0;
+        while let Some(c) = todo.pop_front() {
+            if c == ".." {
+                done.pop();
+                continue;
+            }
+            done.push(c);
+            let here: PathBuf = done.iter().collect();
+            let st = rustix::fs::statat(&self.fd, &here, AtFlags::SYMLINK_NOFOLLOW)?;
+            if !meta_of(&st).is_symlink {
+                continue;
+            }
+            // The kernel's own ceiling on links followed in one lookup.
+            hops += 1;
+            if hops > 40 {
+                return Err(io::Error::from_raw_os_error(rustix::io::Errno::LOOP.raw_os_error()));
+            }
+            let target = rustix::fs::readlinkat(&self.fd, &here, Vec::new())?;
+            let target = Path::new(OsStr::from_bytes(target.as_bytes()));
+            done.pop();
+            if target.is_absolute() {
+                done.clear();
+            }
+            for c in normal_components(target).collect::<Vec<_>>().into_iter().rev() {
+                todo.push_front(c);
+            }
+        }
+        Ok(done.iter().collect())
+    }
+
+    /// Opens a path `resolve` produced, following no link at all. Anything
+    /// that became a link since the resolution is refused with ELOOP.
+    fn open_resolved(&self, resolved: &Path, flags: OFlags) -> io::Result<OwnedFd> {
+        let flags = flags | OFlags::CLOEXEC;
+        if self.confined {
+            let resolve = ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS;
+            let rel = if resolved.as_os_str().is_empty() { Path::new(".") } else { resolved };
+            return Ok(rustix::fs::openat2(&self.fd, rel, flags, Mode::empty(), resolve)?);
+        }
+        let parts: Vec<&OsStr> = resolved.iter().collect();
+        let Some((last, dirs)) = parts.split_last() else {
+            return Ok(rustix::fs::openat(&self.fd, ".", flags, Mode::empty())?);
+        };
+        let mut dir = rustix::fs::openat(&self.fd, ".", OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?;
+        for part in dirs {
+            let next = OFlags::PATH | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            dir = rustix::fs::openat(&dir, *part, next, Mode::empty())?;
+        }
+        let fd = rustix::fs::openat(&dir, *last, flags | OFlags::NOFOLLOW, Mode::empty())?;
+        // O_PATH with O_NOFOLLOW hands back the link itself rather than
+        // failing, so a descriptor of that kind is checked by hand.
+        if flags.contains(OFlags::PATH) {
+            let st = rustix::fs::fstat(&fd)?;
+            if meta_of(&st).is_symlink {
+                return Err(io::Error::from_raw_os_error(rustix::io::Errno::LOOP.raw_os_error()));
+            }
+        }
+        Ok(fd)
     }
 
     /// Declares the home directories found on this root. Set once, before
@@ -131,7 +205,8 @@ impl Root {
         self.homes.get().map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// A symlink sitting in someone's home whose target leaves that home.
+    /// A path in someone's home that, once its links are followed, leads out
+    /// of that home. Returns where it leads.
     ///
     /// Links within one home are ordinary — every dotfile manager makes them,
     /// and following them is how the real file gets scanned. A link that
@@ -140,17 +215,21 @@ impl Root {
     /// can, and whatever it reads is printed in a report. `~/.bashrc ->
     /// /etc/shadow` would put password hashes in the JSON.
     ///
+    /// The whole chain is followed, not the first hop: `../../etc/shadow`,
+    /// a link to a second link, and a linked directory partway down the path
+    /// all leave the home just as surely as an absolute target does.
+    ///
     /// The check lives here rather than in a collector because a collector
     /// that reaches past its own helper would otherwise silently opt out.
     pub fn escaping_link(&self, rel: &Path) -> Option<PathBuf> {
+        let (_, resolved) = self.home_confinement(rel)?;
+        resolved.err()
+    }
+
+    /// For a path under a home: the home it is under, and either the path it
+    /// resolves to inside that home or, as the error, where it leads instead.
+    fn home_confinement(&self, rel: &Path) -> Option<(PathBuf, Result<PathBuf, PathBuf>)> {
         let homes = self.homes.get()?;
-        if homes.is_empty() {
-            return None;
-        }
-        let link = self.stat(rel).ok()?;
-        if !link.is_symlink {
-            return None;
-        }
         // Homes are recorded as they sit inside the root; every path here is
         // compared in the same coordinates so an offline root lines up.
         let here = self.rel(&self.abs(rel));
@@ -159,29 +238,33 @@ impl Root {
             .map(|h| self.rel(h))
             .filter(|h| here.starts_with(h))
             .max_by_key(|h| h.as_os_str().len())?;
-
-        let target = self.read_link(rel).ok()?;
-        let resolved = if target.is_absolute() {
-            self.rel(&target)
+        // The home itself may be a link (/home/carol -> /srv/carol); what the
+        // path must stay inside is where the home really is.
+        let real_home = self.resolve(&home).ok()?;
+        let resolved = self.resolve(&here).ok()?;
+        if resolved.starts_with(&real_home) {
+            Some((home, Ok(resolved)))
         } else {
-            self.rel(&self.abs(rel).parent()?.join(&target))
-        };
-        (!resolved.starts_with(&home)).then_some(target)
+            Some((home, Err(Path::new("/").join(resolved))))
+        }
     }
 
     pub fn open(&self, rel: impl AsRef<Path>) -> io::Result<File> {
         let rel = rel.as_ref();
-        if let Some(target) = self.escaping_link(rel) {
-            return Err(io::Error::new(
+        match self.home_confinement(rel) {
+            Some((_, Err(target))) => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
-                    "{} is a symlink out of its owner's home to {};                      recorded as a link, not followed",
+                    "{} leads out of its owner's home to {}; recorded as a link, not followed",
                     rel.display(),
                     target.display()
                 ),
-            ));
+            )),
+            // Opened as resolved, refusing every link, so a link swapped in
+            // between the check and the open fails instead of escaping.
+            Some((_, Ok(resolved))) => Ok(File::from(self.open_resolved(&resolved, OFlags::RDONLY)?)),
+            None => Ok(File::from(self.open_raw(rel, OFlags::RDONLY)?)),
         }
-        Ok(File::from(self.open_raw(rel, OFlags::RDONLY)?))
     }
 
     /// Reads at most `cap` bytes. The returned flag says the file was longer,
@@ -213,7 +296,9 @@ impl Root {
         // PARENT under confinement and stating the final name there: the
         // final component must not be followed, but everything leading to it
         // still has to stay inside the root.
-        let st = match (self.confined, at.contains(AtFlags::SYMLINK_NOFOLLOW)) {
+        // Only a live root without openat2 may hand the kernel a path whole:
+        // its root is `/`, so there is nowhere for a link to escape to.
+        let st = match (self.confined || !self.live, at.contains(AtFlags::SYMLINK_NOFOLLOW)) {
             (true, false) => {
                 let fd = self.open_raw(rel, OFlags::PATH)?;
                 rustix::fs::statat(&fd, "", AtFlags::EMPTY_PATH)?
@@ -236,7 +321,15 @@ impl Root {
 
     pub fn read_link(&self, rel: impl AsRef<Path>) -> io::Result<PathBuf> {
         let rel = strip_leading_slash(rel.as_ref());
-        let target = rustix::fs::readlinkat(&self.fd, rel, Vec::new())?;
+        // The final component is the link being read and is not followed, but
+        // the directories leading to it are, and they must stay in the root.
+        let target = match (rel.parent(), rel.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+                let dir = self.open_raw(parent, OFlags::PATH | OFlags::DIRECTORY)?;
+                rustix::fs::readlinkat(&dir, name, Vec::new())?
+            }
+            _ => rustix::fs::readlinkat(&self.fd, rel, Vec::new())?,
+        };
         Ok(PathBuf::from(OsStr::from_bytes(target.as_bytes()).to_os_string()))
     }
 
@@ -318,6 +411,15 @@ pub fn read_capped_from(mut file: File, cap: usize) -> io::Result<(Vec<u8>, bool
     let truncated = read > cap;
     buf.truncate(cap);
     Ok((buf, truncated))
+}
+
+/// The named components of a path, `..` kept and `.` and `/` dropped.
+fn normal_components(p: &Path) -> impl Iterator<Item = OsString> + '_ {
+    p.components().filter_map(|c| match c {
+        Component::Normal(n) => Some(n.to_os_string()),
+        Component::ParentDir => Some(OsString::from("..")),
+        _ => None,
+    })
 }
 
 fn strip_leading_slash(p: &Path) -> &Path {
@@ -468,6 +570,102 @@ mod tests {
 
         // And a link outside any home is not this rule's business.
         assert!(root.escaping_link(Path::new("etc/shadow")).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_home_escape_is_caught_however_the_link_is_spelled() {
+        // The first version compared the link's text against the home, so a
+        // relative `..` target, a second hop, or a linked directory partway
+        // down the path all read straight through.
+        let dir = tmpdir("chains");
+        std::fs::create_dir_all(dir.join("home/alice/dotfiles")).unwrap();
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc/shadow"), b"root:$6$SALT$HASH:19000:0:99999:7:::\n").unwrap();
+        std::fs::write(dir.join("home/alice/dotfiles/zshrc"), b"export EDITOR=vi\n").unwrap();
+        let link = |to: &str, at: &str| std::os::unix::fs::symlink(to, dir.join(at)).unwrap();
+        link("../../etc/shadow", "home/alice/.bashrc");
+        link("hop", "home/alice/.profile");
+        link("/etc/shadow", "home/alice/hop");
+        link("/etc", "home/alice/.config");
+        link("dotfiles/../dotfiles/zshrc", "home/alice/.zshrc");
+
+        let root = Root::at(&dir).unwrap();
+        root.set_homes(vec![PathBuf::from("/home/alice")]);
+        for escape in ["home/alice/.bashrc", "home/alice/.profile", "home/alice/.config/shadow"] {
+            assert_eq!(root.escaping_link(Path::new(escape)), Some(PathBuf::from("/etc/shadow")), "{escape}");
+            assert_eq!(root.read(escape).unwrap_err().kind(), io::ErrorKind::PermissionDenied, "{escape}");
+        }
+        assert!(root.escaping_link(Path::new("home/alice/.zshrc")).is_none());
+        assert_eq!(root.read("home/alice/.zshrc").unwrap(), b"export EDITOR=vi\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_home_that_is_itself_a_link_still_holds_its_own_files() {
+        let dir = tmpdir("linkedhome");
+        std::fs::create_dir_all(dir.join("srv/carol")).unwrap();
+        std::fs::create_dir_all(dir.join("home")).unwrap();
+        std::fs::write(dir.join("srv/carol/real"), b"mine\n").unwrap();
+        std::os::unix::fs::symlink("../srv/carol", dir.join("home/carol")).unwrap();
+        std::os::unix::fs::symlink("real", dir.join("srv/carol/.bashrc")).unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        root.set_homes(vec![PathBuf::from("/home/carol")]);
+        assert!(root.escaping_link(Path::new("home/carol/.bashrc")).is_none());
+        assert_eq!(root.read("home/carol/.bashrc").unwrap(), b"mine\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn without_openat2_an_offline_root_is_confined_by_hand() {
+        // RHEL 7 and every kernel before 5.6 lack RESOLVE_IN_ROOT. The root
+        // resolves links itself there, and every operation must still land
+        // inside the image rather than on the analyst's machine.
+        let dir = tmpdir("manual");
+        std::fs::create_dir_all(dir.join("image/etc/real")).unwrap();
+        std::fs::create_dir_all(dir.join("image/usr/lib")).unwrap();
+        std::fs::write(dir.join("image/etc/real/file"), b"inside").unwrap();
+        std::fs::write(dir.join("image/usr/lib/unit"), b"vendor").unwrap();
+        let link = |to: &str, at: &str| std::os::unix::fs::symlink(to, dir.join("image").join(at)).unwrap();
+        link("/etc", "escape");
+        link("/etc/passwd", "passwd");
+        link("../../../../etc/passwd", "dots");
+        link("/usr/lib", "lib");
+        link("/escape/nested", "etc/real/chain");
+        std::os::unix::fs::symlink("nested", dir.join("image/etc/nested")).unwrap();
+
+        let mut root = Root::at(dir.join("image")).unwrap();
+        root.confined = false;
+
+        assert_eq!(root.read("etc/real/file").unwrap(), b"inside");
+        assert_eq!(root.read("lib/unit").unwrap(), b"vendor", "an absolute link lands in the image");
+        for escape in ["passwd", "dots", "escape/passwd", "escape/real/../../../passwd"] {
+            match root.read(escape) {
+                Err(e) => assert_eq!(e.kind(), io::ErrorKind::NotFound, "{escape}"),
+                Ok(b) => panic!("{escape} escaped the root and read {} bytes", b.len()),
+            }
+        }
+        assert!(root.stat("escape/passwd").is_err());
+        assert!(root.stat_follow("passwd").is_err());
+        assert!(root.read_dir("escape").unwrap().iter().any(|e| e.name == "real"), "listed the image's /etc");
+        assert_eq!(root.dir_identity("lib").unwrap(), root.dir_identity("usr/lib").unwrap());
+        assert_eq!(root.read_link("escape").unwrap(), PathBuf::from("/etc"));
+        // A link loop is refused rather than followed forever.
+        assert!(root.read("etc/nested").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn reading_a_link_does_not_resolve_its_parents_out_of_the_root() {
+        let dir = tmpdir("readlink");
+        std::fs::create_dir_all(dir.join("image")).unwrap();
+        std::fs::create_dir_all(dir.join("outside")).unwrap();
+        std::os::unix::fs::symlink("SECRET-TARGET", dir.join("outside/link")).unwrap();
+        std::os::unix::fs::symlink(dir.join("outside"), dir.join("image/escape")).unwrap();
+
+        let root = Root::at(dir.join("image")).unwrap();
+        assert!(root.read_link("escape/link").is_err(), "read a link that lives outside the image");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

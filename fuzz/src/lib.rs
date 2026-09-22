@@ -60,6 +60,6 @@ fn plant(rel: &str) -> (PathBuf, Root) {
     let target = dir.join(rel);
     std::fs::create_dir_all(target.parent().unwrap_or(Path::new("."))).unwrap();
 
-    let root = Root::at(&dir).expect("offline roots need openat2 (Linux 5.6+)");
+    let root = Root::at(&dir).expect("the fuzz tree is a directory this process just created");
     (dir, root)
 }

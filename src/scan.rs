@@ -70,6 +70,19 @@ impl<'a> Ctx<'a> {
             Err(_) => {}
         }
 
+        // A symlink out of its owner's home is refused by the root (§3), and
+        // the refusal is the policy working, not a path the scan could not
+        // reach. Any user can plant one in their own home, so recording it as
+        // unreadable would let every account on the host declare every later
+        // baseline incomparable.
+        if let Some(target) = self.root.escaping_link(rel) {
+            self.note_limited(format!(
+                "{}: leads out of its owner's home to {}, not followed",
+                rel.display(),
+                target.display()
+            ));
+            return None;
+        }
 
         match self.root.read_capped(rel, cap) {
             Ok((bytes, truncated)) => {
@@ -105,6 +118,16 @@ impl<'a> Ctx<'a> {
 
     pub fn note_unreadable(&mut self, what: impl std::fmt::Display) {
         self.unreadable.push(what.to_string());
+    }
+
+    /// A read the scan limited on purpose, or content it read but declined to
+    /// interpret: a file past its cap, a link it refused to follow, a database
+    /// too malformed to parse. These are properties of what is on disk, the
+    /// same on every run, so unlike `note_unreadable` they do not make the
+    /// collector Partial. Content an unprivileged user controls must never be
+    /// able to declare a baseline incomparable.
+    pub fn note_limited(&mut self, what: impl std::fmt::Display) {
+        self.truncated.push(what.to_string());
     }
 
     /// Builds an Entry with the facts about its backing file already filled
@@ -220,9 +243,10 @@ pub struct CollectorStatus {
     pub status: Status,
     pub entries: usize,
     /// Reads that deliberately returned less than the whole file: one that
-    /// hit its cap, or a path that was not a regular file. Deterministic, so
-    /// it does not make two baselines incomparable, but the operator should
-    /// still see it.
+    /// hit its cap, a path that was not a regular file, a symlink out of a
+    /// home that was not followed, content too malformed to interpret.
+    /// Deterministic, so it does not make two baselines incomparable, but the
+    /// operator should still see it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub truncated: Vec<String>,
 }
