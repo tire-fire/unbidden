@@ -75,6 +75,27 @@ fn build_tree(dir: &Path) {
     w("etc/xdg/autostart/nm-applet.desktop", b"[Desktop Entry]\nType=Application\nName=Network\nExec=/usr/bin/nm-applet --indicator\n");
     w("home/alice/.config/autostart/updater.desktop", b"[Desktop Entry]\nType=Application\nName=Updater\nExec=/home/alice/.local/bin/upd\nX-GNOME-Autostart-enabled=true\n");
 
+    // dconf decides whether a desktop extension runs, and it decides it
+    // through a layered stack: the profile names the databases, a system one
+    // answers for every account, and a lock in it stops the account's own
+    // database from answering at all. A database is binary, so it is written
+    // here the way the real one is written — which also puts a binary parser
+    // into the mutation pass below.
+    w("etc/dconf/profile/user", b"user-db:user\nsystem-db:local\n");
+    w("etc/dconf/db/local", &dconf_db(&[("/org/gnome/shell/enabled-extensions", &["pinned@corp"])], &["/org/gnome/shell/enabled-extensions"]));
+    w("home/alice/.config/dconf/user", &dconf_db(&[("/org/cinnamon/enabled-applets", &["panel1:right:0:notes@alice:3"])], &[]));
+    for (dir, uuid, file) in [
+        ("usr/share/gnome-shell/extensions", "pinned@corp", "extension.js"),
+        ("home/alice/.local/share/cinnamon/applets", "notes@alice", "applet.js"),
+    ] {
+        w(&format!("{dir}/{uuid}/{file}"), b"// session code\n");
+        w(&format!("{dir}/{uuid}/metadata.json"), format!(r#"{{"uuid":"{uuid}","name":"{uuid}"}}"#).as_bytes());
+        // The extension's directory is the entry's source, and a directory
+        // created here takes its mode from the runner's umask, which this
+        // record may not depend on.
+        exec(&format!("{dir}/{uuid}"));
+    }
+
     w("etc/udev/rules.d/99-custom.rules", b"ACTION==\"add\", SUBSYSTEM==\"usb\", RUN+=\"/usr/local/bin/on-usb.sh\"\n");
     w("etc/modules-load.d/extra.conf", b"# load these\nvboxdrv\n");
     w("etc/modprobe.d/evil.conf", b"install nf_tables /bin/sh -c '/tmp/stage.sh; /sbin/modprobe --ignore-install nf_tables'\n");
@@ -123,6 +144,25 @@ fn build_tree(dir: &Path) {
     // not be.
     w("bin/sh", b"ELF-ish\n");
     exec("bin/sh");
+}
+
+/// A dconf database in the on-disk format, written by gvdb itself rather than
+/// assembled by hand: a fixture that only this project can parse would prove
+/// nothing about the format the desktop actually writes.
+fn dconf_db(strings: &[(&str, &[&str])], locks: &[&str]) -> Vec<u8> {
+    use gvdb::write::{FileWriter, HashTableBuilder};
+    let mut t = HashTableBuilder::new();
+    for (key, value) in strings {
+        t.insert(key, value.iter().map(|s| s.to_string()).collect::<Vec<String>>()).unwrap();
+    }
+    if !locks.is_empty() {
+        let mut l = HashTableBuilder::new();
+        for key in locks {
+            l.insert_string(key, "").unwrap();
+        }
+        t.insert_table(".locks", l).unwrap();
+    }
+    FileWriter::new().write_to_vec_with_table(t).unwrap()
 }
 
 fn scan_tree(dir: &Path) -> Scan {

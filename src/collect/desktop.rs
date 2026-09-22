@@ -632,7 +632,7 @@ fn locks_of(file: &Gvdb<'static>) -> Vec<String> {
 
 impl Stack {
     fn strings(&self, path: &str, schemas: Option<&Gvdb<'static>>) -> Option<(Vec<String>, String)> {
-        for db in &self.dbs {
+        for db in &self.dbs[self.floor(path)..] {
             if let Ok(table) = db.file.hash_table() {
                 if let Ok(v) = table.get::<Vec<String>>(path) {
                     return Some((v, db.label.clone()));
@@ -643,7 +643,7 @@ impl Stack {
     }
 
     fn flag(&self, path: &str, schemas: Option<&Gvdb<'static>>) -> Option<(bool, String)> {
-        for db in &self.dbs {
+        for db in &self.dbs[self.floor(path)..] {
             if let Ok(table) = db.file.hash_table() {
                 if let Ok(v) = table.get::<bool>(path) {
                     return Some((v, db.label.clone()));
@@ -653,15 +653,26 @@ impl Stack {
         schema_default(schemas, path, |t, key| t.get::<(bool,)>(key).ok().map(|v| v.0))
     }
 
-    fn lock_on(&self, path: &str) -> Option<String> {
-        for db in &self.dbs {
-            for lock in &db.locks {
-                if lock == path || (lock.ends_with('/') && path.starts_with(lock.as_str())) {
-                    return Some(format!("{} ({})", lock, db.label));
-                }
-            }
-        }
-        None
+    /// dconf(7): a lock installed in a database stops every database listed
+    /// above it in the profile from supplying that key. So a locked key is
+    /// answered by the locking database or one below it, never by the
+    /// account's own — which is how an administrator makes a setting
+    /// mandatory, and equally how an extension is pinned on for every account
+    /// on the host.
+    fn lock_on(&self, path: &str) -> Option<(usize, String)> {
+        self.dbs.iter().enumerate().rev().find_map(|(ix, db)| {
+            db.locks
+                .iter()
+                .find(|lock| {
+                    lock.as_str() == path || (lock.ends_with('/') && path.starts_with(lock.as_str()))
+                })
+                .map(|lock| (ix, format!("{lock} ({})", db.label)))
+        })
+    }
+
+    /// The highest-priority database still entitled to answer for a key.
+    fn floor(&self, path: &str) -> usize {
+        self.lock_on(path).map_or(0, |(ix, _)| ix)
     }
 }
 
@@ -728,7 +739,7 @@ fn verdict(
         if only.is_some_and(|u| u != user) {
             continue;
         }
-        if let Some(lock) = stack.lock_on(key) {
+        if let Some((_, lock)) = stack.lock_on(key) {
             notes.push(("dconf_lock".into(), lock));
         }
         notes.extend(stack.notes.iter().cloned());
@@ -1127,6 +1138,73 @@ mod tests {
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].enabled, Enablement::Enabled);
         assert_eq!(e[0].raw.get("enablement_source").map(String::as_str), Some("system-db:local"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_profile_stack_resolves_in_order_and_a_lock_moves_the_answer_down_it() {
+        let dir = tree("stack");
+        for uuid in ["userpick@x", "localpick@x", "sitepick@x"] {
+            extension(&dir, "home/alice/.local/share/gnome-shell/extensions", uuid, "extension.js");
+        }
+        put(&dir, "etc/dconf/profile/user", b"user-db:user\nsystem-db:local\nsystem-db:site\n");
+
+        const KEY: &str = "/org/gnome/shell/enabled-extensions";
+        // The same three databases every time, each naming a different
+        // extension, so which one answered is visible in the verdict.
+        let write = |local_locks: &[&str], site_locks: &[&str]| {
+            put(&dir, "home/alice/.config/dconf/user", &dconf_db(&[(KEY, &["userpick@x"])], &[], &[]));
+            put(&dir, "etc/dconf/db/local", &dconf_db(&[(KEY, &["localpick@x"])], &[], local_locks));
+            put(&dir, "etc/dconf/db/site", &dconf_db(&[(KEY, &["sitepick@x"])], &[], site_locks));
+        };
+        let answer = |entries: &[Entry], uuid: &str| -> (Enablement, Option<String>) {
+            let e = by_name(entries, Kind::DesktopExtension, uuid);
+            assert_eq!(e.len(), 1, "{uuid} is reported whatever dconf says about it");
+            (e[0].enabled, e[0].raw.get("enablement_source").cloned())
+        };
+
+        // Unlocked: the account's own database is listed first and wins, so
+        // the two system databases naming other extensions change nothing.
+        write(&[], &[]);
+        let (entries, status) = run(&dir);
+        assert_eq!(status, Status::Complete);
+        assert_eq!(answer(&entries, "userpick@x"), (Enablement::Enabled, Some("user-db:user".into())));
+        assert_eq!(answer(&entries, "localpick@x").0, Enablement::Disabled);
+        assert_eq!(answer(&entries, "sitepick@x").0, Enablement::Disabled);
+        let e = by_name(&entries, Kind::DesktopExtension, "userpick@x")[0];
+        assert_eq!(
+            e.raw.get("dconf_profile").map(String::as_str),
+            Some("user-db:user, system-db:local, system-db:site")
+        );
+        assert!(!e.raw.contains_key("dconf_lock"));
+
+        // Locked by the first system database: dconf(7) says no database
+        // listed above it may supply the key, so the account's own list stops
+        // counting and the administrator's extension is on for that account
+        // whatever it does.
+        write(&[KEY], &[]);
+        let (entries, _) = run(&dir);
+        assert_eq!(answer(&entries, "localpick@x"), (Enablement::Enabled, Some("system-db:local".into())));
+        assert_eq!(answer(&entries, "userpick@x").0, Enablement::Disabled, "the user database is locked out");
+        assert_eq!(answer(&entries, "sitepick@x").0, Enablement::Disabled);
+        assert_eq!(
+            by_name(&entries, Kind::DesktopExtension, "localpick@x")[0].raw.get("dconf_lock").map(String::as_str),
+            Some("/org/gnome/shell/enabled-extensions (system-db:local)")
+        );
+
+        // Locked in both: the lower one excludes everything above it,
+        // including the other lock's database.
+        write(&[KEY], &[KEY]);
+        let (entries, _) = run(&dir);
+        assert_eq!(answer(&entries, "sitepick@x"), (Enablement::Enabled, Some("system-db:site".into())));
+        assert_eq!(answer(&entries, "localpick@x").0, Enablement::Disabled);
+        assert_eq!(answer(&entries, "userpick@x").0, Enablement::Disabled);
+
+        // A lock on a subpath covers every key beneath it.
+        write(&["/org/gnome/shell/"], &[]);
+        let (entries, _) = run(&dir);
+        assert_eq!(answer(&entries, "localpick@x"), (Enablement::Enabled, Some("system-db:local".into())));
+        assert_eq!(answer(&entries, "userpick@x").0, Enablement::Disabled);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
