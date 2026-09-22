@@ -113,6 +113,23 @@ Correctness on these is a release requirement.
 | Linux Mint | 21.x, 22.x, LMDE | dpkg | Cinnamon |
 | Fedora | current, current-1 | rpm (sqlite) | GNOME |
 
+Mint 22.x is supported and is the one row with no image of its own in CI,
+because no honest one exists. Mint publishes ISOs and nothing else:
+`linuxmintd/mint22-amd64` is an Ubuntu 24.04 rootfs with Mint's apt repository
+attached and reports `ID=ubuntu`, and the only Mint 22 rootfs that does report
+`ID=linuxmint` — the Incus community image — is Mint 22's `base-files` over a
+22.04 userland, jammy `sources.list` and dpkg 1.21 included, so it would report
+jammy packaging under a Mint 22 name. An image that merely carries the name
+fails the distro check rather than passing quietly.
+
+What Mint 22 is made of is covered in the pieces that do exist: Ubuntu 24.04 for
+the noble base and its dpkg layout, `linuxmintd/mint21-amd64` for `ID=linuxmint`
+and for a booted Cinnamon session, and LMDE 6 for the Debian-based variant.
+Cinnamon's applet, desklet and extension directories and its dconf keys are
+unchanged from 21.3 through 22.3, Mint ships no `/etc/dconf` in any release, and
+the tool reads only `ID` and `VERSION_ID` out of os-release and branches on
+neither. What goes untested is the string `22`.
+
 Everything else — RHEL, CentOS, Arch, openSUSE, Alpine — is best-effort.
 unbidden should run there and probably will, but nothing is tested and no
 defect blocks a release. On a system with no package database it reports
