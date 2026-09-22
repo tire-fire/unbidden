@@ -514,6 +514,36 @@
       "trigger": "login"
     },
     {
+      "command": null,
+      "enabled": "not-applicable",
+      "flags": [
+        "owner-mismatch",
+        "unpackaged"
+      ],
+      "id": "4780f16cd550f30ff33f4d4952aa8ffb789c4e6a88f0fd5a40e591e0ffd61614",
+      "kind": "shell_profile",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": ".bashrc",
+      "owner_uid": "<normalised>",
+      "principal": "bob",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "env.PATH": "$PATH:/opt/bob/bin",
+        "login_shell": "/bin/sh",
+        "user": "bob",
+        "user_discovered_via": "passwd"
+      },
+      "source": "<ROOT>/home/bob/.bashrc",
+      "source_utf8": true,
+      "target_path": "<ROOT>/home/bob/.bashrc",
+      "target_path_utf8": true,
+      "target_sha256": "444f0b579a05bfde278f82d13e6016ade4b33aaa63e91d8b153380dc23f80a53",
+      "trigger": "login"
+    },
+    {
       "command": "/usr/local/sbin/notify",
       "command_utf8": true,
       "enabled": "enabled",
@@ -1094,7 +1124,7 @@
         "status": "complete"
       },
       {
-        "entries": 4,
+        "entries": 5,
         "name": "shell",
         "status": "complete"
       },

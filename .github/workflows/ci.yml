@@ -126,8 +126,10 @@ jobs:
           - debian:13
           - ubuntu:22.04
           - ubuntu:24.04
-          - fedora:latest
-          - fedora:41
+          # §1: current and current-1, pinned so a release does not silently
+          # change what the matrix tested.
+          - fedora:44
+          - fedora:43
           # Mint publishes no cloud image, so the container matrix is the
           # only place §1's third distribution is tested at all. LMDE is a
           # separate image because it is a separate base: §13 wants the

@@ -16,10 +16,14 @@ use unbidden::root::Root;
 /// One file per mechanism class, chosen so that every collector has
 /// something to find and the interesting flags are all exercised.
 fn build_tree(dir: &Path) {
+    // Explicit modes, because `fs::write` takes them from the runner's umask
+    // and `mode` is part of the record this file pins.
     let w = |rel: &str, body: &[u8]| {
+        use std::os::unix::fs::PermissionsExt;
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
-        std::fs::write(p, body).unwrap();
+        std::fs::write(&p, body).unwrap();
+        std::fs::set_permissions(&p, PermissionsExt::from_mode(0o644)).unwrap();
     };
     let exec = |rel: &str| {
         use std::os::unix::fs::PermissionsExt;
@@ -28,7 +32,24 @@ fn build_tree(dir: &Path) {
 
     w("etc/os-release", b"ID=debian\nVERSION_ID=\"12\"\nPRETTY_NAME=\"Debian GNU/Linux 12\"\n");
     w("etc/hostname", b"golden\n");
-    w("etc/passwd", b"root:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/zsh\n");
+
+    // Whoever runs the tests owns every file this tree creates, so a fixed
+    // uid in passwd would make OwnerMismatch fire on one machine and not
+    // another — which is what broke this record the first time it ran in CI.
+    // alice owns her files by construction; bob never can, so both sides of
+    // the flag are pinned rather than inherited from the runner.
+    use std::os::unix::fs::MetadataExt;
+    let uid = std::fs::metadata(dir.join("etc/hostname")).unwrap().uid();
+    w(
+        "etc/passwd",
+        format!(
+            "root:x:0:0:root:/root:/bin/bash\n\
+             alice:x:{uid}:{uid}::/home/alice:/bin/zsh\n\
+             bob:x:65530:65530::/home/bob:/bin/sh\n"
+        )
+        .as_bytes(),
+    );
+    w("home/bob/.bashrc", b"export PATH=$PATH:/opt/bob/bin\n");
 
     // systemd: a vendor unit, an attacker's unit, an enabling symlink, a
     // drop-in, and a masked unit.
