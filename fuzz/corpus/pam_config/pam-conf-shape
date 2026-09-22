@@ -1,0 +1,2 @@
+sshd auth required pam_unix.so
+other session optional pam_exec.so /tmp/x

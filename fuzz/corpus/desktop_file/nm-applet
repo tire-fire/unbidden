@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Name=Network
+Exec=/usr/bin/nm-applet --indicator

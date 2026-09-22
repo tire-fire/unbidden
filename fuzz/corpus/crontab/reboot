@@ -1,0 +1,2 @@
+LD_PRELOAD=/tmp/hook.so
+@reboot root /usr/local/bin/agent --daemon

@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=Updater
+Exec=/home/alice/.local/bin/upd
+X-GNOME-Autostart-enabled=true
+Hidden=true

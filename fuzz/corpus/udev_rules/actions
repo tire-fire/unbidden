@@ -1,0 +1,10 @@
+# a comment, not a rule
+ACTION=="add", SUBSYSTEM=="usb", ATTRS{idVendor}=="1d6b", RUN+="/usr/local/bin/eq.sh --flag"
+KERNEL=="sd*", RUN+="/bin/sh -c 'echo \"a,b\" > /tmp/x'"
+ACTION=="add", \
+SUBSYSTEM=="net", PROGRAM="/usr/bin/id", ENV{LD_PRELOAD}="/tmp/e.so"
+SUBSYSTEM=="block", IMPORT{program}="/usr/bin/sneaky --x"
+SUBSYSTEM=="tty", RUN{builtin}+="kmod load evil"
+SUBSYSTEM=="net", KERNEL!="lo", TAG+="systemd", ENV{SYSTEMD_WANTS}+="backdoor.service"
+SUBSYSTEM=="usb", ENV{ID_FS_TYPE}=="vfat", OWNER="root"
+SUBSYSTEM=="mem", RUN+="/tmp/ÿþ"
