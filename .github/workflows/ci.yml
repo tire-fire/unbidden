@@ -129,7 +129,7 @@ jobs:
             packages: cinnamon-core
             expect: linuxmint
           - desktop: gnome
-            image: debian:12
+            image: public.ecr.aws/docker/library/debian:12
             packages: gnome-core
             expect: debian
     steps:
@@ -141,6 +141,16 @@ jobs:
       - run: chmod +x ./bin/unbidden
       - name: a ${{ matrix.desktop }} session on ${{ matrix.image }}
         run: |
+          # Any registry resets a connection now and then, and the pull is
+          # the only part of this job that talks to one.
+          pull() {
+            for i in 1 2 3; do
+              docker pull "$1" && return 0
+              sleep $((i * 10))
+            done
+            return 1
+          }
+          pull ${{ matrix.image }}
           docker run --rm -v "$PWD:/w" -w /w \
             -e DEBIAN_FRONTEND=noninteractive \
             -e UNBIDDEN_DESKTOP=${{ matrix.desktop }} \
@@ -159,15 +169,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The official images come through AWS's mirror of the Docker
+        # library. An anonymous Docker Hub pull is charged against the
+        # runner's shared address, and this matrix made ten of them a run.
+        # The Mint images are published nowhere else, so they stay.
         image:
-          - debian:12
-          - debian:13
-          - ubuntu:22.04
-          - ubuntu:24.04
+          - public.ecr.aws/docker/library/debian:12
+          - public.ecr.aws/docker/library/debian:13
+          - public.ecr.aws/docker/library/ubuntu:22.04
+          - public.ecr.aws/docker/library/ubuntu:24.04
           # §1: current and current-1, pinned so a release does not silently
           # change what the matrix tested.
-          - fedora:44
-          - fedora:43
+          - public.ecr.aws/docker/library/fedora:44
+          - public.ecr.aws/docker/library/fedora:43
           # Mint publishes no cloud image, so the container matrix is the
           # only place §1's third distribution is tested at all. LMDE is a
           # separate image because it is a separate base: §13 wants the
@@ -190,5 +204,15 @@ jobs:
           case "${{ matrix.image }}" in
             *mint*|*lmde*) export UNBIDDEN_EXPECT_ID=linuxmint ;;
           esac
+          # Any registry resets a connection now and then, and the pull is
+          # the only part of this job that talks to one.
+          pull() {
+            for i in 1 2 3; do
+              docker pull "$1" && return 0
+              sleep $((i * 10))
+            done
+            return 1
+          }
+          pull ${{ matrix.image }}
           docker run --rm -v "$PWD:/w" -w /w -e UNBIDDEN_EXPECT_ID ${{ matrix.image }} \
             sh ci/distro-check.sh /w/bin/unbidden
