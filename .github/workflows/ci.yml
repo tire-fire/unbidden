@@ -219,30 +219,78 @@ jobs:
             sh ci/distro-check.sh /w/bin/unbidden
 
   release:
-    # The README sends people here for a static binary, so the release is cut
-    # from the artifacts the static job already proved static rather than from
-    # a fresh build nobody checked. §1's matrix gates it: a distro failure has
-    # to stop the release, not just colour a badge.
-    if: startsWith(github.ref, 'refs/tags/v')
+    # A push to main that touched the tool is a release. A README or workflow
+    # change is not a new version, so it is skipped rather than tagged. CI
+    # only ever adds one to the patch: a minor or major bump is chosen by
+    # editing the version in Cargo.toml, and CI then uses what it finds. A
+    # hand-pushed vX.Y.Z tag releases exactly that version.
+    if: github.event_name == 'push'
     needs: [test, fuzz, static, desktop, distros]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          pattern: unbidden-*
-          path: dist
-      - name: name each binary after its target
+          fetch-depth: 0
+      - name: work out the version
+        id: v
         run: |
-          for d in dist/unbidden-*; do
-            t=$(basename "$d")
-            cp "$d/unbidden" "$t"
-            chmod +x "$t"
+          cur=$(sed -n '0,/^version = /s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          if [ -n "$last" ] && ! git diff --name-only "$last"..HEAD \
+               | grep -qE '^(src/|Cargo\.toml$|Cargo\.lock$)'; then
+            echo "nothing under src/ since $last, so there is no new version"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Cargo.toml holding a version that was never tagged means someone
+          # chose it; otherwise this is the next patch.
+          if git rev-parse -q --verify "refs/tags/v$cur" >/dev/null; then
+            cur=$(echo "$cur" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
+          fi
+          echo "version=$cur" >> "$GITHUB_OUTPUT"
+      - name: commit the bump
+        if: steps.v.outputs.skip != '1' && github.ref_type != 'tag'
+        run: |
+          v=${{ steps.v.outputs.version }}
+          sed -i "0,/^version = /s/^version = .*/version = \"$v\"/" Cargo.toml
+          cargo metadata --no-deps --format-version 1 > /dev/null
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The first release takes the version Cargo.toml already holds, so
+          # there is nothing to commit and an unconditional commit would fail.
+          if ! git diff --quiet; then
+            git commit -qam "Release v$v"
+          fi
+          git tag "v$v"
+          # Pushed with GITHUB_TOKEN, which by design starts no further run.
+          git push -q origin HEAD:main "v$v"
+      - name: build the binaries this release ships
+        if: steps.v.outputs.skip != '1'
+        # Not the artifacts from the static job: those were built before the
+        # bump and would report the previous version to --version.
+        run: |
+          cargo install cross --locked
+          for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            rustup target add "$t"
+            cross build --locked --release --target "$t"
+            bin=target/$t/release/unbidden
+            file "$bin" | grep -qE 'static-pie linked|statically linked' \
+              || { echo "$t: not statically linked"; exit 1; }
+            cp "$bin" "unbidden-$t"
           done
           sha256sum unbidden-* > SHA256SUMS
           cat SHA256SUMS
-      - env:
+      - name: post it
+        if: steps.v.outputs.skip != '1'
+        env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes unbidden-* SHA256SUMS
+        run: |
+          gh release create "v${{ steps.v.outputs.version }}" \
+            --generate-notes unbidden-* SHA256SUMS
