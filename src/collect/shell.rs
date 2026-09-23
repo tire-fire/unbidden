@@ -135,7 +135,7 @@ impl Collector for Shell {
                 Ok(_) => continue,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
-                    cx.note_unreadable(format!("{dir}: {e}"));
+                    cx.note_failed(dir, &e);
                     continue;
                 }
             }
@@ -238,7 +238,7 @@ fn profile(
     let (bytes, truncated) = match cx.root.read_capped(rel, READ_CAP) {
         Ok(v) => v,
         Err(err) => {
-            cx.note_unreadable(format!("{}: {err}", cx.root.abs(rel).display()));
+            cx.note_failed(cx.root.abs(rel), &err);
             e.note("unreadable", err.to_string());
             out.push(e);
             return;

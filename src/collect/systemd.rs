@@ -214,7 +214,7 @@ impl Walk {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
             Err(e) => {
-                cx.note_unreadable(format!("{}: {e}", dir.display()));
+                cx.note_failed(&dir, &e);
                 return;
             }
         }
@@ -491,7 +491,7 @@ fn generators(cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>) -> Vec<Entry> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                cx.note_unreadable(format!("{dir}: {e}"));
+                cx.note_failed(&dir, &e);
                 continue;
             }
         }

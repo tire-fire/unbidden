@@ -209,6 +209,12 @@ impl Root {
         self.homes.get().map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// Whether a path sits inside one of the declared homes.
+    pub fn in_home(&self, rel: &Path) -> bool {
+        let here = self.rel(&self.abs(rel));
+        self.homes().iter().any(|h| here.starts_with(self.rel(h)))
+    }
+
     /// A path in someone's home that, once its links are followed, leads out
     /// of that home. Returns where it leads.
     ///

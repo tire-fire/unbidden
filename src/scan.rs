@@ -98,7 +98,7 @@ impl<'a> Ctx<'a> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
-                self.unreadable.push(format!("{}: {e}", rel.display()));
+                self.note_failed(rel, &e);
                 None
             }
         }
@@ -110,7 +110,7 @@ impl<'a> Ctx<'a> {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => {
-                self.unreadable.push(format!("{}: {e}", rel.display()));
+                self.note_failed(rel, &e);
                 Vec::new()
             }
         }
@@ -118,6 +118,25 @@ impl<'a> Ctx<'a> {
 
     pub fn note_unreadable(&mut self, what: impl std::fmt::Display) {
         self.unreadable.push(what.to_string());
+    }
+
+    /// A path that could not be read or listed. Under a home, a link loop or
+    /// a file where a directory belongs is the owner's own construction and
+    /// fails the same way on every run, so it is recorded as a limit rather
+    /// than a failure: otherwise any account could make every baseline
+    /// incomparable with one symlink. Anywhere else, and for any other error,
+    /// the scan could not look, and the collector is Partial.
+    pub fn note_failed(&mut self, path: impl AsRef<Path>, e: &std::io::Error) {
+        let path = path.as_ref();
+        let what = format!("{}: {e}", path.display());
+        let built = [rustix::io::Errno::LOOP, rustix::io::Errno::NOTDIR]
+            .iter()
+            .any(|n| e.raw_os_error() == Some(n.raw_os_error()));
+        if built && self.root.in_home(path) {
+            self.note_limited(what);
+        } else {
+            self.note_unreadable(what);
+        }
     }
 
     /// A read the scan limited on purpose, or content it read but declined to
@@ -586,6 +605,76 @@ mod tests {
         assert!(cx.read("etc/cron.daily").is_none());
         assert!(cx.unreadable.is_empty());
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn what_a_user_builds_in_their_home_cannot_make_a_collector_partial() {
+        let dir = std::env::temp_dir().join(format!("unbidden-homeloops-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["etc", "home/alice/.ssh", "home/alice/.config/autostart", "home/bob"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(
+            dir.join("etc/passwd"),
+            "alice:x:1000:1000::/home/alice:/bin/bash\nbob:x:1001:1001::/home/bob:/bin/bash\n",
+        )
+        .unwrap();
+        let link = |at: &str| {
+            let name = Path::new(at).file_name().unwrap();
+            std::os::unix::fs::symlink(name, dir.join(at)).unwrap();
+        };
+        // Links to themselves: every lookup through them is ELOOP.
+        link("home/alice/.ssh/authorized_keys");
+        link("home/alice/.config/autostart/loop.desktop");
+        link("home/alice/.bashrc");
+        // A file where a directory belongs: every lookup below it is ENOTDIR.
+        std::fs::write(dir.join("home/bob/.ssh"), b"").unwrap();
+        std::fs::write(dir.join("home/bob/.config"), b"").unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let scan = run(&root, &Options { deep: false }, &crate::collect::all());
+        let partial: Vec<_> = scan
+            .header
+            .collectors
+            .iter()
+            // An offline root has no /proc, which is its own honest Partial.
+            .filter(|c| c.name != "kernel")
+            .filter_map(|c| match &c.status {
+                Status::Partial { unreadable } => Some(format!("{}: {unreadable:?}", c.name)),
+                _ => None,
+            })
+            .collect();
+        assert!(partial.is_empty(), "{partial:#?}");
+        let limited: Vec<&String> = scan.header.collectors.iter().flat_map(|c| &c.truncated).collect();
+        // A looped ~/.bashrc is read by nothing, bash included, and the shell
+        // collector treats it as absent; it is planted above only to show it
+        // cannot make the shell collector Partial either.
+        for planted in ["authorized_keys", "loop.desktop", "bob/.config/autostart"] {
+            assert!(limited.iter().any(|t| t.contains(planted)), "{planted} not recorded: {limited:#?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_what_a_home_owner_can_build_is_excused() {
+        let dir = std::env::temp_dir().join(format!("unbidden-excused-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        root.set_homes(vec![PathBuf::from("/home/alice")]);
+        let users: Vec<User> = Vec::new();
+        let mut cx = Ctx { root: &root, users: &users, deep: false, unreadable: Vec::new(), truncated: Vec::new() };
+        let err = |e: rustix::io::Errno| std::io::Error::from_raw_os_error(e.raw_os_error());
+
+        cx.note_failed("home/alice/.ssh/authorized_keys", &err(rustix::io::Errno::LOOP));
+        cx.note_failed("/home/alice/.config/autostart", &err(rustix::io::Errno::NOTDIR));
+        assert_eq!((cx.truncated.len(), cx.unreadable.len()), (2, 0));
+
+        // A scan that was refused permission could not look, wherever it was.
+        cx.note_failed("home/alice/.profile", &err(rustix::io::Errno::ACCESS));
+        // A loop outside any home needed privilege to plant.
+        cx.note_failed("etc/cron.d/job", &err(rustix::io::Errno::LOOP));
+        assert_eq!((cx.truncated.len(), cx.unreadable.len()), (2, 2));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
