@@ -180,6 +180,13 @@ const NO_PROGRAM: &[&str] = &[
     "break", "continue", "fi", "done", "esac", "}", "then", "else",
 ];
 
+/// How deep shell text may nest before the programs inside it are given up as
+/// unknown: `$(...)`, backquotes, `eval`, `sh -c` text and wrappers all count
+/// against one budget. The text comes from files any user can write, and
+/// without a bound 50,000 nested `$(` in a user unit drove a root scan to
+/// 4.9 GB and the OOM killer. Real commands nest two or three deep.
+const MAX_NESTING: usize = 16;
+
 /// Keywords that precede the command they govern.
 const LEADING_KEYWORDS: &[&str] = &["if", "elif", "while", "until", "do", "!", "{", "time", "then", "else"];
 
@@ -204,7 +211,7 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
             continue;
         }
         let Some(command) = &entry.command else { continue };
-        let lines = commands(&String::from_utf8_lossy(command));
+        let lines = commands(&String::from_utf8_lossy(command), 0);
         let Some(first) = lines.first().and_then(|c| c.first()) else { continue };
         // systemd's ExecStart= prefixes.
         let head = first.trim_start_matches(['-', '@', '+', '!', ':']).to_string();
@@ -219,7 +226,7 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
             if let Some(w) = words.first_mut() {
                 *w = w.trim_start_matches(['-', '@', '+', '!', ':']).to_string();
             }
-            programs(words, Vec::new(), &mut runs);
+            programs(words, Vec::new(), 0, &mut runs);
         }
         // The one case with nothing to change: a single program, reached
         // directly, which is what the collector already has.
@@ -281,8 +288,10 @@ fn program_path(root: &Root, kind: Kind, program: &str) -> Option<PathBuf> {
 }
 
 /// The programs one simple command starts, following wrappers and shell text.
-fn programs(mut words: Vec<String>, by: Vec<&'static str>, out: &mut Vec<Run>) {
-    if by.len() > 8 {
+/// Past `MAX_NESTING` the program is unknown, and says so by having none.
+fn programs(mut words: Vec<String>, by: Vec<&'static str>, depth: usize, out: &mut Vec<Run>) {
+    if depth > MAX_NESTING {
+        out.push(Run { by, program: None, words: words.into_iter().take(1).collect() });
         return;
     }
     let assignment = |w: &str| w.split_once('=').is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
@@ -303,8 +312,8 @@ fn programs(mut words: Vec<String>, by: Vec<&'static str>, out: &mut Vec<Run>) {
             return;
         }
         "eval" => {
-            for c in commands(&words[1..].join(" ")) {
-                programs(c, by.clone(), out);
+            for c in commands(&words[1..].join(" "), depth + 1) {
+                programs(c, by.clone(), depth + 1, out);
             }
             return;
         }
@@ -317,12 +326,12 @@ fn programs(mut words: Vec<String>, by: Vec<&'static str>, out: &mut Vec<Run>) {
     };
     let mut by_next = by.clone();
     by_next.push(w.0);
-    match unwrap(w, &words[1..]) {
-        Unwrapped::Argv(next) => programs(next, by_next, out),
+    match unwrap(w, &words[1..], depth + 1) {
+        Unwrapped::Argv(next) => programs(next, by_next, depth + 1, out),
         Unwrapped::Text(text) => {
             let before = out.len();
-            for c in commands(&text) {
-                programs(c, by_next.clone(), out);
+            for c in commands(&text, depth + 1) {
+                programs(c, by_next.clone(), depth + 1, out);
             }
             // Text of nothing but builtins runs only the shell.
             if out.len() == before {
@@ -349,7 +358,7 @@ enum Unwrapped {
 }
 
 /// What a wrapper hands on: an argv, shell text, or nothing at all.
-fn unwrap(w: &(&str, &[&str], usize), args: &[String]) -> Unwrapped {
+fn unwrap(w: &(&str, &[&str], usize), args: &[String], depth: usize) -> Unwrapped {
     let (name, valued, mut operands) = *w;
     let takes_text = SHELLS.contains(&name) || name == "flock";
     let mut i = 0;
@@ -378,7 +387,7 @@ fn unwrap(w: &(&str, &[&str], usize), args: &[String]) -> Unwrapped {
                     .map(|t| (t.to_string(), i + 1)),
             };
             if let Some((text, next)) = split {
-                let mut argv = commands(&text).into_iter().next().unwrap_or_default();
+                let mut argv = commands(&text, depth).into_iter().next().unwrap_or_default();
                 argv.extend(args[next.min(args.len())..].iter().cloned());
                 return Unwrapped::Argv(argv);
             }
@@ -408,7 +417,7 @@ fn unwrap(w: &(&str, &[&str], usize), args: &[String]) -> Unwrapped {
 /// `|`, newlines and parentheses end a command; redirections and their files
 /// are dropped; `$(...)` and backquoted text are commands of their own,
 /// appended after the rest.
-fn commands(text: &str) -> Vec<Vec<String>> {
+fn commands(text: &str, depth: usize) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = Vec::new();
     let mut nested: Vec<Vec<String>> = Vec::new();
     let mut cmd: Vec<String> = Vec::new();
@@ -439,14 +448,14 @@ fn commands(text: &str) -> Vec<Vec<String>> {
             (Some('\''), c) => word.push(c),
             (None | Some('"'), '$') if chars.get(i + 1) == Some(&'(') => {
                 let (inner, end) = balanced(&chars, i + 2);
-                nested.extend(commands(&inner));
+                nested.extend(nested_commands(&inner, depth));
                 word.push_str("$(");
                 started = true;
                 i = end;
             }
             (None | Some('"'), '`') => {
                 let end = chars[i + 1..].iter().position(|c| *c == '`').map_or(chars.len(), |p| i + 1 + p);
-                nested.extend(commands(&chars[i + 1..end].iter().collect::<String>()));
+                nested.extend(nested_commands(&chars[i + 1..end].iter().collect::<String>(), depth));
                 word.push('`');
                 started = true;
                 i = end;
@@ -512,6 +521,12 @@ fn commands(text: &str) -> Vec<Vec<String>> {
     }
     out.extend(nested);
     out
+}
+
+/// The commands inside a substitution, or past `MAX_NESTING` a single command
+/// whose program cannot be known.
+fn nested_commands(inner: &str, depth: usize) -> Vec<Vec<String>> {
+    if depth < MAX_NESTING { commands(inner, depth + 1) } else { vec![vec!["$(".to_string()]] }
 }
 
 /// The text up to the parenthesis that closes one already open at `from`,
@@ -1207,8 +1222,8 @@ fn python_launches(root: &Root, kind: Kind, source: &[u8]) -> Vec<(&'static str,
             let shell = shell_text || (!listed && args.contains("shell=True"));
             let mut runs = Vec::new();
             if shell {
-                for c in commands(&literal) {
-                    programs(c, Vec::new(), &mut runs);
+                for c in commands(&literal, 0) {
+                    programs(c, Vec::new(), 0, &mut runs);
                 }
             } else {
                 runs.push(Run { by: Vec::new(), program: Some(literal.clone()), words: vec![literal] });
@@ -1613,6 +1628,42 @@ mod tests {
             assert_eq!(e.source, dir.join("etc/dnf/plugins/hook.conf"));
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn nesting_past_the_budget_is_unknown_rather_than_unbounded() {
+        // Each of these, without the budget, took a root scan to gigabytes of
+        // memory or past the end of its stack. A user can write any of them
+        // into their own crontab or unit.
+        let n = 50_000;
+        let cases = [
+            ("unclosed $(", format!("{}true", "$(".repeat(n))),
+            ("closed $(", format!("{}true{}", "$(".repeat(n), ")".repeat(n))),
+            ("eval", format!("{}true", "eval ".repeat(n))),
+            ("wrappers", format!("{}true", "env ".repeat(n))),
+        ];
+        for (what, text) in cases {
+            let mut runs = Vec::new();
+            for c in commands(&text, 0) {
+                programs(c, Vec::new(), 0, &mut runs);
+            }
+            assert!(runs.len() <= MAX_NESTING + 2, "{what}: {} runs", runs.len());
+            assert!(runs.iter().any(|r| r.program.is_none()), "{what}: past the budget a program is unknown");
+        }
+        // Backquotes pair up rather than nest, so these are flat
+        // substitutions, each of a builtin that names no program.
+        let mut runs = Vec::new();
+        for c in commands(&format!("{}true", "echo `".repeat(n)), 0) {
+            programs(c, Vec::new(), 0, &mut runs);
+        }
+        assert!(runs.is_empty(), "{} runs", runs.len());
+        // Real nesting, well inside the budget, is still followed.
+        let mut runs = Vec::new();
+        for c in commands("sh -c 'eval \"$(cat /etc/x)\"' && env nice /opt/x", 0) {
+            programs(c, Vec::new(), 0, &mut runs);
+        }
+        let named: Vec<_> = runs.iter().filter_map(|r| r.program.as_deref()).collect();
+        assert_eq!(named, ["cat", "/opt/x"]);
     }
 
     #[test]

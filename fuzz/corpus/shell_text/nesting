@@ -1,0 +1,1 @@
+bash -lc "eval \"$(printf %s /opt/x)\" 2>/dev/null >&2"

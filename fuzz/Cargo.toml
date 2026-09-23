@@ -152,6 +152,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "shell_text"
+path = "fuzz_targets/shell_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "script_head"
 path = "fuzz_targets/script_head.rs"
 test = false

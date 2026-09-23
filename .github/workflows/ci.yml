@@ -84,7 +84,7 @@ jobs:
         run: |
           for t in $(cargo +nightly fuzz list); do
             case "$t" in
-              unit_file|crontab|desktop_file|udev_rules|pam_config) secs=60 ;;
+              unit_file|crontab|desktop_file|udev_rules|pam_config|shell_text) secs=60 ;;
               *) secs=20 ;;
             esac
             echo "::group::$t (${secs}s)"

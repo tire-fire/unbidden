@@ -1,0 +1,1 @@
+sudo -u bob env nohup timeout 5 flock /run/l -c "exec /opt/x"
