@@ -92,7 +92,7 @@ jobs:
     # It gates a release, as §1 says every supported distribution does.
     needs: static
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 200
     strategy:
       fail-fast: false
       matrix:
@@ -104,21 +104,29 @@ jobs:
           name: unbidden-x86_64-unknown-linux-musl
           path: target/x86_64-unknown-linux-musl/release
       - name: hardware virtualisation
+        id: accel
         run: |
-          # GitHub's Linux runners expose /dev/kvm to the kvm group only. The
-          # loop plants and scans thirty-odd mechanisms with a whole-disk walk
-          # each time; under emulation that outlives the job, so a runner
-          # without KVM is a failure to say so, not a slow pass.
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' |
-            sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "no usable /dev/kvm on this runner"; exit 1; }
+          # GitHub's Linux runners expose /dev/kvm to the kvm group only. It
+          # is opened up directly rather than through a udev rule, which is
+          # applied asynchronously and can lose a race with the next line.
+          [ -e /dev/kvm ] && sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm 2>&1 || true
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo "kvm=yes" >> "$GITHUB_OUTPUT"
+          else
+            # Emulated, the loop is many times slower but still says
+            # something about the code; failing for want of a device says
+            # only which runner the job landed on.
+            echo "::warning::no /dev/kvm on this runner; the VM runs emulated"
+            echo "kvm=no" >> "$GITHUB_OUTPUT"
+          fi
       - run: |
           chmod +x target/x86_64-unknown-linux-musl/release/unbidden
           sudo apt-get update -qq
           sudo apt-get install -y qemu-system-x86 qemu-utils xorriso
       - run: ci/vm-harness.sh --image ${{ matrix.image }}
+        # Emulated, a Debian 12 run took 36 minutes against 6 with KVM.
+        timeout-minutes: ${{ steps.accel.outputs.kvm == 'yes' && 80 || 180 }}
 
   persistence-mint:
     # Mint and LMDE publish no cloud image, so the same loop and the same live
