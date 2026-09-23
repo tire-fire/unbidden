@@ -1723,6 +1723,34 @@ mod tests {
     }
 
     #[test]
+    fn a_cron_command_is_cut_where_the_shell_cuts_it() {
+        let dir = std::env::temp_dir().join(format!("unbidden-cronsemi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["etc/cron.d", "opt"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("opt/a.sh"), b"").unwrap();
+        std::fs::write(
+            dir.join("etc/cron.d/x"),
+            "* * * * * root /opt/a.sh; /tmp/two\n*/5 * * * * root /opt/a.sh;/tmp/three\n",
+        )
+        .unwrap();
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(crate::collect::cron::Cron)];
+        let mut scan = scan::run(&root, &Options { deep: false }, &collectors);
+        enrich(&root, &mut scan);
+        let named: BTreeSet<&str> = scan.entries.iter().map(|e| e.name.as_str()).collect();
+        for want in ["/tmp/two", "/tmp/three"] {
+            assert!(named.contains(want), "{want} not named: {named:?}");
+        }
+        assert!(
+            scan.entries.iter().filter(|e| e.raw.contains_key("runs_commands")).all(|e| e.target_path.as_deref() == Some(dir.join("opt/a.sh").as_path())),
+            "the line's own target is the script, without the `;`"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn every_entry_has_its_own_id_and_its_own_trigger() {
         let dir = std::env::temp_dir().join(format!("unbidden-ids-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

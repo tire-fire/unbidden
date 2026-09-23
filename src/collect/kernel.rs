@@ -609,7 +609,7 @@ fn take_word(s: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 fn first_absolute(command: &[u8]) -> Option<PathBuf> {
-    let word = take_word(command)?.0;
+    let word = super::shell_word(take_word(command)?.0);
     (word.first() == Some(&b'/')).then(|| PathBuf::from(OsStr::from_bytes(word).to_os_string()))
 }
 

@@ -1064,6 +1064,7 @@ fn first_absolute(command: &[u8]) -> Option<PathBuf> {
             .position(|b| *b == b'=')
             .is_some_and(|eq| !word[..eq].is_empty() && word[0] != b'-' && word[0] != b'/');
         if !is_env {
+            let word = super::shell_word(word);
             return (word.first() == Some(&b'/'))
                 .then(|| PathBuf::from(OsStr::from_bytes(word).to_os_string()));
         }

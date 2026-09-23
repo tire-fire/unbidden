@@ -16,6 +16,15 @@ pub mod pkg;
 pub mod shell;
 pub mod systemd;
 
+/// The command word of shell text, cut where the shell cuts it. A `;`, `|`,
+/// `&`, `<`, `>` or parenthesis ends a word as surely as a space does, so
+/// `/opt/a.sh; /tmp/x` runs /opt/a.sh and not a file named `a.sh;`, and the
+/// rest of the line is left for enrichment to split into its own commands.
+pub(crate) fn shell_word(word: &[u8]) -> &[u8] {
+    let end = word.iter().position(|b| b";|&<>()".contains(b)).unwrap_or(word.len());
+    &word[..end]
+}
+
 pub fn all() -> Vec<Box<dyn Collector>> {
     vec![
         Box::new(systemd::Systemd),
