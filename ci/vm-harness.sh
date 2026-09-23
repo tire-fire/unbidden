@@ -148,7 +148,10 @@ case "$FAMILY" in
     # gcc because two PANIX modules compile their payload before planting it;
     # libcap's tools for cap, rpm-build for malicious-package on Fedora.
     debian) PKGS='[cron, at, sudo, git, network-manager, dbus, openssh-server, python3, gcc, build-essential, udev, libcap2-bin]' ;;
-    fedora) PKGS='[cronie, at, sudo, git, NetworkManager, dbus, openssh-server, python3, gcc, make, rpm-build, libcap]' ;;
+    # Fedora's bus is dbus-broker, which reads the same activation and policy
+    # directories as dbus-daemon. PANIX will not plant without the daemon's
+    # binary on PATH, so it is installed; the running bus stays the broker.
+    fedora) PKGS='[cronie, at, sudo, git, NetworkManager, dbus, dbus-daemon, openssh-server, python3, gcc, make, rpm-build, libcap]' ;;
 esac
 # lkm builds its module against the kernel that is running, whose version is
 # only known inside the guest — so this line runs there. The single quotes
