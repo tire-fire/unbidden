@@ -1095,13 +1095,30 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
         let Ok((head, _)) = root.read_capped(&script, SCRIPT_HEAD) else { continue };
         // No shebang, no script. It also keeps this off the ELF binaries most
         // entries point at, where bytes that read like `exec /tmp/x` are a
-        // coincidence of the file's data rather than a command.
-        let Some(after) = head.strip_prefix(b"#!") else { continue };
-        let first = &after[..after.iter().position(|b| *b == b'\n').unwrap_or(after.len())];
-
+        // coincidence of the file's data rather than a command. The one
+        // exception is a Python module a mechanism imports rather than runs,
+        // a dnf or yum plugin: it has no shebang and needs none.
+        let module = script.extension().is_some_and(|x| x == "py");
         let mut links: Vec<(&str, Vec<u8>)> = Vec::new();
-        links.extend(interpreter_of(first).map(|i| ("shebang", i)));
-        links.extend(handed_off(&head));
+        let python = match head.strip_prefix(b"#!") {
+            Some(after) => {
+                let first = &after[..after.iter().position(|b| *b == b'\n').unwrap_or(after.len())];
+                let interpreter = interpreter_of(first);
+                let python = interpreter.as_deref().is_some_and(|i| {
+                    Path::new(std::ffi::OsStr::from_bytes(i))
+                        .file_name()
+                        .is_some_and(|n| n.as_bytes().starts_with(b"python"))
+                });
+                links.extend(interpreter.map(|i| ("shebang", i)));
+                links.extend(handed_off(&head));
+                python
+            }
+            None if module => true,
+            None => continue,
+        };
+        if python || module {
+            links.extend(python_launches(root, carrier.kind, &head));
+        }
 
         for (via, referenced) in links {
             let name = String::from_utf8_lossy(&referenced).into_owned();
@@ -1157,6 +1174,73 @@ fn interpreter_of(line: &[u8]) -> Option<Vec<u8>> {
         return Some(first.to_vec());
     }
     Some(words.find(|w| w[0] != b'-' && !w.contains(&b'=')).unwrap_or(first).to_vec())
+}
+
+/// Programs a Python file starts: the literal first argument of a call that
+/// launches a process. `os.system` and `os.popen` take shell text, which is
+/// split the way the shell would; `subprocess` takes a program or, given
+/// `shell=True`, shell text; the `os.exec` and `os.spawn` families take a
+/// program. An argument built at run time is not followed, because this pass
+/// does not run Python.
+fn python_launches(root: &Root, kind: Kind, source: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
+    const SHELL_TEXT: &[&str] = &["os.system(", "os.popen(", "subprocess.getoutput(", "subprocess.getstatusoutput("];
+    const PROGRAM: &[&str] = &[
+        "subprocess.run(", "subprocess.call(", "subprocess.Popen(", "subprocess.check_call(",
+        "subprocess.check_output(", "os.execv(", "os.execve(", "os.execl(", "os.execle(", "os.execlp(",
+        "os.execvp(", "os.execvpe(", "os.spawnv(", "os.spawnl(",
+    ];
+    let text = String::from_utf8_lossy(source);
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let code = line.trim_start();
+        if code.starts_with('#') {
+            continue;
+        }
+        let calls = SHELL_TEXT.iter().map(|c| (c, true)).chain(PROGRAM.iter().map(|c| (c, false)));
+        for (call, shell_text) in calls {
+            let Some(at) = code.find(*call) else { continue };
+            let args = &code[at + call.len()..];
+            // os.spawn* take a mode before the program.
+            let args = if call.starts_with("os.spawn") { args.split_once(',').map_or("", |(_, r)| r) } else { args };
+            let listed = args.trim_start().starts_with('[');
+            let Some(literal) = python_string(args.trim_start().trim_start_matches('[')) else { continue };
+            let shell = shell_text || (!listed && args.contains("shell=True"));
+            let mut runs = Vec::new();
+            if shell {
+                for c in commands(&literal) {
+                    programs(c, Vec::new(), &mut runs);
+                }
+            } else {
+                runs.push(Run { by: Vec::new(), program: Some(literal.clone()), words: vec![literal] });
+            }
+            for run in runs {
+                let Some(program) = run.program else { continue };
+                if program.starts_with('/') || program_path(root, kind, &program).is_some() {
+                    out.push(("python", program.into_bytes()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The contents of a Python string literal at the start of `s`, where it is a
+/// plain one. An f-string is built at run time, so its `f` prefix is not
+/// skipped and it is not read; nor is a literal that spans lines.
+fn python_string(s: &str) -> Option<String> {
+    let s = s.trim_start_matches(['r', 'b', 'R', 'B']);
+    let quote = s.chars().next().filter(|c| *c == '\'' || *c == '"')?;
+    let body = &s[1..];
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next()?),
+            c if c == quote => return Some(out),
+            c => out.push(c),
+        }
+    }
+    None
 }
 
 /// Where a shell script hands control on: `source` and `.` pull a second file
@@ -1485,6 +1569,49 @@ mod tests {
         assert!(plain.raw.is_empty() && more.is_empty());
         let (elsewhere, _) = run("env evil", Some("usr/lib/security/pam_exec.so"));
         assert_eq!(elsewhere.target_path, Some(dir.join("usr/lib/security/pam_exec.so")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_python_module_is_followed_to_the_programs_it_starts() {
+        let dir = std::env::temp_dir().join(format!("unbidden-pylaunch-{}", std::process::id()));
+        for d in ["etc/dnf/plugins", "usr/lib/python3/site-packages/dnf-plugins", "usr/bin", "opt"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("usr/bin/setsid"), b"").unwrap();
+        std::fs::write(dir.join("usr/bin/logger"), b"").unwrap();
+        let module = "usr/lib/python3/site-packages/dnf-plugins/hook.py";
+        std::fs::write(
+            dir.join(module),
+            "import dnf, os, subprocess\n\
+             def start():\n\
+             \x20   os.system('setsid /opt/one 2>/dev/null &')\n\
+             \x20   subprocess.Popen([\"/opt/two\", \"--flag\"])\n\
+             \x20   subprocess.run(\"/opt/three --a | logger\", shell=True)\n\
+             \x20   os.execv('/opt/four', ['four'])\n\
+             \x20   os.spawnl(os.P_NOWAIT, \"/opt/five\", \"five\")\n\
+             \x20   os.system(f\"/opt/{name}\")\n\
+             \x20   # os.system('/opt/commented')\n\
+             \x20   print('/opt/not-launched')\n",
+        )
+        .unwrap();
+        // The same text in a file that is neither Python nor a script.
+        std::fs::write(dir.join("opt/blob"), b"\x7fELF os.system('/opt/in-a-binary')").unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let carrier = |target: &str| {
+            let mut e = Entry::new(Kind::PkgHook, dir.join("etc/dnf/plugins/hook.conf"), "dnf-plugin:hook");
+            e.target_path = Some(dir.join(target));
+            e
+        };
+        let chained = interpreter_chain(&root, &[carrier(module), carrier("opt/blob")]);
+        let names: Vec<&str> = chained.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["/opt/one", "/opt/two", "/opt/three", "logger", "/opt/four", "/opt/five"]);
+        assert_eq!(chained[3].target_path, Some(dir.join("usr/bin/logger")), "a bare name is found on the search path");
+        for e in &chained {
+            assert_eq!(e.raw["chain"], "python");
+            assert_eq!(e.source, dir.join("etc/dnf/plugins/hook.conf"));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
