@@ -31,15 +31,18 @@ if [ "$ID" = fedora ]; then
 fi
 
 # --- snap -------------------------------------------------------------
-# Every snap brings mount units and service units no package database
-# knows about. Unrecognised, each reads Unpackaged, the same verdict an
-# attacker's unit gets. The snap comes from the store, so this needs network.
+# A snap with a daemon brings a service unit no package database knows about.
+# Unrecognised, it reads Unpackaged, the same verdict an attacker's unit gets.
+# The snap has to have a service: one without, like hello-world, brings only
+# mount units, which are not collected, and the check below would have
+# nothing to look at. Ubuntu 24.04's image ships no snap with a service. The
+# snap comes from the store, so this needs network.
 if [ "$ID" = ubuntu ]; then
     command -v snap >/dev/null || fail "no snapd on Ubuntu"
-    snap list hello-world >/dev/null 2>&1 || {
-        for i in 1 2 3; do snap install hello-world >/dev/null 2>&1 && break; sleep $((i * 15)); done
+    snap list mosquitto >/dev/null 2>&1 || {
+        for i in 1 2 3; do snap install mosquitto >/dev/null 2>&1 && break; sleep $((i * 15)); done
     }
-    snap list hello-world >/dev/null 2>&1 || fail "could not install a snap to check against"
+    snap list mosquitto >/dev/null 2>&1 || fail "could not install a snap to check against"
 fi
 
 out=$(mktemp)
@@ -90,7 +93,7 @@ rm -f "$out.units"
 note "the symlink fallback agrees with systemd on all $checked units it could be compared on"
 
 if [ "$ID" = ubuntu ]; then
-    snaps=$(tail -n +2 "$out" | grep -E '"source":"/etc/systemd/(system|user)/snap[.-]')
+    snaps=$(tail -n +2 "$out" | grep -E '"source":"/etc/systemd/(system|user)/snap[.-]' || true)
     [ -n "$snaps" ] || fail "snaps are installed and no snap unit was reported"
     flooded=$(echo "$snaps" | grep -c '"unpackaged"' || true)
     [ "$flooded" -eq 0 ] || fail "$flooded snap units read as unpackaged: $(echo "$snaps" | grep '"unpackaged"' | field source | head -3 | tr '\n' ' ')"
