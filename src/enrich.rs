@@ -80,6 +80,11 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
     per_entry(&mut failed, "encoding", &mut scan.entries, apply_encoding);
 
     scan.entries.sort_by(|a, b| (a.kind, &a.source, &a.name).cmp(&(b.kind, &b.source, &b.name)));
+    // Collectors keep their own ids apart; the entries synthesised above are
+    // named after what a file says, which its author chooses. After the sort,
+    // so which of two colliding entries keeps the plain id does not depend on
+    // the order they were found in.
+    crate::entry::dedup_ids(&mut scan.entries);
     scan.header.enrichment_failures.extend(failed);
 }
 
@@ -205,7 +210,9 @@ struct Run {
 /// starts two, and taking the first would let coreutils vouch for the second.
 fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
     let mut out = Vec::new();
-    let mut seen: BTreeSet<(Kind, PathBuf, String)> = BTreeSet::new();
+    // Per declaring entry: two cron lines that each start /tmp/evil are two
+    // findings with two triggers, not one.
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     for entry in entries.iter_mut() {
         if entry.raw.contains_key("target_unverifiable") {
             continue;
@@ -248,13 +255,13 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
                 entry.note("runs_commands", runs.len().to_string());
                 for run in &runs {
                     let name = run.program.clone().unwrap_or_else(|| run.words.first().cloned().unwrap_or_default());
-                    if !seen.insert((entry.kind, entry.source.clone(), name.clone())) {
+                    if !seen.insert((entry.id.clone(), name.clone())) {
                         continue;
                     }
                     // Kind and source are the carrier's, as in the interpreter
                     // chain: cron or systemd is still what makes this run.
                     let mut e = Entry::new(entry.kind, &entry.source, &name);
-                    e.rekey(&root.rel(&entry.source));
+                    e.rekey_declared(&root.rel(&entry.source), &entry.id);
                     e.target_path = run.program.as_deref().and_then(|p| program_path(root, entry.kind, p));
                     e.command = Some(run.words.join(" ").into_bytes());
                     e.trigger = entry.trigger;
@@ -1093,6 +1100,7 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
     // script — an init script and the rc2.d symlink enabling it — cannot
     // produce the same id twice.
     let mut seen: BTreeSet<(Kind, PathBuf, String)> = BTreeSet::new();
+    let mut seen_declared: BTreeSet<(String, String)> = BTreeSet::new();
 
     for carrier in entries {
         let script = match &carrier.target_path {
@@ -1137,7 +1145,15 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
 
         for (via, referenced) in links {
             let name = String::from_utf8_lossy(&referenced).into_owned();
-            if !seen.insert((carrier.kind, carrier.source.clone(), name.clone())) {
+            // A Python launch is keyed by the entry it came from, like a
+            // command in shell text. The shebang chain keeps the key it has
+            // always had, so its ids still match baselines taken before.
+            let fresh = if via == "python" {
+                seen_declared.insert((carrier.id.clone(), name.clone()))
+            } else {
+                seen.insert((carrier.kind, carrier.source.clone(), name.clone()))
+            };
+            if !fresh {
                 continue;
             }
             // The kind and source are the carrier's: the mechanism that makes
@@ -1145,7 +1161,11 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
             // hangs off is the one whose own location and ownership the
             // operator is already being shown.
             let mut e = Entry::new(carrier.kind, &carrier.source, &name);
-            e.rekey(&root.rel(&carrier.source));
+            if via == "python" {
+                e.rekey_declared(&root.rel(&carrier.source), &carrier.id);
+            } else {
+                e.rekey(&root.rel(&carrier.source));
+            }
             let path = Path::new(std::ffi::OsStr::from_bytes(&referenced));
             if path.is_absolute() {
                 e.target_path = Some(root.abs(root.rel(path)));
@@ -1664,6 +1684,45 @@ mod tests {
         }
         let named: Vec<_> = runs.iter().filter_map(|r| r.program.as_deref()).collect();
         assert_eq!(named, ["cat", "/opt/x"]);
+    }
+
+    #[test]
+    fn every_entry_has_its_own_id_and_its_own_trigger() {
+        let dir = std::env::temp_dir().join(format!("unbidden-ids-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["etc/systemd/system", "etc/cron.d", "usr/bin", "opt"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("usr/bin/python3"), b"").unwrap();
+        std::fs::write(dir.join("opt/a.py"), b"#!/usr/bin/python3\nprint(1)\n").unwrap();
+        std::fs::write(dir.join("opt/b.py"), b"#!/usr/bin/python3\nprint(2)\n").unwrap();
+        // /usr/bin/python3 is both a command in the unit's text and b.py's
+        // interpreter: two entries, one name, one source.
+        std::fs::write(
+            dir.join("etc/systemd/system/d.service"),
+            "[Service]\nExecStart=/usr/bin/python3 /opt/a.py ; /opt/b.py\n[Install]\nWantedBy=multi-user.target\n",
+        )
+        .unwrap();
+        // /tmp/evil twice in one file, on two schedules.
+        std::fs::write(
+            dir.join("etc/cron.d/twice"),
+            "*/5 * * * * root /opt/a.sh ; /tmp/evil\n@reboot root /opt/c.sh ; /tmp/evil\n",
+        )
+        .unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> =
+            vec![Box::new(crate::collect::systemd::Systemd), Box::new(crate::collect::cron::Cron)];
+        let mut scan = scan::run(&root, &Options { deep: false }, &collectors);
+        enrich(&root, &mut scan);
+
+        let mut ids = BTreeSet::new();
+        for e in &scan.entries {
+            assert!(ids.insert(&e.id), "{} ({}) shares its id", e.name, e.source.display());
+        }
+        let evil: BTreeSet<_> = scan.entries.iter().filter(|e| e.name == "/tmp/evil").map(|e| e.trigger).collect();
+        assert_eq!(evil.len(), 2, "each schedule that starts /tmp/evil is its own finding: {evil:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

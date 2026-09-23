@@ -204,6 +204,11 @@ impl Entry {
         self.id = entry_id(self.kind, rel, &self.name);
     }
 
+    /// As `rekey`, for an entry synthesised out of the one whose id is given.
+    pub fn rekey_declared(&mut self, rel: &Path, declared_by: &str) {
+        self.id = declared_entry_id(self.kind, rel, &self.name, declared_by);
+    }
+
     /// What the human table shows: unique-prefix addressing, git style.
     pub fn short_id(&self) -> &str {
         &self.id[..12.min(self.id.len())]
@@ -220,12 +225,49 @@ impl Entry {
 /// entry, so the two could never be diffed against each other — which is the
 /// comparison an incident responder most wants to make.
 pub fn entry_id(kind: Kind, source: &Path, name: &str) -> String {
+    id_of(&[kind.as_str().as_bytes(), source.as_os_str().as_bytes(), name.as_bytes()])
+}
+
+/// The id of an entry synthesised out of another. The entry that declared it
+/// is part of what makes it one fact: two cron lines in one file can each
+/// start /tmp/evil, on different schedules, and those are two findings.
+pub fn declared_entry_id(kind: Kind, source: &Path, name: &str, declared_by: &str) -> String {
+    id_of(&[kind.as_str().as_bytes(), source.as_os_str().as_bytes(), name.as_bytes(), declared_by.as_bytes()])
+}
+
+fn id_of(parts: &[&[u8]]) -> String {
     let mut h = blake3::Hasher::new();
-    for part in [kind.as_str().as_bytes(), source.as_os_str().as_bytes(), name.as_bytes()] {
+    for part in parts {
         h.update(&(part.len() as u64).to_le_bytes());
         h.update(part);
     }
     h.finalize().to_hex().to_string()
+}
+
+/// Gives the second and later holders of one id a suffixed name and a fresh
+/// id. Two textually identical rules are two entries, and a duplicate id would
+/// make the diff refuse to compare scans at all.
+pub fn dedup_ids(entries: &mut [Entry]) {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut next: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for e in entries.iter_mut() {
+        if seen.insert(e.id.clone()) {
+            continue;
+        }
+        // The counter is remembered per name so that a file of ten thousand
+        // identical lines costs one hash each, not one per earlier duplicate.
+        let counter = next.entry(format!("{}\u{1}{}", e.source.display(), e.name)).or_insert(2);
+        loop {
+            let name = format!("{}#{counter}", e.name);
+            *counter += 1;
+            let id = entry_id(e.kind, &e.source, &name);
+            if seen.insert(id.clone()) {
+                e.name = name;
+                e.id = id;
+                break;
+            }
+        }
+    }
 }
 
 /// Bytes off a hostile disk, rendered for JSON: a string where the bytes are

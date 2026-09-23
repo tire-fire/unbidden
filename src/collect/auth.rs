@@ -6,12 +6,12 @@
 //! a rule carrying invalid UTF-8 survives as evidence rather than becoming
 //! replacement characters.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
-use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, entry_id};
+use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, dedup_ids};
 use crate::scan::{Collector, Ctx};
 
 pub struct Auth;
@@ -137,31 +137,6 @@ fn append_note(e: &mut Entry, key: &str, value: impl Into<String>) {
 fn flag_non_utf8(e: &mut Entry, bytes: &[u8]) {
     if std::str::from_utf8(bytes).is_err() {
         e.flag(Flag::EncodingAnomaly);
-    }
-}
-
-/// Two rules can be textually identical; a duplicate id would make the diff
-/// fail loudly on a benign file, so the second occurrence is suffixed.
-fn dedup_ids(entries: &mut [Entry]) {
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut next: BTreeMap<String, u32> = BTreeMap::new();
-    for e in entries.iter_mut() {
-        if seen.insert(e.id.clone()) {
-            continue;
-        }
-        // The counter is remembered per name so that a file of ten thousand
-        // identical lines costs one hash each, not one per earlier duplicate.
-        let counter = next.entry(format!("{}\u{1}{}", e.source.display(), e.name)).or_insert(2);
-        loop {
-            let name = format!("{}#{counter}", e.name);
-            *counter += 1;
-            let id = entry_id(e.kind, &e.source, &name);
-            if seen.insert(id.clone()) {
-                e.name = name;
-                e.id = id;
-                break;
-            }
-        }
     }
 }
 
