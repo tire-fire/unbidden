@@ -18,14 +18,15 @@ use crate::scan::Scan;
 pub fn enrich(root: &Root, scan: &mut Scan) {
     let mut failed = Vec::new();
 
-    stage(&mut failed, "targets", || {
+    let commands = stage(&mut failed, "targets", || {
         normalise_targets(root, &mut scan.entries);
         // Before anything reads target_path: a bare `ExecStart=backdoor`
         // names a file just as surely as an absolute path does, and it needs
         // the same provenance lookup and the same interpreter chain.
         resolve_bare_targets(root, &mut scan.entries);
-        look_through_wrappers(root, &mut scan.entries);
+        look_through_wrappers(root, &mut scan.entries)
     });
+    scan.entries.extend(commands.unwrap_or_default());
 
     // Before the paths are gathered, so the interpreters and sourced files
     // these name get their provenance resolved in the same pass as everything
@@ -170,88 +171,220 @@ const WRAPPERS: &[(&str, &[&str], usize)] = &[
     ("exec", &["-a"], 0),
 ];
 
-/// Replaces a wrapper as an entry's target with what the wrapper runs. Where
-/// that cannot be worked out, the target is dropped, and the entry reads as
-/// unresolvable rather than as the wrapper, which would vouch for it.
-fn look_through_wrappers(root: &Root, entries: &mut [Entry]) {
-    for entry in entries {
+/// Shell builtins and keywords that name no program. Their words are skipped
+/// rather than looked up: `true` in `true; /tmp/evil` must not stand in for
+/// the command after it.
+const NO_PROGRAM: &[&str] = &[
+    "cd", "export", "exit", "set", "unset", "local", "shift", "return", "read", "wait", "trap", "ulimit",
+    "umask", "true", "false", ":", "echo", "printf", "test", "[", "[[", "readonly", "declare", "alias",
+    "break", "continue", "fi", "done", "esac", "}", "then", "else",
+];
+
+/// Keywords that precede the command they govern.
+const LEADING_KEYWORDS: &[&str] = &["if", "elif", "while", "until", "do", "!", "{", "time", "then", "else"];
+
+/// One program a command line starts, the wrappers it was reached through,
+/// and the simple command it came from. `program` is None where the command
+/// word cannot be known without running the shell: `$CMD`, `$(...)`.
+struct Run {
+    by: Vec<&'static str>,
+    program: Option<String>,
+    words: Vec<String>,
+}
+
+/// Replaces a wrapper as an entry's target with what the wrapper runs, and
+/// returns one entry per further program where the command line starts more
+/// than one. Shell text is not a single program: `sh -c 'true; /tmp/evil'`
+/// starts two, and taking the first would let coreutils vouch for the second.
+fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let mut seen: BTreeSet<(Kind, PathBuf, String)> = BTreeSet::new();
+    for entry in entries.iter_mut() {
         if entry.raw.contains_key("target_unverifiable") {
             continue;
         }
         let Some(command) = &entry.command else { continue };
-        let mut argv = argv(command);
-        let Some(first) = argv.first_mut() else { continue };
+        let lines = commands(&String::from_utf8_lossy(command));
+        let Some(first) = lines.first().and_then(|c| c.first()) else { continue };
         // systemd's ExecStart= prefixes.
-        let trimmed = first.trim_start_matches(['-', '@', '+', '!', ':']).to_string();
-        *first = trimmed;
-        // Only where the wrapper is what the collector took as the target: a
-        // PAM module or a udev key has a target that is not argv[0].
-        let head = Path::new(&argv[0]).file_name().map(|n| n.to_string_lossy().into_owned());
-        let Some(head) = head.filter(|h| wrapper(h).is_some()) else { continue };
-        if entry.target_path.as_ref().is_some_and(|t| t.file_name().and_then(|n| n.to_str()) != Some(head.as_str())) {
+        let head = first.trim_start_matches(['-', '@', '+', '!', ':']).to_string();
+        // Only where argv[0] is what the collector took as the target: a PAM
+        // module or a udev key has a target that is not the command word.
+        let head_name = Path::new(&head).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if entry.target_path.as_ref().is_some_and(|t| t.file_name().and_then(|n| n.to_str()) != Some(head_name.as_str())) {
             continue;
         }
+        let mut runs = Vec::new();
+        for mut words in lines {
+            if let Some(w) = words.first_mut() {
+                *w = w.trim_start_matches(['-', '@', '+', '!', ':']).to_string();
+            }
+            programs(words, Vec::new(), &mut runs);
+        }
+        // The one case with nothing to change: a single program, reached
+        // directly, which is what the collector already has.
+        if let [run] = runs.as_slice() {
+            if run.by.is_empty() && run.program.as_deref() == Some(head.as_str()) {
+                continue;
+            }
+        }
+        match runs.as_slice() {
+            // Only builtins: the shell itself is what runs.
+            [] => {}
+            [run] => {
+                if !run.by.is_empty() {
+                    entry.note("target_wrapped_by", run.by.join(" "));
+                }
+                entry.target_path = run.program.as_deref().and_then(|p| program_path(root, entry.kind, p));
+            }
+            _ => {
+                entry.note("runs_commands", runs.len().to_string());
+                for run in &runs {
+                    let name = run.program.clone().unwrap_or_else(|| run.words.first().cloned().unwrap_or_default());
+                    if !seen.insert((entry.kind, entry.source.clone(), name.clone())) {
+                        continue;
+                    }
+                    // Kind and source are the carrier's, as in the interpreter
+                    // chain: cron or systemd is still what makes this run.
+                    let mut e = Entry::new(entry.kind, &entry.source, &name);
+                    e.rekey(&root.rel(&entry.source));
+                    e.target_path = run.program.as_deref().and_then(|p| program_path(root, entry.kind, p));
+                    e.command = Some(run.words.join(" ").into_bytes());
+                    e.trigger = entry.trigger;
+                    e.principal = entry.principal.clone();
+                    e.enabled = entry.enabled;
+                    e.owner_uid = entry.owner_uid;
+                    e.mode = entry.mode;
+                    e.mtime = entry.mtime;
+                    if !run.by.is_empty() {
+                        e.note("target_wrapped_by", run.by.join(" "));
+                    }
+                    e.note("chain", "command line");
+                    e.note("declared_by_entry", &entry.id);
+                    out.push(e);
+                }
+            }
+        }
+    }
+    out
+}
 
-        let mut by = Vec::new();
-        let mut wrapped = Some(argv);
-        while let Some(argv) = wrapped.take() {
-            let name = argv.first().and_then(|a| Path::new(a).file_name()).map(|n| n.to_string_lossy().into_owned());
-            match name.as_deref().and_then(wrapper) {
-                Some(w) if by.len() < 8 => {
-                    wrapped = unwrap(w, &argv[1..]);
-                    // A shell given no script and no -c text is itself what
-                    // runs: the emergency and debug shells are exactly that.
-                    if wrapped.is_none() && matches!(w.0, "sh" | "bash" | "dash" | "zsh") {
-                        wrapped = Some(argv);
-                        break;
-                    }
-                    by.push(w.0);
-                    if wrapped.is_none() {
-                        break;
-                    }
-                }
-                _ => {
-                    wrapped = Some(argv);
-                    break;
-                }
-            }
-        }
-        if by.is_empty() {
-            continue;
-        }
-        entry.note("target_wrapped_by", by.join(" "));
-        entry.target_path = wrapped.and_then(|argv| {
-            let program = argv.into_iter().next()?;
-            if program.starts_with('/') {
-                Some(root.abs(root.rel(Path::new(&program))))
-            } else {
-                resolve_bare_command(root, entry.kind, program.as_bytes())
-            }
-        });
+/// A command word as a file inside the scan root, by path or by search path.
+fn program_path(root: &Root, kind: Kind, program: &str) -> Option<PathBuf> {
+    if program.starts_with('/') {
+        Some(root.abs(root.rel(Path::new(program))))
+    } else if program.contains('/') {
+        None
+    } else {
+        resolve_bare_command(root, kind, program.as_bytes())
     }
 }
+
+/// The programs one simple command starts, following wrappers and shell text.
+fn programs(mut words: Vec<String>, by: Vec<&'static str>, out: &mut Vec<Run>) {
+    if by.len() > 8 {
+        return;
+    }
+    let assignment = |w: &str| w.split_once('=').is_some_and(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+    while words.first().is_some_and(|w| LEADING_KEYWORDS.contains(&w.as_str()) || assignment(w)) {
+        words.remove(0);
+    }
+    let Some(word) = words.first().cloned() else { return };
+    let name = Path::new(&word).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if NO_PROGRAM.contains(&word.as_str()) {
+        return;
+    }
+    match word.as_str() {
+        // The file a shell sources is code it runs.
+        "." | "source" => {
+            if let Some(script) = words.get(1) {
+                out.push(Run { by, program: Some(script.clone()), words });
+            }
+            return;
+        }
+        "eval" => {
+            for c in commands(&words[1..].join(" ")) {
+                programs(c, by.clone(), out);
+            }
+            return;
+        }
+        _ => {}
+    }
+    let Some(w) = wrapper(&name) else {
+        let program = (!word.contains(['$', '`'])).then_some(word);
+        out.push(Run { by, program, words });
+        return;
+    };
+    let mut by_next = by.clone();
+    by_next.push(w.0);
+    match unwrap(w, &words[1..]) {
+        Unwrapped::Argv(next) => programs(next, by_next, out),
+        Unwrapped::Text(text) => {
+            let before = out.len();
+            for c in commands(&text) {
+                programs(c, by_next.clone(), out);
+            }
+            // Text of nothing but builtins runs only the shell.
+            if out.len() == before {
+                out.push(Run { by, program: Some(word), words });
+            }
+        }
+        // A shell given no script and no -c text is itself what runs: the
+        // emergency and debug shells are exactly that.
+        Unwrapped::Nothing if SHELLS.contains(&w.0) => out.push(Run { by, program: Some(word), words }),
+        Unwrapped::Nothing => out.push(Run { by: by_next, program: None, words }),
+    }
+}
+
+const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh"];
 
 fn wrapper(name: &str) -> Option<&'static (&'static str, &'static [&'static str], usize)> {
     WRAPPERS.iter().find(|w| w.0 == name)
 }
 
-/// The argv a wrapper hands on, or None where it names no program.
-fn unwrap(w: &(&str, &[&str], usize), args: &[String]) -> Option<Vec<String>> {
+enum Unwrapped {
+    Argv(Vec<String>),
+    Text(String),
+    Nothing,
+}
+
+/// What a wrapper hands on: an argv, shell text, or nothing at all.
+fn unwrap(w: &(&str, &[&str], usize), args: &[String]) -> Unwrapped {
     let (name, valued, mut operands) = *w;
-    let shell = matches!(name, "sh" | "bash" | "dash" | "zsh");
+    let takes_text = SHELLS.contains(&name) || name == "flock";
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
-        // `-c text` in a shell or flock is the command, as one string.
-        if a == "-c" && (shell || name == "flock") {
-            return args.get(i + 1).map(|text| argv(text.as_bytes()));
-        }
         if a == "--" {
             i += 1;
             break;
         }
+        if valued.contains(&a) {
+            i += 2;
+            continue;
+        }
+        // -c, or a cluster holding it (-lc, -ec, -xc): the next word is the
+        // command, as shell text.
+        if takes_text && a.starts_with('-') && !a.starts_with("--") && a.contains('c') {
+            return args.get(i + 1).map_or(Unwrapped::Nothing, |t| Unwrapped::Text(t.clone()));
+        }
+        // env -S splits its argument into words and runs them.
+        if name == "env" {
+            let split = match a {
+                "-S" | "--split-string" => args.get(i + 1).map(|t| (t.clone(), i + 2)),
+                _ => a
+                    .strip_prefix("--split-string=")
+                    .or_else(|| a.strip_prefix("-S").filter(|t| !t.is_empty()))
+                    .map(|t| (t.to_string(), i + 1)),
+            };
+            if let Some((text, next)) = split {
+                let mut argv = commands(&text).into_iter().next().unwrap_or_default();
+                argv.extend(args[next.min(args.len())..].iter().cloned());
+                return Unwrapped::Argv(argv);
+            }
+        }
         if a.starts_with('-') && a.len() > 1 {
-            i += if valued.contains(&a) { 2 } else { 1 };
+            i += 1;
             continue;
         }
         if matches!(name, "env" | "sudo") && a.contains('=') {
@@ -265,51 +398,145 @@ fn unwrap(w: &(&str, &[&str], usize), args: &[String]) -> Option<Vec<String>> {
         }
         break;
     }
-    let rest = args.get(i..)?;
-    (!rest.is_empty()).then(|| rest.to_vec())
+    match args.get(i..) {
+        Some(rest) if !rest.is_empty() => Unwrapped::Argv(rest.to_vec()),
+        _ => Unwrapped::Nothing,
+    }
 }
 
-/// Words the way a shell splits them: whitespace, quotes and backslashes.
-/// A shell operator ends the command, so what follows `;` or `|` is never
-/// mistaken for this command's arguments.
-fn argv(command: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(command);
-    let mut out = Vec::new();
+/// Shell text split into simple commands, each a list of words. `;`, `&`,
+/// `|`, newlines and parentheses end a command; redirections and their files
+/// are dropped; `$(...)` and backquoted text are commands of their own,
+/// appended after the rest.
+fn commands(text: &str) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let mut nested: Vec<Vec<String>> = Vec::new();
+    let mut cmd: Vec<String> = Vec::new();
     let mut word = String::new();
     let mut started = false;
-    let mut quote = None;
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
+    let mut redirect = false;
+    let mut quote: Option<char> = None;
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    // A word ends: keep it, unless it names a redirection's file.
+    fn end_word(word: &mut String, started: &mut bool, redirect: &mut bool, cmd: &mut Vec<String>) {
+        if *started {
+            let w = std::mem::take(word);
+            if *redirect {
+                *redirect = false;
+            } else {
+                cmd.push(w);
+            }
+            *started = false;
+        }
+    }
+
+    while i < chars.len() {
+        let c = chars[i];
         match (quote, c) {
-            (Some(q), c) if c == q => quote = None,
-            (Some('"') | None, '\\') => {
-                if let Some(n) = chars.next() {
-                    word.push(n);
-                }
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('\''), c) => word.push(c),
+            (None | Some('"'), '$') if chars.get(i + 1) == Some(&'(') => {
+                let (inner, end) = balanced(&chars, i + 2);
+                nested.extend(commands(&inner));
+                word.push_str("$(");
                 started = true;
+                i = end;
+            }
+            (None | Some('"'), '`') => {
+                let end = chars[i + 1..].iter().position(|c| *c == '`').map_or(chars.len(), |p| i + 1 + p);
+                nested.extend(commands(&chars[i + 1..end].iter().collect::<String>()));
+                word.push('`');
+                started = true;
+                i = end;
+            }
+            (None | Some('"'), '\\') => {
+                if let Some(n) = chars.get(i + 1) {
+                    if *n != '\n' {
+                        word.push(*n);
+                        started = true;
+                    }
+                }
+                i += 1;
             }
             (Some(_), c) => word.push(c),
-            (None, '"' | '\'') => {
+            (None, '\'' | '"') => {
                 quote = Some(c);
                 started = true;
             }
-            (None, c) if c.is_whitespace() => {
-                if started {
-                    out.push(std::mem::take(&mut word));
+            (None, '#') if !started => {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            (None, '<' | '>') => {
+                // `2>` names a descriptor, not an argument.
+                if started && !redirect && word.chars().all(|c| c.is_ascii_digit()) {
+                    word.clear();
                     started = false;
                 }
+                end_word(&mut word, &mut started, &mut redirect, &mut cmd);
+                while chars.get(i + 1).is_some_and(|n| matches!(n, '<' | '>' | '&' | '|')) {
+                    i += 1;
+                }
+                // `>&2` duplicates a descriptor and names no file.
+                if chars.get(i + 1).is_some_and(|n| n.is_ascii_digit()) && chars.get(i) == Some(&'&') {
+                    i += 1;
+                    while chars.get(i + 1).is_some_and(|n| n.is_ascii_digit()) {
+                        i += 1;
+                    }
+                } else {
+                    redirect = true;
+                }
             }
-            (None, ';' | '|' | '&' | '<' | '>' | '(' | ')') => break,
+            (None, ';' | '&' | '|' | '\n' | '(' | ')') => {
+                end_word(&mut word, &mut started, &mut redirect, &mut cmd);
+                redirect = false;
+                if !cmd.is_empty() {
+                    out.push(std::mem::take(&mut cmd));
+                }
+            }
+            (None, c) if c.is_whitespace() => end_word(&mut word, &mut started, &mut redirect, &mut cmd),
             (None, c) => {
                 word.push(c);
                 started = true;
             }
         }
+        i += 1;
     }
-    if started {
-        out.push(word);
+    end_word(&mut word, &mut started, &mut redirect, &mut cmd);
+    if !cmd.is_empty() {
+        out.push(cmd);
     }
+    out.extend(nested);
     out
+}
+
+/// The text up to the parenthesis that closes one already open at `from`,
+/// and the index of that parenthesis.
+fn balanced(chars: &[char], from: usize) -> (String, usize) {
+    let mut depth = 1;
+    let mut quote: Option<char> = None;
+    let mut i = from;
+    while i < chars.len() {
+        match (quote, chars[i]) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, c @ ('\'' | '"')) => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth -= 1;
+                if depth == 0 {
+                    return (chars[from..i].iter().collect(), i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    (chars[from..].iter().collect(), chars.len())
 }
 
 fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
@@ -1173,10 +1400,14 @@ mod tests {
     #[test]
     fn a_wrapper_is_looked_through_to_what_it_runs() {
         let dir = std::env::temp_dir().join(format!("unbidden-wrappers-{}", std::process::id()));
-        for d in ["usr/bin", "usr/local/bin", "bin", "opt"] {
+        for d in ["usr/bin", "usr/local/bin", "bin", "sbin", "opt"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
-        for f in ["usr/bin/env", "usr/bin/nice", "usr/bin/sudo", "usr/bin/timeout", "usr/bin/flock", "bin/sh", "usr/local/bin/evil", "opt/x"] {
+        for f in [
+            "usr/bin/env", "usr/bin/nice", "usr/bin/sudo", "usr/bin/timeout", "usr/bin/flock", "usr/bin/true",
+            "usr/bin/cat", "usr/bin/logger", "usr/bin/sed", "bin/sh", "bin/bash", "sbin/modprobe",
+            "usr/local/bin/evil", "opt/x",
+        ] {
             std::fs::write(dir.join(f), b"").unwrap();
         }
         let root = Root::at(&dir).unwrap();
@@ -1184,40 +1415,75 @@ mod tests {
             let mut e = Entry::new(Kind::SystemdUnit, dir.join("etc/systemd/system/u.service"), "u.service");
             e.command = Some(command.as_bytes().to_vec());
             e.target_path = target.map(|t| dir.join(t));
-            look_through_wrappers(&root, std::slice::from_mut(&mut e));
-            e
+            let more = look_through_wrappers(&root, std::slice::from_mut(&mut e));
+            (e, more)
         };
-        let lands = |command: &str, target: Option<&str>, want: Option<&str>, by: &str| {
-            let e = run(command, target);
+        let lands = |command: &str, target: &str, want: Option<&str>, by: &str| {
+            let (e, more) = run(command, Some(target));
             assert_eq!(e.target_path, want.map(|w| dir.join(w)), "{command}");
             assert_eq!(e.raw.get("target_wrapped_by").map(String::as_str), Some(by), "{command}");
+            assert!(more.is_empty(), "{command}");
         };
 
-        lands("env FOO=1 evil", Some("usr/bin/env"), Some("usr/local/bin/evil"), "env");
-        lands("-/usr/bin/nice -n 5 /opt/x --flag", Some("usr/bin/nice"), Some("opt/x"), "nice");
-        lands("/bin/sh -c '/opt/x --quiet; true'", Some("bin/sh"), Some("opt/x"), "sh");
-        lands("/bin/sh /opt/x", Some("bin/sh"), Some("opt/x"), "sh");
-        lands("/bin/sh -c 'exec evil --daemon'", Some("bin/sh"), Some("usr/local/bin/evil"), "sh exec");
-        let shell = run("-/bin/sh", Some("bin/sh"));
-        assert_eq!(shell.target_path, Some(dir.join("bin/sh")), "a bare shell runs the shell");
-        assert!(!shell.raw.contains_key("target_wrapped_by"));
-        lands("sudo -u bob env nohup evil", Some("usr/bin/sudo"), Some("usr/local/bin/evil"), "sudo env nohup");
-        lands("timeout -s KILL 30 evil", Some("usr/bin/timeout"), Some("usr/local/bin/evil"), "timeout");
-        lands("flock /run/l -c 'evil a'", Some("usr/bin/flock"), Some("usr/local/bin/evil"), "flock");
-        lands("flock /run/l /opt/x", Some("usr/bin/flock"), Some("opt/x"), "flock");
-        lands("/bin/sh -c '/opt/x; /sbin/modprobe nf_tables'", Some("bin/sh"), Some("opt/x"), "sh");
-        lands("/bin/sh -c 'evil|logger'", Some("bin/sh"), Some("usr/local/bin/evil"), "sh");
+        lands("env FOO=1 evil", "usr/bin/env", Some("usr/local/bin/evil"), "env");
+        lands("-/usr/bin/nice -n 5 /opt/x --flag", "usr/bin/nice", Some("opt/x"), "nice");
+        lands("/bin/sh -c '/opt/x --quiet'", "bin/sh", Some("opt/x"), "sh");
+        lands("/bin/sh /opt/x", "bin/sh", Some("opt/x"), "sh");
+        lands("/bin/sh -c 'exec evil --daemon'", "bin/sh", Some("usr/local/bin/evil"), "sh exec");
+        lands("sudo -u bob env nohup evil", "usr/bin/sudo", Some("usr/local/bin/evil"), "sudo env nohup");
+        lands("timeout -s KILL 30 evil", "usr/bin/timeout", Some("usr/local/bin/evil"), "timeout");
+        lands("flock /run/l -c 'evil a'", "usr/bin/flock", Some("usr/local/bin/evil"), "flock");
+        lands("flock /run/l /opt/x", "usr/bin/flock", Some("opt/x"), "flock");
+        // A -c inside a cluster of short options.
+        lands("/bin/bash -lc '/opt/x --y'", "bin/bash", Some("opt/x"), "bash");
+        lands("/bin/sh -ec '/usr/bin/true'", "bin/sh", Some("usr/bin/true"), "sh");
+        lands("/usr/bin/env -S \"/tmp/evil a\"", "usr/bin/env", Some("tmp/evil"), "env");
+        lands("/bin/sh -c 'FOO=1 BAR=2 /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh");
+        // A builtin in front no longer stands in for the command after it.
+        lands("/bin/sh -c 'true; /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh");
+        lands("/bin/sh -c '[ -x /tmp/evil ] && /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh");
+        // Naming nothing that can be found reads as unresolvable, not as the
+        // wrapper.
+        lands("/bin/sh -c 'cd /tmp && ./evil'", "bin/sh", None, "sh");
+        lands("env", "usr/bin/env", None, "env");
+        lands("env notinstalled", "usr/bin/env", None, "env");
 
-        // Naming nothing, or something that is not on disk, reads as
-        // unresolvable rather than as the wrapper.
-        lands("env", Some("usr/bin/env"), None, "env");
-        lands("env notinstalled", Some("usr/bin/env"), None, "env");
+        // More than one program: one entry each, declared by the carrier,
+        // whose own target stays the shell.
+        let many = |command: &str, want: &[Option<&str>]| {
+            let (e, more) = run(command, Some("bin/sh"));
+            assert_eq!(e.target_path, Some(dir.join("bin/sh")), "{command}");
+            assert_eq!(e.raw["runs_commands"], want.len().to_string(), "{command}");
+            let got: Vec<_> = more.iter().map(|m| m.target_path.clone()).collect();
+            assert_eq!(got, want.iter().map(|w| w.map(|w| dir.join(w))).collect::<Vec<_>>(), "{command}");
+            for m in &more {
+                assert_eq!(m.raw["declared_by_entry"], e.id);
+                assert_eq!(m.source, e.source);
+            }
+            more
+        };
+        many("/bin/sh -c '/opt/x; /sbin/modprobe nf_tables'", &[Some("opt/x"), Some("sbin/modprobe")]);
+        many("/bin/sh -c 'evil|logger'", &[Some("usr/local/bin/evil"), Some("usr/bin/logger")]);
+        many("/bin/sh -c '/opt/x -i $$1 2>/dev/null | sed -n p >&2'", &[Some("opt/x"), Some("usr/bin/sed")]);
+        many("/bin/sh -c \"/opt/x -- $(cat /proc/cmdline)\"", &[Some("opt/x"), Some("usr/bin/cat")]);
+        let named = many("/bin/sh -c '$CMD --go; /opt/x'", &[None, Some("opt/x")]);
+        assert_eq!(named[0].name, "$CMD", "an unknowable command word is still named");
 
+        // Only builtins, or a shell with nothing to run: the shell is what runs.
+        for bare in ["/bin/sh -c 'true'", "-/bin/sh"] {
+            let (e, more) = run(bare, Some("bin/sh"));
+            assert_eq!(e.target_path, Some(dir.join("bin/sh")), "{bare}");
+            assert!(!e.raw.contains_key("target_wrapped_by") && more.is_empty(), "{bare}");
+        }
+        // Shell text as the whole command, as cron runs it.
+        let (cron, _) = run("true; /tmp/evil", Some("usr/bin/true"));
+        assert_eq!(cron.target_path, Some(dir.join("tmp/evil")));
+        assert!(!cron.raw.contains_key("target_wrapped_by"), "nothing wrapped it");
         // Not a wrapper, or a target the collector took from elsewhere.
-        let plain = run("/opt/x arg", Some("opt/x"));
+        let (plain, more) = run("/opt/x arg", Some("opt/x"));
         assert_eq!(plain.target_path, Some(dir.join("opt/x")));
-        assert!(!plain.raw.contains_key("target_wrapped_by"));
-        let elsewhere = run("env evil", Some("usr/lib/security/pam_exec.so"));
+        assert!(plain.raw.is_empty() && more.is_empty());
+        let (elsewhere, _) = run("env evil", Some("usr/lib/security/pam_exec.so"));
         assert_eq!(elsewhere.target_path, Some(dir.join("usr/lib/security/pam_exec.so")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
