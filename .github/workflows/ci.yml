@@ -6,8 +6,45 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+  # The VM matrix is skipped on pull requests that do not touch the tool, so
+  # it also runs nightly: a distribution image can change under an unchanged
+  # tree.
+  schedule:
+    - cron: '17 4 * * *'
 
 jobs:
+  changes:
+    # The VM matrix is the slowest part of a run, five to fifteen minutes a
+    # job. A pull request push that touches only prose waits for none of it.
+    # Pushes to main, tags, the nightly run and a manual run always get it,
+    # because a release is gated on it.
+    runs-on: ubuntu-latest
+    outputs:
+      vm: ${{ steps.diff.outputs.vm }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "vm=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Against the previous push to this pull request, or its base where
+          # there is none or a force-push made it unreachable.
+          from=${BEFORE:-$BASE}
+          git cat-file -e "$from^{commit}" 2>/dev/null || from=$BASE
+          if git diff --name-only "$from" "$HEAD_SHA" | grep -qE '^(src/|Cargo\.(toml|lock)$|ci/|\.github/workflows/)'; then
+            echo "vm=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "vm=false" >> "$GITHUB_OUTPUT"
+          fi
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -90,9 +127,10 @@ jobs:
     # §13's PANIX loop, on every supported distribution that publishes a cloud
     # image, in a real VM: a real boot, a real systemd, a kernel of its own.
     # It gates a release, as §1 says every supported distribution does.
-    needs: static
+    needs: [static, changes]
+    if: needs.changes.outputs.vm == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 200
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -104,29 +142,20 @@ jobs:
           name: unbidden-x86_64-unknown-linux-musl
           path: target/x86_64-unknown-linux-musl/release
       - name: hardware virtualisation
-        id: accel
         run: |
           # GitHub's Linux runners expose /dev/kvm to the kvm group only. It
           # is opened up directly rather than through a udev rule, which is
-          # applied asynchronously and can lose a race with the next line.
+          # applied asynchronously and can lose a race with the check below.
+          # Emulated, a Debian 12 run took 36 minutes against 6; a runner
+          # without KVM fails here instead, and the job is re-run.
           [ -e /dev/kvm ] && sudo chmod 666 /dev/kvm
           ls -l /dev/kvm 2>&1 || true
-          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-            echo "kvm=yes" >> "$GITHUB_OUTPUT"
-          else
-            # Emulated, the loop is many times slower but still says
-            # something about the code; failing for want of a device says
-            # only which runner the job landed on.
-            echo "::warning::no /dev/kvm on this runner; the VM runs emulated"
-            echo "kvm=no" >> "$GITHUB_OUTPUT"
-          fi
+          [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "no usable /dev/kvm on this runner"; exit 1; }
       - run: |
           chmod +x target/x86_64-unknown-linux-musl/release/unbidden
           sudo apt-get update -qq
           sudo apt-get install -y qemu-system-x86 qemu-utils xorriso
       - run: ci/vm-harness.sh --image ${{ matrix.image }}
-        # Emulated, a Debian 12 run took 36 minutes against 6 with KVM.
-        timeout-minutes: ${{ steps.accel.outputs.kvm == 'yes' && 80 || 180 }}
 
   persistence-mint:
     # Mint and LMDE publish no cloud image, so the same loop and the same live

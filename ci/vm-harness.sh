@@ -79,7 +79,7 @@ esac
 for tool in qemu-system-x86_64 qemu-img xorriso ssh-keygen curl ssh scp; do
     command -v "$tool" >/dev/null || { echo "missing: $tool" >&2; exit 1; }
 done
-[ -r /dev/kvm ] || echo "warning: /dev/kvm not readable, the VM will be emulated and slow" >&2
+[ -r /dev/kvm ] || echo "warning: /dev/kvm not readable, the VM will be slow" >&2
 
 INSTANCE="$WORK/$IMAGE"
 mkdir -p "$CACHE" "$INSTANCE"
@@ -223,11 +223,7 @@ qemu-system-x86_64 \
 # and coming back underneath it.
 printf '   waiting for ssh and cloud-init on 127.0.0.1:%s' "$PORT"
 ready=0
-# Twelve and a half minutes under KVM. Emulated, provisioning alone (a
-# package install with gcc in it) runs many times slower.
-tries=150
-[ ${#ACCEL[@]} -eq 0 ] && tries=900
-for _ in $(seq 1 "$tries"); do
+for _ in $(seq 1 150); do
     if vm_ssh 'test -f /root/.harness-ready' 2>/dev/null; then
         ready=1
         break
