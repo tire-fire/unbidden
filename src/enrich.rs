@@ -192,6 +192,14 @@ const NO_PROGRAM: &[&str] = &[
 /// 4.9 GB and the OOM killer. Real commands nest two or three deep.
 const MAX_NESTING: usize = 16;
 
+/// How many entries one command line may add. The text is the author's, and
+/// 20,000 programs in one user unit would otherwise be 20,000 rows, all in the
+/// default view. Past this the carrier says how many it holds and how many
+/// were listed. The carrier stays in view on the evidence it has: text any
+/// user can write is unpackaged, and a packaged file edited to say this much
+/// reads as modified.
+const MAX_COMMANDS_LISTED: usize = 32;
+
 /// Keywords that precede the command they govern.
 const LEADING_KEYWORDS: &[&str] = &["if", "elif", "while", "until", "do", "!", "{", "time", "then", "else"];
 
@@ -253,7 +261,12 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
             }
             _ => {
                 entry.note("runs_commands", runs.len().to_string());
+                let mut listed = 0;
                 for run in &runs {
+                    if listed == MAX_COMMANDS_LISTED {
+                        entry.note("commands_listed", format!("the first {listed} of {}", runs.len()));
+                        break;
+                    }
                     let name = run.program.clone().unwrap_or_else(|| run.words.first().cloned().unwrap_or_default());
                     if !seen.insert((entry.id.clone(), name.clone())) {
                         continue;
@@ -276,6 +289,7 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
                     e.note("chain", "command line");
                     e.note("declared_by_entry", &entry.id);
                     out.push(e);
+                    listed += 1;
                 }
             }
         }
@@ -1684,6 +1698,28 @@ mod tests {
         }
         let named: Vec<_> = runs.iter().filter_map(|r| r.program.as_deref()).collect();
         assert_eq!(named, ["cat", "/opt/x"]);
+    }
+
+    #[test]
+    fn one_file_lists_a_bounded_number_of_commands() {
+        let dir = std::env::temp_dir().join(format!("unbidden-flood-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        let text: Vec<String> = (0..20_000).map(|i| format!("/tmp/e{i}")).collect();
+        let mut e = Entry::new(Kind::SystemdUnit, dir.join("etc/systemd/system/x.service"), "x.service");
+        e.command = Some(format!("/bin/sh -c '{}'", text.join(";")).into_bytes());
+        e.target_path = Some(dir.join("bin/sh"));
+        let more = look_through_wrappers(&root, std::slice::from_mut(&mut e));
+        assert_eq!(more.len(), MAX_COMMANDS_LISTED);
+        assert_eq!(e.raw["runs_commands"], "20000");
+        assert_eq!(e.raw["commands_listed"], format!("the first {MAX_COMMANDS_LISTED} of 20000"));
+        // A command line inside the cap lists everything and says nothing.
+        let mut e = Entry::new(Kind::SystemdUnit, dir.join("etc/systemd/system/y.service"), "y.service");
+        e.command = Some(b"/bin/sh -c '/tmp/a; /tmp/b'".to_vec());
+        e.target_path = Some(dir.join("bin/sh"));
+        assert_eq!(look_through_wrappers(&root, std::slice::from_mut(&mut e)).len(), 2);
+        assert!(!e.raw.contains_key("commands_listed"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
