@@ -144,8 +144,9 @@ jobs:
           # GitHub's Linux runners expose /dev/kvm to the kvm group only. It
           # is opened up directly rather than through a udev rule, which is
           # applied asynchronously and can lose a race with the check below.
-          # Emulated, a Debian 12 run took 36 minutes against 6; a runner
-          # without KVM fails here instead, and the job is re-run.
+          # Emulated, a Debian 12 run took 36 minutes against 6, so a runner
+          # without KVM fails here instead. Nothing retries it: re-run the
+          # failed job by hand, which lands it on another runner.
           [ -e /dev/kvm ] && sudo chmod 666 /dev/kvm
           ls -l /dev/kvm 2>&1 || true
           [ -r /dev/kvm ] && [ -w /dev/kvm ] || { echo "no usable /dev/kvm on this runner"; exit 1; }
