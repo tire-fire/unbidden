@@ -69,10 +69,13 @@ in_box() { docker exec -e DEBIAN_FRONTEND=noninteractive "$name" "$@"; }
 # itself as Ubuntu 24.04. Its apt sources already point at Mint's own
 # repository, pinned above Ubuntu's, and Mint's base-files there is what
 # makes a Mint 22 install say so. Installing it is the step the image skips.
+# It is asked for by release, because Ubuntu's installed copy carries the
+# higher version and apt will not trade it down for a pin below 1000.
 if [ "$MINT_BASE" -eq 1 ]; then
     say "installing Mint's own base-files"
     in_box apt-get -qq update
-    in_box apt-get -qq install -y base-files >/dev/null
+    in_box apt-get -qq install -y --allow-downgrades base-files/wilma >/dev/null
+    in_box grep -qx 'ID=linuxmint' /etc/os-release || { echo "Mint's base-files did not take" >&2; exit 1; }
 fi
 
 if [ "$INSTALL" -eq 1 ]; then

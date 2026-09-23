@@ -236,11 +236,13 @@ jobs:
             expect_version: "21"
           # The published Mint 22 image carries Ubuntu's base-files and
           # reports Ubuntu 24.04. Mint's own base-files, from the Mint
-          # repository its apt sources already name, makes it Mint 22.
+          # repository its apt sources already name, makes it Mint 22. It has
+          # to be asked for by release: Ubuntu's copy is a higher version, and
+          # apt keeps an installed newer version over any pin below 1000.
           - image: linuxmintd/mint22-amd64
             expect_id: linuxmint
             expect_version: "22"
-            prep: apt-get -qq update && apt-get -qq install -y base-files >/dev/null &&
+            prep: apt-get -qq update && apt-get -qq install -y --allow-downgrades base-files/wilma >/dev/null &&
           - image: linuxmintd/lmde6-amd64
             expect_id: linuxmint
             expect_version: "6"
