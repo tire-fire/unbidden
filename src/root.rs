@@ -226,13 +226,14 @@ impl Root {
     /// The check lives here rather than in a collector because a collector
     /// that reaches past its own helper would otherwise silently opt out.
     pub fn escaping_link(&self, rel: &Path) -> Option<PathBuf> {
-        let (_, resolved) = self.home_confinement(rel)?;
-        resolved.err()
+        self.home_confinement(rel)?.ok()?.err()
     }
 
-    /// For a path under a home: the home it is under, and either the path it
-    /// resolves to inside that home or, as the error, where it leads instead.
-    fn home_confinement(&self, rel: &Path) -> Option<(PathBuf, Result<PathBuf, PathBuf>)> {
+    /// For a path under a home: either the path it resolves to inside that
+    /// home or, as the inner error, where it leads instead. A path that cannot
+    /// be resolved at all carries the resolution's error, so the caller refuses
+    /// it rather than falling back to an open that follows links.
+    fn home_confinement(&self, rel: &Path) -> Option<io::Result<Result<PathBuf, PathBuf>>> {
         let homes = self.homes.get()?;
         // Homes are recorded as they sit inside the root; every path here is
         // compared in the same coordinates so an offline root lines up.
@@ -244,19 +245,18 @@ impl Root {
             .max_by_key(|h| h.as_os_str().len())?;
         // The home itself may be a link (/home/carol -> /srv/carol); what the
         // path must stay inside is where the home really is.
-        let real_home = self.resolve(&home).ok()?;
-        let resolved = self.resolve(&here).ok()?;
-        if resolved.starts_with(&real_home) {
-            Some((home, Ok(resolved)))
-        } else {
-            Some((home, Err(Path::new("/").join(resolved))))
-        }
+        let confined = self.resolve(&home).and_then(|real_home| {
+            let resolved = self.resolve(&here)?;
+            Ok(if resolved.starts_with(&real_home) { Ok(resolved) } else { Err(Path::new("/").join(resolved)) })
+        });
+        Some(confined)
     }
 
     pub fn open(&self, rel: impl AsRef<Path>) -> io::Result<File> {
         let rel = rel.as_ref();
         match self.home_confinement(rel) {
-            Some((_, Err(target))) => Err(io::Error::new(
+            Some(Err(e)) => Err(e),
+            Some(Ok(Err(target))) => Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
                     "{} leads out of its owner's home to {}; recorded as a link, not followed",
@@ -266,7 +266,7 @@ impl Root {
             )),
             // Opened as resolved, refusing every link, so a link swapped in
             // between the check and the open fails instead of escaping.
-            Some((_, Ok(resolved))) => Ok(File::from(self.open_resolved(&resolved, OFlags::RDONLY)?)),
+            Some(Ok(Ok(resolved))) => Ok(File::from(self.open_resolved(&resolved, OFlags::RDONLY)?)),
             None => Ok(File::from(self.open_raw(rel, OFlags::RDONLY)?)),
         }
     }
@@ -611,6 +611,22 @@ mod tests {
         }
         assert!(root.escaping_link(Path::new("home/alice/.zshrc")).is_none());
         assert_eq!(root.read("home/alice/.zshrc").unwrap(), b"export EDITOR=vi\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_home_path_that_cannot_be_resolved_is_refused_with_the_reason() {
+        let dir = tmpdir("unresolvable");
+        std::fs::create_dir_all(dir.join("home/alice")).unwrap();
+        std::os::unix::fs::symlink(".loop", dir.join("home/alice/.loop")).unwrap();
+        let root = Root::at(&dir).unwrap();
+        root.set_homes(vec![PathBuf::from("/home/alice")]);
+
+        // A missing dotfile is the common case and must stay NotFound, which
+        // collectors treat as absent rather than as a failure.
+        assert_eq!(root.read("home/alice/.bashrc").unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert!(root.read("home/alice/.loop").is_err());
+        assert!(root.escaping_link(Path::new("home/alice/.loop")).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
