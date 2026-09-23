@@ -1023,7 +1023,8 @@
       "enabled": "unknown",
       "flags": [
         "degraded-enablement",
-        "unpackaged"
+        "unpackaged",
+        "target-missing"
       ],
       "id": "e8a378fd85ee3301ebdf6a62eed8fe5f338b42edf1fb23dedf69e42b0266ddfa",
       "kind": "kernel_module",
@@ -1039,13 +1040,14 @@
         "directive": "install",
         "loaded_state": "unknown: /proc/modules was not readable",
         "module": "nf_tables",
-        "target_provenance": "dash (intact)"
+        "target_provenance": "unpackaged",
+        "target_wrapped_by": "sh"
       },
       "source": "<ROOT>/etc/modprobe.d/evil.conf",
       "source_utf8": true,
-      "target_path": "<ROOT>/bin/sh",
+      "target_path": "<ROOT>/tmp/stage.sh",
       "target_path_utf8": true,
-      "target_sha256": "d51a09c3d70de62a8740a60ddbfb1bb7b547e41ce2a53f931030db62f74a4d11",
+      "target_sha256": null,
       "trigger": "boot"
     },
     {

@@ -24,6 +24,7 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
         // names a file just as surely as an absolute path does, and it needs
         // the same provenance lookup and the same interpreter chain.
         resolve_bare_targets(root, &mut scan.entries);
+        look_through_wrappers(root, &mut scan.entries);
     });
 
     // Before the paths are gathered, so the interpreters and sourced files
@@ -142,6 +143,173 @@ fn resolve_bare_targets(root: &Root, entries: &mut [Entry]) {
             entry.target_path = Some(found);
         }
     }
+}
+
+/// Programs that run a program named in their own arguments: the options of
+/// each that take a value, and how many operands come before the command.
+/// Taken at face value, `ExecStart=env evil` runs coreutils, and coreutils
+/// is packaged and intact.
+const WRAPPERS: &[(&str, &[&str], usize)] = &[
+    ("env", &["-u", "-C", "--unset", "--chdir"], 0),
+    ("nice", &["-n", "--adjustment"], 0),
+    ("nohup", &[], 0),
+    ("setsid", &[], 0),
+    ("stdbuf", &["-i", "-o", "-e"], 0),
+    ("ionice", &["-c", "-n", "-p", "-P", "-u", "--class", "--classdata"], 0),
+    ("sudo", &["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user", "--group"], 0),
+    // A priority, a duration, a lock file.
+    ("chrt", &[], 1),
+    ("timeout", &["-s", "-k", "--signal", "--kill-after"], 1),
+    ("flock", &["-w", "-E", "--timeout", "--conflict-exit-code"], 1),
+    // A script path, or with -c the command text itself.
+    ("sh", &["-o", "-O"], 0),
+    ("bash", &["-o", "-O"], 0),
+    ("dash", &["-o"], 0),
+    ("zsh", &["-o"], 0),
+    // Inside `sh -c` text, the shell hands itself over to what follows.
+    ("exec", &["-a"], 0),
+];
+
+/// Replaces a wrapper as an entry's target with what the wrapper runs. Where
+/// that cannot be worked out, the target is dropped, and the entry reads as
+/// unresolvable rather than as the wrapper, which would vouch for it.
+fn look_through_wrappers(root: &Root, entries: &mut [Entry]) {
+    for entry in entries {
+        if entry.raw.contains_key("target_unverifiable") {
+            continue;
+        }
+        let Some(command) = &entry.command else { continue };
+        let mut argv = argv(command);
+        let Some(first) = argv.first_mut() else { continue };
+        // systemd's ExecStart= prefixes.
+        let trimmed = first.trim_start_matches(['-', '@', '+', '!', ':']).to_string();
+        *first = trimmed;
+        // Only where the wrapper is what the collector took as the target: a
+        // PAM module or a udev key has a target that is not argv[0].
+        let head = Path::new(&argv[0]).file_name().map(|n| n.to_string_lossy().into_owned());
+        let Some(head) = head.filter(|h| wrapper(h).is_some()) else { continue };
+        if entry.target_path.as_ref().is_some_and(|t| t.file_name().and_then(|n| n.to_str()) != Some(head.as_str())) {
+            continue;
+        }
+
+        let mut by = Vec::new();
+        let mut wrapped = Some(argv);
+        while let Some(argv) = wrapped.take() {
+            let name = argv.first().and_then(|a| Path::new(a).file_name()).map(|n| n.to_string_lossy().into_owned());
+            match name.as_deref().and_then(wrapper) {
+                Some(w) if by.len() < 8 => {
+                    wrapped = unwrap(w, &argv[1..]);
+                    // A shell given no script and no -c text is itself what
+                    // runs: the emergency and debug shells are exactly that.
+                    if wrapped.is_none() && matches!(w.0, "sh" | "bash" | "dash" | "zsh") {
+                        wrapped = Some(argv);
+                        break;
+                    }
+                    by.push(w.0);
+                    if wrapped.is_none() {
+                        break;
+                    }
+                }
+                _ => {
+                    wrapped = Some(argv);
+                    break;
+                }
+            }
+        }
+        if by.is_empty() {
+            continue;
+        }
+        entry.note("target_wrapped_by", by.join(" "));
+        entry.target_path = wrapped.and_then(|argv| {
+            let program = argv.into_iter().next()?;
+            if program.starts_with('/') {
+                Some(root.abs(root.rel(Path::new(&program))))
+            } else {
+                resolve_bare_command(root, entry.kind, program.as_bytes())
+            }
+        });
+    }
+}
+
+fn wrapper(name: &str) -> Option<&'static (&'static str, &'static [&'static str], usize)> {
+    WRAPPERS.iter().find(|w| w.0 == name)
+}
+
+/// The argv a wrapper hands on, or None where it names no program.
+fn unwrap(w: &(&str, &[&str], usize), args: &[String]) -> Option<Vec<String>> {
+    let (name, valued, mut operands) = *w;
+    let shell = matches!(name, "sh" | "bash" | "dash" | "zsh");
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        // `-c text` in a shell or flock is the command, as one string.
+        if a == "-c" && (shell || name == "flock") {
+            return args.get(i + 1).map(|text| argv(text.as_bytes()));
+        }
+        if a == "--" {
+            i += 1;
+            break;
+        }
+        if a.starts_with('-') && a.len() > 1 {
+            i += if valued.contains(&a) { 2 } else { 1 };
+            continue;
+        }
+        if matches!(name, "env" | "sudo") && a.contains('=') {
+            i += 1;
+            continue;
+        }
+        if operands > 0 {
+            operands -= 1;
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    let rest = args.get(i..)?;
+    (!rest.is_empty()).then(|| rest.to_vec())
+}
+
+/// Words the way a shell splits them: whitespace, quotes and backslashes.
+/// A shell operator ends the command, so what follows `;` or `|` is never
+/// mistaken for this command's arguments.
+fn argv(command: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(command);
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut started = false;
+    let mut quote = None;
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some('"') | None, '\\') => {
+                if let Some(n) = chars.next() {
+                    word.push(n);
+                }
+                started = true;
+            }
+            (Some(_), c) => word.push(c),
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    out.push(std::mem::take(&mut word));
+                    started = false;
+                }
+            }
+            (None, ';' | '|' | '&' | '<' | '>' | '(' | ')') => break,
+            (None, c) => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        out.push(word);
+    }
+    out
 }
 
 fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
@@ -999,6 +1167,58 @@ mod tests {
         let editor = by_command("editor");
         assert_eq!(editor.raw["target_provenance"], "vim (intact)");
         assert_eq!(editor.raw["target_resolves_to"], dir.join("usr/bin/vim.basic").to_string_lossy());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_wrapper_is_looked_through_to_what_it_runs() {
+        let dir = std::env::temp_dir().join(format!("unbidden-wrappers-{}", std::process::id()));
+        for d in ["usr/bin", "usr/local/bin", "bin", "opt"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        for f in ["usr/bin/env", "usr/bin/nice", "usr/bin/sudo", "usr/bin/timeout", "usr/bin/flock", "bin/sh", "usr/local/bin/evil", "opt/x"] {
+            std::fs::write(dir.join(f), b"").unwrap();
+        }
+        let root = Root::at(&dir).unwrap();
+        let run = |command: &str, target: Option<&str>| {
+            let mut e = Entry::new(Kind::SystemdUnit, dir.join("etc/systemd/system/u.service"), "u.service");
+            e.command = Some(command.as_bytes().to_vec());
+            e.target_path = target.map(|t| dir.join(t));
+            look_through_wrappers(&root, std::slice::from_mut(&mut e));
+            e
+        };
+        let lands = |command: &str, target: Option<&str>, want: Option<&str>, by: &str| {
+            let e = run(command, target);
+            assert_eq!(e.target_path, want.map(|w| dir.join(w)), "{command}");
+            assert_eq!(e.raw.get("target_wrapped_by").map(String::as_str), Some(by), "{command}");
+        };
+
+        lands("env FOO=1 evil", Some("usr/bin/env"), Some("usr/local/bin/evil"), "env");
+        lands("-/usr/bin/nice -n 5 /opt/x --flag", Some("usr/bin/nice"), Some("opt/x"), "nice");
+        lands("/bin/sh -c '/opt/x --quiet; true'", Some("bin/sh"), Some("opt/x"), "sh");
+        lands("/bin/sh /opt/x", Some("bin/sh"), Some("opt/x"), "sh");
+        lands("/bin/sh -c 'exec evil --daemon'", Some("bin/sh"), Some("usr/local/bin/evil"), "sh exec");
+        let shell = run("-/bin/sh", Some("bin/sh"));
+        assert_eq!(shell.target_path, Some(dir.join("bin/sh")), "a bare shell runs the shell");
+        assert!(!shell.raw.contains_key("target_wrapped_by"));
+        lands("sudo -u bob env nohup evil", Some("usr/bin/sudo"), Some("usr/local/bin/evil"), "sudo env nohup");
+        lands("timeout -s KILL 30 evil", Some("usr/bin/timeout"), Some("usr/local/bin/evil"), "timeout");
+        lands("flock /run/l -c 'evil a'", Some("usr/bin/flock"), Some("usr/local/bin/evil"), "flock");
+        lands("flock /run/l /opt/x", Some("usr/bin/flock"), Some("opt/x"), "flock");
+        lands("/bin/sh -c '/opt/x; /sbin/modprobe nf_tables'", Some("bin/sh"), Some("opt/x"), "sh");
+        lands("/bin/sh -c 'evil|logger'", Some("bin/sh"), Some("usr/local/bin/evil"), "sh");
+
+        // Naming nothing, or something that is not on disk, reads as
+        // unresolvable rather than as the wrapper.
+        lands("env", Some("usr/bin/env"), None, "env");
+        lands("env notinstalled", Some("usr/bin/env"), None, "env");
+
+        // Not a wrapper, or a target the collector took from elsewhere.
+        let plain = run("/opt/x arg", Some("opt/x"));
+        assert_eq!(plain.target_path, Some(dir.join("opt/x")));
+        assert!(!plain.raw.contains_key("target_wrapped_by"));
+        let elsewhere = run("env evil", Some("usr/lib/security/pam_exec.so"));
+        assert_eq!(elsewhere.target_path, Some(dir.join("usr/lib/security/pam_exec.so")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
