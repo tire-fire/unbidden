@@ -6,3 +6,9 @@ fuzz/target
 fuzz/Cargo.lock
 fuzz/artifacts
 fuzz/coverage
+
+# What the release job builds. Ignored rather than left untracked so that
+# cargo publish does not read the working tree as dirty and refuse.
+/build-*
+/unbidden-*-linux-musl
+/SHA256SUMS
