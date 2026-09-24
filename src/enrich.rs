@@ -163,6 +163,9 @@ const WRAPPERS: &[(&str, &[&str], usize)] = &[
     ("stdbuf", &["-i", "-o", "-e"], 0),
     ("ionice", &["-c", "-n", "-p", "-P", "-u", "--class", "--classdata"], 0),
     ("sudo", &["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user", "--group"], 0),
+    ("command", &[], 0),
+    ("time", &["-f", "-o", "--format", "--output"], 0),
+    ("xargs", &["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter", "--max-args", "--max-procs"], 0),
     // A priority, a duration, a lock file.
     ("chrt", &[], 1),
     ("timeout", &["-s", "-k", "--signal", "--kill-after"], 1),
@@ -182,7 +185,7 @@ const WRAPPERS: &[(&str, &[&str], usize)] = &[
 const NO_PROGRAM: &[&str] = &[
     "cd", "export", "exit", "set", "unset", "local", "shift", "return", "read", "wait", "trap", "ulimit",
     "umask", "true", "false", ":", "echo", "printf", "test", "[", "[[", "readonly", "declare", "alias",
-    "break", "continue", "fi", "done", "esac", "}", "then", "else",
+    "break", "continue", "fi", "done", "esac", "}", "then", "else", "builtin",
 ];
 
 /// How deep shell text may nest before the programs inside it are given up as
@@ -201,7 +204,7 @@ const MAX_NESTING: usize = 16;
 const MAX_COMMANDS_LISTED: usize = 32;
 
 /// Keywords that precede the command they govern.
-const LEADING_KEYWORDS: &[&str] = &["if", "elif", "while", "until", "do", "!", "{", "time", "then", "else"];
+const LEADING_KEYWORDS: &[&str] = &["if", "elif", "while", "until", "do", "!", "{", "then", "else"];
 
 /// One program a command line starts, the wrappers it was reached through,
 /// and the simple command it came from. `program` is None where the command
@@ -246,7 +249,7 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
         // The one case with nothing to change: a single program, reached
         // directly, which is what the collector already has.
         if let [run] = runs.as_slice() {
-            if run.by.is_empty() && run.program.as_deref() == Some(head.as_str()) {
+            if entry.target_path.is_some() && run.by.is_empty() && run.program.as_deref() == Some(head.as_str()) {
                 continue;
             }
         }
@@ -434,145 +437,113 @@ fn unwrap(w: &(&str, &[&str], usize), args: &[String], depth: usize) -> Unwrappe
     }
 }
 
-/// Shell text split into simple commands, each a list of words. `;`, `&`,
-/// `|`, newlines and parentheses end a command; redirections and their files
-/// are dropped; `$(...)` and backquoted text are commands of their own,
-/// appended after the rest.
+/// Shell text split into simple commands, each a list of words, by the bash
+/// grammar. Redirections and their files are dropped; assignments are kept as
+/// `NAME=value` words for `programs` to skip; the insides of `$(...)` and
+/// backquotes are commands of their own. Loop and case headers, tests and
+/// declarations are not commands and yield none.
+///
+/// The walk is iterative: a tree built from hostile text is as deep as its
+/// nesting, and a recursive walk would overflow on it. Substitutions count
+/// against `MAX_NESTING`; past it, and wherever the text does not parse, a
+/// command whose program cannot be known stands in, so the entry reads as
+/// unresolvable rather than as whatever parsed.
 fn commands(text: &str, depth: usize) -> Vec<Vec<String>> {
-    let mut out: Vec<Vec<String>> = Vec::new();
-    let mut nested: Vec<Vec<String>> = Vec::new();
-    let mut cmd: Vec<String> = Vec::new();
-    let mut word = String::new();
-    let mut started = false;
-    let mut redirect = false;
-    let mut quote: Option<char> = None;
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-
-    // A word ends: keep it, unless it names a redirection's file.
-    fn end_word(word: &mut String, started: &mut bool, redirect: &mut bool, cmd: &mut Vec<String>) {
-        if *started {
-            let w = std::mem::take(word);
-            if *redirect {
-                *redirect = false;
-            } else {
-                cmd.push(w);
-            }
-            *started = false;
-        }
+    let unknown = || vec!["$(".to_string()];
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&tree_sitter_bash::LANGUAGE.into()).is_err() {
+        return vec![unknown()];
     }
-
-    while i < chars.len() {
-        let c = chars[i];
-        match (quote, c) {
-            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
-            (Some('\''), c) => word.push(c),
-            (None | Some('"'), '$') if chars.get(i + 1) == Some(&'(') => {
-                let (inner, end) = balanced(&chars, i + 2);
-                nested.extend(nested_commands(&inner, depth));
-                word.push_str("$(");
-                started = true;
-                i = end;
-            }
-            (None | Some('"'), '`') => {
-                let end = chars[i + 1..].iter().position(|c| *c == '`').map_or(chars.len(), |p| i + 1 + p);
-                nested.extend(nested_commands(&chars[i + 1..end].iter().collect::<String>(), depth));
-                word.push('`');
-                started = true;
-                i = end;
-            }
-            (None | Some('"'), '\\') => {
-                if let Some(n) = chars.get(i + 1) {
-                    if *n != '\n' {
-                        word.push(*n);
-                        started = true;
-                    }
-                }
-                i += 1;
-            }
-            (Some(_), c) => word.push(c),
-            (None, '\'' | '"') => {
-                quote = Some(c);
-                started = true;
-            }
-            (None, '#') if !started => {
-                while i < chars.len() && chars[i] != '\n' {
-                    i += 1;
-                }
-                continue;
-            }
-            (None, '<' | '>') => {
-                // `2>` names a descriptor, not an argument.
-                if started && !redirect && word.chars().all(|c| c.is_ascii_digit()) {
-                    word.clear();
-                    started = false;
-                }
-                end_word(&mut word, &mut started, &mut redirect, &mut cmd);
-                while chars.get(i + 1).is_some_and(|n| matches!(n, '<' | '>' | '&' | '|')) {
-                    i += 1;
-                }
-                // `>&2` duplicates a descriptor and names no file.
-                if chars.get(i + 1).is_some_and(|n| n.is_ascii_digit()) && chars.get(i) == Some(&'&') {
-                    i += 1;
-                    while chars.get(i + 1).is_some_and(|n| n.is_ascii_digit()) {
-                        i += 1;
-                    }
-                } else {
-                    redirect = true;
-                }
-            }
-            (None, ';' | '&' | '|' | '\n' | '(' | ')') => {
-                end_word(&mut word, &mut started, &mut redirect, &mut cmd);
-                redirect = false;
-                if !cmd.is_empty() {
-                    out.push(std::mem::take(&mut cmd));
-                }
-            }
-            (None, c) if c.is_whitespace() => end_word(&mut word, &mut started, &mut redirect, &mut cmd),
-            (None, c) => {
-                word.push(c);
-                started = true;
-            }
-        }
-        i += 1;
+    let Some(tree) = parser.parse(text, None) else { return vec![unknown()] };
+    let src = text.as_bytes();
+    let mut out = Vec::new();
+    if tree.root_node().has_error() {
+        out.push(unknown());
     }
-    end_word(&mut word, &mut started, &mut redirect, &mut cmd);
-    if !cmd.is_empty() {
-        out.push(cmd);
-    }
-    out.extend(nested);
-    out
-}
-
-/// The commands inside a substitution, or past `MAX_NESTING` a single command
-/// whose program cannot be known.
-fn nested_commands(inner: &str, depth: usize) -> Vec<Vec<String>> {
-    if depth < MAX_NESTING { commands(inner, depth + 1) } else { vec![vec!["$(".to_string()]] }
-}
-
-/// The text up to the parenthesis that closes one already open at `from`,
-/// and the index of that parenthesis.
-fn balanced(chars: &[char], from: usize) -> (String, usize) {
-    let mut depth = 1;
-    let mut quote: Option<char> = None;
-    let mut i = from;
-    while i < chars.len() {
-        match (quote, chars[i]) {
-            (Some(q), c) if c == q => quote = None,
-            (Some(_), _) => {}
-            (None, c @ ('\'' | '"')) => quote = Some(c),
-            (None, '(') => depth += 1,
-            (None, ')') => {
-                depth -= 1;
-                if depth == 0 {
-                    return (chars[from..i].iter().collect(), i);
+    let mut cursor = tree.walk();
+    let mut stack = vec![(tree.root_node(), depth)];
+    while let Some((node, depth)) = stack.pop() {
+        let mut depth = depth;
+        match node.kind() {
+            "command" => out.push(command_words(node, src)),
+            "command_substitution" | "process_substitution" => {
+                if depth >= MAX_NESTING {
+                    out.push(unknown());
+                    continue;
                 }
+                depth += 1;
             }
             _ => {}
         }
-        i += 1;
+        let children: Vec<_> = node.children(&mut cursor).collect();
+        stack.extend(children.into_iter().rev().map(|c| (c, depth)));
     }
-    (chars[from..].iter().collect(), chars.len())
+    out
+}
+
+/// The words of one simple command, quotes removed.
+fn command_words(node: tree_sitter::Node, src: &[u8]) -> Vec<String> {
+    let mut cursor = node.walk();
+    node.named_children(&mut cursor)
+        .filter(|c| !c.kind().ends_with("_redirect"))
+        .map(|c| match c.kind() {
+            "command_name" => c.named_child(0).map_or_else(|| text_of(c, src), |w| unquoted(w, src)),
+            _ => unquoted(c, src),
+        })
+        .collect()
+}
+
+/// A word as the shell hands it to a program: quotes removed and escapes
+/// resolved. Expansions stay as written, since only running the shell could
+/// resolve them.
+fn unquoted(node: tree_sitter::Node, src: &[u8]) -> String {
+    let text = text_of(node, src);
+    match node.kind() {
+        // A substitution is a command of its own, found by the walk in
+        // `commands`. Left as text here, it would be found a second time
+        // when an `eval` or `sh -c` word is parsed again. `$(:)` still reads
+        // as an unknowable word, and parses again to a builtin that runs
+        // nothing; the grammar rejects an empty `$()`.
+        "command_substitution" | "process_substitution" => "$(:)".to_string(),
+        "string" => {
+            let mut cursor = node.walk();
+            node.children(&mut cursor)
+                .filter(|c| c.kind() != "\"")
+                .map(|c| match c.kind() {
+                    "string_content" => unescaped(&text_of(c, src), |e| matches!(e, '$' | '`' | '"' | '\\' | '\n')),
+                    _ => unquoted(c, src),
+                })
+                .collect()
+        }
+        "raw_string" => text.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')).unwrap_or(&text).to_string(),
+        "ansi_c_string" => text.strip_prefix("$'").and_then(|t| t.strip_suffix('\'')).unwrap_or(&text).to_string(),
+        "concatenation" => {
+            let mut cursor = node.walk();
+            node.children(&mut cursor).map(|c| unquoted(c, src)).collect()
+        }
+        "word" => unescaped(&text, |_| true),
+        _ => text,
+    }
+}
+
+/// `text` with each backslash before a character `escapes` accepts removed.
+fn unescaped(text: &str, escapes: impl Fn(char) -> bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match chars.peek() {
+            Some(&e) if c == '\\' && escapes(e) => {
+                out.push(e);
+                chars.next();
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn text_of(node: tree_sitter::Node, src: &[u8]) -> String {
+    String::from_utf8_lossy(&src[node.byte_range()]).into_owned()
 }
 
 fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
@@ -732,10 +703,12 @@ const BIN_DIRS: [&str; 6] =
 /// systemd has allowed bare executable names for years, and `ExecStart=
 /// systemctl ...` appears in a hundred vendor units on an ordinary host.
 fn resolve_bare_command(root: &Root, kind: Kind, command: &[u8]) -> Option<PathBuf> {
-    let text = String::from_utf8_lossy(command);
-    let first = text.split_whitespace().next()?;
-    // systemd's argument prefixes, and a quoted first token.
-    let first = first.trim_start_matches(['-', '@', '+', '!', ':']).trim_matches(['"', '\'']);
+    // The command word as `look_through_wrappers` reads it, so the two agree
+    // on what the collector's target is: in `[ -f x ] || evil` that is evil,
+    // since a test is not a command.
+    let lines = commands(&String::from_utf8_lossy(command), 0);
+    // systemd's argument prefixes.
+    let first = lines.first()?.first()?.trim_start_matches(['-', '@', '+', '!', ':']);
     if first.is_empty() || first.contains('/') {
         return None;
     }
@@ -1575,6 +1548,15 @@ mod tests {
         // A builtin in front no longer stands in for the command after it.
         lands("/bin/sh -c 'true; /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh");
         lands("/bin/sh -c '[ -x /tmp/evil ] && /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh");
+        // A collector that found no target in text opening with a test.
+        let (e, more) = run("[ ! -f /run/x ] || /opt/x --go || true", None);
+        assert_eq!((e.target_path, more.len()), (Some(dir.join("opt/x")), 0));
+        assert_eq!(resolve_bare_command(&root, Kind::PkgHook, b"[ -f /run/x ] && evil"), Some(dir.join("usr/local/bin/evil")));
+        lands("/bin/sh -c 'builtin cd /tmp; /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh");
+        lands("/bin/sh -c 'command /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh command");
+        lands("/bin/sh -c 'time -p /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh time");
+        // A loop header is not a command; the body is.
+        lands("/bin/sh -c 'for f in /a /b; do /tmp/evil \"$f\"; done'", "bin/sh", Some("tmp/evil"), "sh");
         // Naming nothing that can be found reads as unresolvable, not as the
         // wrapper.
         lands("/bin/sh -c 'cd /tmp && ./evil'", "bin/sh", None, "sh");
@@ -1599,6 +1581,7 @@ mod tests {
         many("/bin/sh -c 'evil|logger'", &[Some("usr/local/bin/evil"), Some("usr/bin/logger")]);
         many("/bin/sh -c '/opt/x -i $$1 2>/dev/null | sed -n p >&2'", &[Some("opt/x"), Some("usr/bin/sed")]);
         many("/bin/sh -c \"/opt/x -- $(cat /proc/cmdline)\"", &[Some("opt/x"), Some("usr/bin/cat")]);
+        many("/bin/sh -c 'cat /f | xargs -0 -I {} /opt/x {}'", &[Some("usr/bin/cat"), Some("opt/x")]);
         let named = many("/bin/sh -c '$CMD --go; /opt/x'", &[None, Some("opt/x")]);
         assert_eq!(named[0].name, "$CMD", "an unknowable command word is still named");
 

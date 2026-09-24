@@ -21,6 +21,11 @@ rustix = { version = "1.1", features = ["fs", "process", "system", "termios"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# The bash grammar, for reading shell text a mechanism runs. Its parser is
+# table-driven, so text nested fifty thousand deep parses in linear time
+# instead of exhausting the stack, as the recursive-descent parsers did.
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25.1"
 
 [profile.release]
 lto = true

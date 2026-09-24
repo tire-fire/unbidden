@@ -428,6 +428,9 @@ dpkg's manifests are MD5
 dpkg
 hand-rolled
 Plain text, not worth a dependency
+Shell text
+tree-sitter, tree-sitter-bash
+The grammar and its C runtime, statically linked, about 1.5 MB. Table-driven, so text nested 50,000 deep parses in linear time; yash-syntax and brush-parser recurse per level and overflow the stack at 1,000 and 10,000
 Binary constraints
 Single binary, no config file required, no runtime data files. Anything it needs to know about paths and mechanisms is compiled in. The operator copies one file to a host and runs it.
 Size is not a concern but should be watched — a 50 MB binary is awkward to move onto a host over a constrained channel.
@@ -548,6 +551,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5: shell text was read as one program. Each program in it is now an entry of its own, declared by the carrier, and builtins name no program.
 • §5: a command's first word kept the shell operator after it, so /opt/a.sh; was the target of a cron line.
 • §5: a Python module or script was not followed to the programs it starts; a dnf plugin module is one.
+• §5: shell text was split by a lexer written for unbidden. The bash grammar splits it now, so the headers of for, case and select are no longer read as commands, and command, time with options and xargs are looked through; builtin names no program.
 • §7: rpm symlinks were never verified.
 • §7: maintainer scripts were hidden whatever had been done to them.
 • §11: offline roots were refused outright on kernels before 5.6.
@@ -560,8 +564,6 @@ Open. Each is a known departure from this spec or a gap in it, with what is true
 • A D-Bus policy file in system.d that names no activatable service is not an entry of its own (§5).
 • The interpreter chain follows one hop: from a script to its interpreter, to a file it sources or execs by full path, or to a program a Python file starts with a literal argument. Programs named in shell text are found through wrappers and the search path, but a program named by a variable or built at run time reads as unresolvable rather than followed (§5).
 • The wrapper table is incomplete, and an option of a wrapper it does not list is skipped as one word rather than making the target unresolvable (§5).
-• Some shell forms are not looked through: command, builtin, time with options, and xargs. The headers of for, case and select are read as commands and flagged unresolvable (§5).
-• Shell text is split by a lexer written for unbidden rather than a shell grammar. Replacing it with an existing parser is planned; the candidates that recurse per nesting level need the depth budget in front of them (§5).
 • A generated unit is attributed to systemd-generator but not linked to the generator entry that wrote it (§6).
 • snapd's state.json, option 1 of §7, is not read; the snap verdict rests on the installed images and the unit's shape.
 • BerkeleyDB and ndb rpm databases are not read, so RHEL 7 and 8 report provenance Unknown (§7).
