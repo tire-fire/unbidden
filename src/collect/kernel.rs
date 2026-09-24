@@ -17,13 +17,26 @@ pub struct Kernel;
 
 /// udev's own order. The first directory holding a given file name wins
 /// outright; whatever survives that is applied in lexical order by basename.
-const UDEV_DIRS: &[&str] =
-    &["etc/udev/rules.d", "run/udev/rules.d", "usr/lib/udev/rules.d", "lib/udev/rules.d"];
+// In the order udev and kmod read them, which for udev decides which of two
+// same-named rules files is used: /etc, /run, /usr/local/lib, /usr/lib.
+const UDEV_DIRS: &[&str] = &[
+    "etc/udev/rules.d",
+    "run/udev/rules.d",
+    "usr/local/lib/udev/rules.d",
+    "usr/lib/udev/rules.d",
+    "lib/udev/rules.d",
+];
 
-const MODPROBE_DIRS: &[&str] = &["etc/modprobe.d", "usr/lib/modprobe.d", "lib/modprobe.d"];
+const MODPROBE_DIRS: &[&str] =
+    &["etc/modprobe.d", "run/modprobe.d", "usr/local/lib/modprobe.d", "usr/lib/modprobe.d", "lib/modprobe.d"];
 
-const MODULES_LOAD_DIRS: &[&str] =
-    &["etc/modules-load.d", "run/modules-load.d", "usr/lib/modules-load.d", "lib/modules-load.d"];
+const MODULES_LOAD_DIRS: &[&str] = &[
+    "etc/modules-load.d",
+    "run/modules-load.d",
+    "usr/local/lib/modules-load.d",
+    "usr/lib/modules-load.d",
+    "lib/modules-load.d",
+];
 
 /// Module name to the rest of its /proc/modules fields. `None` where the
 /// loaded set could not be read at all, which is never the same as empty.
@@ -802,7 +815,7 @@ mod tests {
             "the canonical path is kept, got {}",
             rule.source.display()
         );
-        assert_eq!(rule.raw.get("rank").map(String::as_str), Some("2"), "rank is the search-path position");
+        assert_eq!(rule.raw.get("rank").map(String::as_str), Some("3"), "rank is the search-path position");
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -826,6 +839,9 @@ mod tests {
         put(&dir, "etc/udev/rules.d/60-same.rules", br#"ACTION=="add", RUN+="/etc/version""#);
         put(&dir, "usr/lib/udev/rules.d/60-same.rules", br#"ACTION=="add", RUN+="/vendor/version""#);
         put(&dir, "usr/lib/udev/rules.d/61-other.rules", br#"ACTION=="add", RUN+="/vendor/other""#);
+        // /usr/local/lib sits between /run and /usr/lib.
+        put(&dir, "usr/local/lib/udev/rules.d/62-local.rules", br#"ACTION=="add", RUN+="/local/version""#);
+        put(&dir, "usr/lib/udev/rules.d/62-local.rules", br#"ACTION=="add", RUN+="/vendor/local""#);
 
         let s = scan(&dir);
         let admin = by_command(&s, "/etc/version");
@@ -833,14 +849,32 @@ mod tests {
         let other = by_command(&s, "/vendor/other");
 
         assert_eq!(admin.raw.get("rank").map(String::as_str), Some("0"));
-        assert_eq!(vendor.raw.get("rank").map(String::as_str), Some("2"));
+        assert_eq!(vendor.raw.get("rank").map(String::as_str), Some("3"));
         assert!(admin.raw.get("shadows").unwrap().ends_with("usr/lib/udev/rules.d/60-same.rules"));
         assert!(vendor.raw.get("shadowed_by").unwrap().ends_with("etc/udev/rules.d/60-same.rules"));
         assert_eq!(admin.enabled, Enablement::Enabled);
         assert_eq!(vendor.enabled, Enablement::Disabled, "udev never reads the replaced file");
         assert!(!other.raw.contains_key("shadowed_by"), "a differently named file is untouched");
+        let local = by_command(&s, "/local/version");
+        assert_eq!(local.raw.get("rank").map(String::as_str), Some("2"));
+        assert_eq!(local.enabled, Enablement::Enabled);
+        assert_eq!(by_command(&s, "/vendor/local").enabled, Enablement::Disabled);
         // The flag itself belongs to the enrichment pass, not here.
         assert!(!vendor.has_flag(Flag::ShadowsVendorUnit));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn module_configuration_in_run_and_usr_local_is_read() {
+        let dir = tree("moddirs");
+        put(&dir, "run/modprobe.d/a.conf", b"install a /opt/a\n");
+        put(&dir, "usr/local/lib/modprobe.d/b.conf", b"install b /opt/b\n");
+        put(&dir, "usr/local/lib/modules-load.d/c.conf", b"c\n");
+        let s = scan(&dir);
+        let mut sources: Vec<String> =
+            of_kind(&s, Kind::KernelModule).iter().map(|e| e.source.strip_prefix(&dir).unwrap().display().to_string()).collect();
+        sources.sort();
+        assert_eq!(sources, ["run/modprobe.d/a.conf", "usr/local/lib/modprobe.d/b.conf", "usr/local/lib/modules-load.d/c.conf"]);
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -807,18 +807,24 @@ fn standard_roots(kind: Kind) -> &'static [&'static str] {
             "/usr/share/systemd/user/",
             "/usr/local/share/systemd/user/",
         ],
-        Kind::Udev => &["/etc/udev/", "/run/udev/", "/usr/lib/udev/", "/lib/udev/"],
+        Kind::Udev => &["/etc/udev/", "/run/udev/", "/usr/local/lib/udev/", "/usr/lib/udev/", "/lib/udev/"],
         Kind::KernelModule => &[
             "/etc/modules",
             "/etc/modules-load.d/",
             "/etc/modprobe.d/",
             "/run/modules-load.d/",
+            "/run/modprobe.d/",
+            "/usr/local/lib/modules-load.d/",
+            "/usr/local/lib/modprobe.d/",
             "/usr/lib/modprobe.d/",
             "/lib/modprobe.d/",
             "/usr/lib/modules-load.d/",
+            "/lib/modules-load.d/",
             "/proc/modules",
         ],
-        Kind::XdgAutostart => &["/etc/xdg/autostart/"],
+        // ponytail: a prefix, since the session directories are globbed;
+        // /etc/xdg/xdg-*/ is root's to write either way.
+        Kind::XdgAutostart => &["/etc/xdg/autostart/", "/etc/xdg/xdg-"],
         Kind::Cron => &["/etc/crontab", "/etc/cron", "/etc/anacrontab", "/var/spool/cron"],
         _ => &[],
     }
@@ -2199,5 +2205,28 @@ mod tests {
         assert_eq!(at(&format!("{} {}", "X".repeat(50), "Y".repeat(60))), Some((51, 60, "base64")));
         assert_eq!(encoded_run(b""), None);
         assert_eq!(encoded_run(&[0xff; 300]), None);
+    }
+
+    #[test]
+    fn every_directory_a_collector_walks_is_a_standard_location() {
+        let dir = std::env::temp_dir().join(format!("unbidden-standard-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        for (kind, path) in [
+            (Kind::Udev, "usr/local/lib/udev/rules.d/60-x.rules"),
+            (Kind::KernelModule, "run/modprobe.d/x.conf"),
+            (Kind::KernelModule, "usr/local/lib/modprobe.d/x.conf"),
+            (Kind::KernelModule, "usr/local/lib/modules-load.d/x.conf"),
+            (Kind::KernelModule, "lib/modules-load.d/x.conf"),
+            (Kind::XdgAutostart, "etc/xdg/xdg-xubuntu/autostart/x.desktop"),
+        ] {
+            let mut e = Entry::new(kind, dir.join(path), "x");
+            apply_location(&root, &mut e);
+            assert!(!e.has_flag(Flag::NonStandardLocation), "{path}");
+        }
+        let mut e = Entry::new(Kind::Udev, dir.join("opt/udev/rules.d/60-x.rules"), "x");
+        apply_location(&root, &mut e);
+        assert!(e.has_flag(Flag::NonStandardLocation), "the check still fails closed");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

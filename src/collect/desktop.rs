@@ -62,6 +62,34 @@ fn autostart(cx: &mut Ctx) -> Vec<Entry> {
         }
     }
 
+    // Sessions put /etc/xdg/xdg-$DESKTOP_SESSION ahead of /etc/xdg in
+    // $XDG_CONFIG_DIRS (Debian's x11-common, 60x11-common_xdg_path). Which
+    // session runs is not on disk, so each is read and named.
+    // ponytail: a session directory that is itself a symlink is not read.
+    for session in cx.dir("etc/xdg") {
+        let Some(name) = session.name.to_str().and_then(|n| n.strip_prefix("xdg-")) else { continue };
+        if !session.is_dir {
+            continue;
+        }
+        let name = name.to_string();
+        let dir = Path::new("etc/xdg").join(&session.name).join("autostart");
+        for ent in cx.dir(&dir) {
+            if !is_desktop(&ent.name) {
+                continue;
+            }
+            let rel = dir.join(&ent.name);
+            let Some(mut e) = desktop_file(cx, &rel, &ent.name, None) else { continue };
+            e.note("desktop_session", &name);
+            if let Some(&ix) = system.get(&ent.name) {
+                let vendor = out[ix].source.to_string_lossy().into_owned();
+                e.note("overrides", vendor);
+                let mine = e.source.to_string_lossy().into_owned();
+                append_note(&mut out[ix], "overridden_by", &mine);
+            }
+            out.push(e);
+        }
+    }
+
     let users = cx.users;
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     for u in users {
@@ -1286,6 +1314,26 @@ mod tests {
             Some(dir.join("usr/share/cinnamon/applets/menu@cinnamon.org/5.4/applet.js"))
         );
         assert_eq!(e[0].raw.get("metadata_uuid_mismatch").map(String::as_str), Some("other@x"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_session_autostart_directory_is_read_and_named() {
+        let dir = tree("session");
+        put(&dir, "etc/xdg/autostart/tray.desktop", b"[Desktop Entry]\nExec=/usr/bin/tray\n");
+        put(&dir, "etc/xdg/xdg-xubuntu/autostart/tray.desktop", b"[Desktop Entry]\nExec=/opt/tray\n");
+        put(&dir, "etc/xdg/xdg-Lubuntu/autostart/lx.desktop", b"[Desktop Entry]\nExec=/usr/bin/lx\n");
+        put(&dir, "etc/xdg/xdg-notadir", b"");
+        let (entries, status) = run(&dir);
+        assert_eq!(status, Status::Complete, "a file named like a session is skipped, not an error");
+        let tray = by_name(&entries, Kind::XdgAutostart, "tray.desktop");
+        assert_eq!(tray.len(), 2);
+        let session = tray.iter().find(|e| e.raw.contains_key("desktop_session")).unwrap();
+        let system = tray.iter().find(|e| !e.raw.contains_key("desktop_session")).unwrap();
+        assert_eq!(session.raw["desktop_session"], "xubuntu");
+        assert_eq!(session.raw.get("overrides"), Some(&system.source.to_string_lossy().into_owned()));
+        assert_eq!(system.raw.get("overridden_by"), Some(&session.source.to_string_lossy().into_owned()));
+        assert_eq!(by_name(&entries, Kind::XdgAutostart, "lx.desktop")[0].raw["desktop_session"], "Lubuntu");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
