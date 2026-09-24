@@ -532,6 +532,10 @@ Contact with real systems also found these, now fixed and described in the secti
 • §3: user-controlled content could make collectors partial.
 • §3: terminal control sequences reached the operator's terminal raw.
 • §3: enrichment had no panic isolation.
+• §3: a symlink loop, or a file where a directory belongs, inside a home made a collector partial. Both are recorded as limited reads now; a permission error, or a loop outside any home, still makes the collector partial.
+• §3: nested shell text — $(...), backquotes, eval, sh -c text and wrappers — was followed without bound, so one user unit could exhaust a root scan's memory or stack. One depth budget now covers all of them, and past it the program reads as unresolvable.
+• §3: one command line could add an entry per program in it, without limit. At most 32 are listed; the carrier records how many there are.
+• §4: an entry synthesised from shell text could share an id with a shebang-chain entry, which makes a diff refuse to run, and two lines starting the same program kept only one trigger. These entries are keyed by the entry that declared them, and a last pass over every entry gives any remaining collision a suffixed name.
 • §5 and §6: /usr/local/lib/systemd was never walked, and the generator directories' precedence was wrong.
 • §5: every per-account unit read as non-standard-location.
 • §5: environment.d drop-ins were reported twice on merged-usr hosts.
@@ -539,16 +543,25 @@ Contact with real systems also found these, now fixed and described in the secti
 • §6: one account could answer for another's units.
 • §7: the snap verdict could be claimed by naming a file, and ran before the package databases.
 • §7: bare command names were never looked up.
+• §7: a target whose provenance lookup failed read as verified, and its entry could be hidden.
+• §5: a wrapper — env, nice, nohup, sudo, timeout, flock, a shell given a script or -c text, and the like — stood in for the program it runs, and vouched for it.
+• §5: shell text was read as one program. Each program in it is now an entry of its own, declared by the carrier, and builtins name no program.
+• §5: a command's first word kept the shell operator after it, so /opt/a.sh; was the target of a cron line.
+• §5: a Python module or script was not followed to the programs it starts; a dnf plugin module is one.
 • §7: rpm symlinks were never verified.
 • §7: maintainer scripts were hidden whatever had been done to them.
 • §11: offline roots were refused outright on kernels before 5.6.
 • §12: the aarch64 static check could not fail.
+• §13: CI reported Mint 22 as Ubuntu, could not plant dbus on Fedora, checked snaps against one with no service, and failed at random on a KVM permission race.
 • §13: the PANIX loop had never run, checked only an entry's kind, counted an unplanted mechanism as a skip, and gated nothing. PANIX's own systemd module plants into /usr/local/lib/systemd/system, the directory §5 was not walking.
 Open. Each is a known departure from this spec or a gap in it, with what is true today:
 • Cron identity includes the command, so an edited cron job diffs as removed plus added (§4). Changing it needs a different notion of which cron line is "the same line", and none suggests itself that the duplicate-id guard would not then trip on.
 • An account found only through a crontab spool is given /home/<name> as its home, which may not be where its files are (§5).
 • A D-Bus policy file in system.d that names no activatable service is not an entry of its own (§5).
-• The interpreter chain follows one hop, and only paths written out in full (§5).
+• The interpreter chain follows one hop: from a script to its interpreter, to a file it sources or execs by full path, or to a program a Python file starts with a literal argument. Programs named in shell text are found through wrappers and the search path, but a program named by a variable or built at run time reads as unresolvable rather than followed (§5).
+• The wrapper table is incomplete, and an option of a wrapper it does not list is skipped as one word rather than making the target unresolvable (§5).
+• Some shell forms are not looked through: command, builtin, time with options, and xargs. The headers of for, case and select are read as commands and flagged unresolvable (§5).
+• Shell text is split by a lexer written for unbidden rather than a shell grammar. Replacing it with an existing parser is planned; the candidates that recurse per nesting level need the depth budget in front of them (§5).
 • A generated unit is attributed to systemd-generator but not linked to the generator entry that wrote it (§6).
 • snapd's state.json, option 1 of §7, is not read; the snap verdict rests on the installed images and the unit's shape.
 • BerkeleyDB and ndb rpm databases are not read, so RHEL 7 and 8 report provenance Unknown (§7).
@@ -556,3 +569,4 @@ Open. Each is a known departure from this spec or a gap in it, with what is true
 • A live scan and an offline scan of the same host cannot be diffed against each other, because the kernel collector is partial offline and enablement is inferred (§9, §11). The Collector trait's requires_live declaration is unused.
 • Extended attributes on an offline root are read by path, relying on the deep walk never following a link to reach one (§11).
 • The security.capability parser has no fuzz target, since an unprivileged fuzzer cannot set the attribute (§13).
+• The PANIX loop compares each scan with its baseline, and the diff refuses when any collector's coverage differs between the two. A collector that is partial on one scan for an unrelated reason therefore hides a detection by another (§13); an LMDE run missed dbus this way.
