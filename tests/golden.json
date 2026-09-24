@@ -20,7 +20,7 @@
       "raw": {
         "dangling_symlink": "true",
         "scope": "system",
-        "search_path_rank": "0",
+        "search_path_rank": "4",
         "symlink_target": "/dev/null",
         "unit_type": "service"
       },
@@ -50,7 +50,7 @@
         "dropin_for": "ssh.service",
         "exec.ExecStartPre": "/opt/pre.sh",
         "scope": "system",
-        "search_path_rank": "0"
+        "search_path_rank": "4"
       },
       "source": "<ROOT>/etc/systemd/system/ssh.service.d/override.conf",
       "source_utf8": true,
@@ -82,7 +82,7 @@
         "env.LD_PRELOAD": "/tmp/hook.so",
         "exec.ExecStart": "/opt/telemetry --quiet",
         "scope": "system",
-        "search_path_rank": "0",
+        "search_path_rank": "4",
         "target_provenance": "unpackaged",
         "unit_type": "service",
         "user": "root",
@@ -149,7 +149,7 @@
       "raw": {
         "exec.ExecStart": "/usr/sbin/sshd -D",
         "scope": "system",
-        "search_path_rank": "2",
+        "search_path_rank": "10",
         "target_provenance": "unpackaged",
         "unit_type": "service",
         "wanted_by": "multi-user.target"
@@ -180,7 +180,7 @@
       },
       "raw": {
         "scope": "system",
-        "search_path_rank": "2",
+        "search_path_rank": "10",
         "timer.OnCalendar": "daily",
         "timer.Persistent": "true",
         "unit_type": "timer",
@@ -1018,6 +1018,66 @@
       "trigger": "login"
     },
     {
+      "command": "/sbin/modprobe --ignore-install nf_tables",
+      "command_utf8": true,
+      "enabled": "unknown",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "d7f216406cb8bf8ed2664892a6645245adf0750fcde3812ff407406466d83bba",
+      "kind": "kernel_module",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "/sbin/modprobe",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "chain": "command line",
+        "declared_by_entry": "e8a378fd85ee3301ebdf6a62eed8fe5f338b42edf1fb23dedf69e42b0266ddfa",
+        "target_wrapped_by": "sh"
+      },
+      "source": "<ROOT>/etc/modprobe.d/evil.conf",
+      "source_utf8": true,
+      "target_path": "<ROOT>/sbin/modprobe",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "boot"
+    },
+    {
+      "command": "/tmp/stage.sh",
+      "command_utf8": true,
+      "enabled": "unknown",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "f9b03b48aead6b8365e5f6807d6d8df9b10b4b3bedf9358684d4ee6b4a507713",
+      "kind": "kernel_module",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "/tmp/stage.sh",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "chain": "command line",
+        "declared_by_entry": "e8a378fd85ee3301ebdf6a62eed8fe5f338b42edf1fb23dedf69e42b0266ddfa",
+        "target_wrapped_by": "sh"
+      },
+      "source": "<ROOT>/etc/modprobe.d/evil.conf",
+      "source_utf8": true,
+      "target_path": "<ROOT>/tmp/stage.sh",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "boot"
+    },
+    {
       "command": "/bin/sh -c '/tmp/stage.sh; /sbin/modprobe --ignore-install nf_tables'",
       "command_utf8": true,
       "enabled": "unknown",
@@ -1039,6 +1099,7 @@
         "directive": "install",
         "loaded_state": "unknown: /proc/modules was not readable",
         "module": "nf_tables",
+        "runs_commands": "2",
         "target_provenance": "dash (intact)"
       },
       "source": "<ROOT>/etc/modprobe.d/evil.conf",
@@ -1209,6 +1270,7 @@
     ],
     "deep": false,
     "distro_id": "debian",
+    "distro_like": "",
     "distro_version": "12",
     "enablement": "inferred",
     "hostname": "golden",

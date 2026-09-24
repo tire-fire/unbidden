@@ -125,7 +125,20 @@ impl Collector for Shell {
         // session. Neither runs a command itself, which is exactly why an
         // LD_PRELOAD parked here is quiet.
         profile(cx, Path::new(PAM_ENV_CONF), None, Syntax::PamEnvConf, &mut seen, &mut out);
+        // /lib/environment.d and /usr/lib/environment.d are one directory on
+        // a merged-usr host. Walked by name, every drop-in in it was reported
+        // twice, once under the alias (§5).
+        let mut walked: BTreeSet<(u64, u64)> = BTreeSet::new();
         for dir in ENVIRONMENT_D {
+            match cx.root.dir_identity(dir) {
+                Ok(id) if walked.insert(id) => {}
+                Ok(_) => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    cx.note_failed(dir, &e);
+                    continue;
+                }
+            }
             for ent in cx.dir(dir) {
                 if ent.is_dir || !ent.name.to_string_lossy().ends_with(".conf") {
                     continue;
@@ -206,17 +219,33 @@ fn profile(
         return;
     }
 
+    // A profile linked out of its owner's home is reported as the link it
+    // is and not read: following it is how `~/.bashrc -> /etc/shadow` would
+    // put another account's secrets in the report. That is the policy
+    // working, so it is noted rather than counted as a failed read, which any
+    // user could otherwise use to make every later baseline incomparable.
+    if let Some(target) = cx.root.escaping_link(rel) {
+        e.note("not_followed", format!("leads out of its owner's home to {}", target.display()));
+        cx.note_limited(format!(
+            "{}: leads out of its owner's home to {}, not followed",
+            cx.root.abs(rel).display(),
+            target.display()
+        ));
+        out.push(e);
+        return;
+    }
+
     let (bytes, truncated) = match cx.root.read_capped(rel, READ_CAP) {
         Ok(v) => v,
         Err(err) => {
-            cx.note_unreadable(format!("{}: {err}", cx.root.abs(rel).display()));
+            cx.note_failed(cx.root.abs(rel), &err);
             e.note("unreadable", err.to_string());
             out.push(e);
             return;
         }
     };
     if truncated {
-        cx.note_unreadable(format!(
+        cx.note_limited(format!(
             "{} (truncated at {READ_CAP} bytes)",
             cx.root.abs(rel).display()
         ));
@@ -256,7 +285,7 @@ fn preload(cx: &mut Ctx, out: &mut Vec<Entry>) {
         return;
     };
     if truncated {
-        cx.note_unreadable(format!("{} (truncated at 65536 bytes)", cx.root.abs(rel).display()));
+        cx.note_limited(format!("{} (truncated at 65536 bytes)", cx.root.abs(rel).display()));
     }
 
     let mut libs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
@@ -916,12 +945,12 @@ mod tests {
         fs::write(dir.join("home/bob/.zshrc"), &nasty).unwrap();
 
         let scan = run(&dir);
-        match &scan.header.collectors[0].status {
-            Status::Partial { unreadable } => {
-                assert!(unreadable.iter().any(|u| u.contains(".bashrc") && u.contains("truncated")))
-            }
-            other => panic!("expected the capped read to be recorded, got {other:?}"),
-        }
+        // A file past the cap is the cap doing its job. Recording it as a
+        // failed read would let any user make every baseline incomparable by
+        // growing their own .bashrc.
+        let st = &scan.header.collectors[0];
+        assert!(matches!(st.status, Status::Complete), "a capped read is not a failed one: {st:?}");
+        assert!(st.truncated.iter().any(|u| u.contains(".bashrc") && u.contains("truncated")));
 
         let a = by_name(&scan, Kind::ShellProfile, ".bashrc");
         assert!(a.raw.contains_key("truncated"));
@@ -957,7 +986,8 @@ mod tests {
         // points at; following it would let the report carry the contents of
         // any file on the host.
         assert!(!b.raw.contains_key("env.LD_PRELOAD"), "a link out of the home is not read through");
-        assert!(b.raw["unreadable"].contains("symlink out of its owner's home"));
+        assert!(b.raw["not_followed"].contains("leads out of its owner's home"));
+        assert!(!b.raw.contains_key("unreadable"), "a refused link is not a failed read");
 
         let p = by_name(&scan, Kind::ShellProfile, ".profile");
         assert_eq!(p.raw["symlink_target"], "/tmp/gone");
@@ -990,5 +1020,44 @@ mod tests {
         assert!(by_name(&scan, Kind::LdPreload, "/opt/weird/lib.so").command.is_some());
         fs::remove_dir_all(&dir).unwrap();
     }
-}
 
+    #[test]
+    fn a_profile_linked_out_of_its_home_is_recorded_without_making_the_scan_partial() {
+        // Any user can do this to their own home. Were the refusal counted as
+        // an unreadable path, the collector would turn Partial and every
+        // later --against would refuse to run.
+        let dir = tmpdir("escape");
+        fs::create_dir_all(dir.join("home/alice")).unwrap();
+        fs::create_dir_all(dir.join("etc")).unwrap();
+        fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/bash\n").unwrap();
+        fs::write(dir.join("etc/shadow"), "root:$6$secret:19000::::::\n").unwrap();
+        symlink("/etc/shadow", dir.join("home/alice/.bashrc")).unwrap();
+        symlink("../../etc/shadow", dir.join("home/alice/.profile")).unwrap();
+
+        let scan = run(&dir);
+        let st = &scan.header.collectors[0];
+        assert!(matches!(st.status, Status::Complete), "{st:?}");
+        assert_eq!(st.truncated.iter().filter(|t| t.contains("not followed")).count(), 2, "{st:?}");
+
+        for name in [".bashrc", ".profile"] {
+            let e = by_name(&scan, Kind::ShellProfile, name);
+            assert!(e.raw["not_followed"].contains("etc/shadow"), "{:?}", e.raw);
+            assert!(e.raw.keys().all(|k| !k.starts_with("env.")), "the target was not read");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_environment_drop_in_reached_through_merged_usr_is_reported_once() {
+        let dir = tmpdir("envd");
+        fs::create_dir_all(dir.join("usr/lib/environment.d")).unwrap();
+        fs::write(dir.join("usr/lib/environment.d/99-environment.conf"), "PATH=/usr/bin\n").unwrap();
+        symlink("usr/lib", dir.join("lib")).unwrap();
+
+        let scan = run(&dir);
+        let found: Vec<_> = scan.entries.iter().filter(|e| e.name == "99-environment.conf").collect();
+        assert_eq!(found.len(), 1, "{:?}", found.iter().map(|e| &e.source).collect::<Vec<_>>());
+        assert_eq!(found[0].source, dir.join("usr/lib/environment.d/99-environment.conf"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+}

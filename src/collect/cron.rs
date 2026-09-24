@@ -417,6 +417,7 @@ fn command_target(cmd: &[u8], e: &mut Entry) -> Option<PathBuf> {
             rest = tail;
             continue;
         }
+        let word = super::shell_word(word);
         return word.starts_with(b"/").then(|| path(word));
     }
     None

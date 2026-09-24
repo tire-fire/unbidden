@@ -76,23 +76,33 @@ or SSSD account with nothing on local disk won't be picked up.
 | --- | --- | --- | --- |
 | Debian | 12, 13 | dpkg | |
 | Ubuntu | 22.04, 24.04 | dpkg | snap |
-| Linux Mint | 21.x, LMDE | dpkg | Cinnamon |
+| Linux Mint | 21.x, 22.x, LMDE | dpkg | Cinnamon |
 | Fedora | current, current-1 | rpm (sqlite) | |
 
 Anything else works on a best-effort basis. With no package database it reports
 provenance as unknown rather than calling every file on the box unpackaged.
 
-Mint 22.x isn't tested. Nobody publishes an image that's actually Mint 22, and
-underneath it's Ubuntu noble with Cinnamon on top. Both are already covered.
+The published Mint 22 container image reports itself as Ubuntu 24.04. CI
+installs Mint's own `base-files` from the Mint repository it already points
+at, which makes it Mint 22, and tests that.
 
 ## Testing
 
-`cargo test` covers the collectors, a golden record of a full scan, and a
-mutation pass that takes a synthetic tree apart 120 ways. CI runs the packaging
-checks against eight distro images, boots real GNOME and Cinnamon sessions, and
-fuzzes the parsers. `ci/vm-harness.sh` boots a throwaway VM and plants every
-mechanism [PANIX](https://github.com/Aegrah/PANIX) supports, checking that each
-one is reported, and that it stops being reported once reverted.
+`cargo test` covers the collectors, a golden record of a full scan, a
+mutation pass that takes a synthetic tree apart 120 ways, and a lint that
+keeps every module off the filesystem except through the scan root. Every
+parser has a `cargo-fuzz` target.
+
+CI runs the release binary in all nine supported images and checks its
+verdicts against the image's own `rpm` or `dpkg`: who owns each file, and
+whether it is intact. It boots real GNOME and Cinnamon sessions. It also
+plants every mechanism [PANIX](https://github.com/Aegrah/PANIX) supports that
+is in scope, and checks that each is reported, from the right place and tied
+to the planted payload, and that it stops being reported once reverted. That
+runs in a VM for Debian, Ubuntu and Fedora (`ci/vm-harness.sh`) and in a
+systemd container for Mint and LMDE (`ci/container-harness.sh`).
+`ci/panix-coverage.tsv` lists every PANIX module with its ATT&CK technique,
+including the ones out of scope and why.
 
 ## License
 

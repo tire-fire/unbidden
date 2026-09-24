@@ -1,0 +1,5 @@
+#!/bin/sh
+interface=$1 status=$2
+case $status in
+  up) /usr/local/bin/vpn-up "$interface" ;;
+esac

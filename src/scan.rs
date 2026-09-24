@@ -70,6 +70,19 @@ impl<'a> Ctx<'a> {
             Err(_) => {}
         }
 
+        // A symlink out of its owner's home is refused by the root (§3), and
+        // the refusal is the policy working, not a path the scan could not
+        // reach. Any user can plant one in their own home, so recording it as
+        // unreadable would let every account on the host declare every later
+        // baseline incomparable.
+        if let Some(target) = self.root.escaping_link(rel) {
+            self.note_limited(format!(
+                "{}: leads out of its owner's home to {}, not followed",
+                rel.display(),
+                target.display()
+            ));
+            return None;
+        }
 
         match self.root.read_capped(rel, cap) {
             Ok((bytes, truncated)) => {
@@ -85,7 +98,7 @@ impl<'a> Ctx<'a> {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => {
-                self.unreadable.push(format!("{}: {e}", rel.display()));
+                self.note_failed(rel, &e);
                 None
             }
         }
@@ -97,7 +110,7 @@ impl<'a> Ctx<'a> {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => {
-                self.unreadable.push(format!("{}: {e}", rel.display()));
+                self.note_failed(rel, &e);
                 Vec::new()
             }
         }
@@ -105,6 +118,35 @@ impl<'a> Ctx<'a> {
 
     pub fn note_unreadable(&mut self, what: impl std::fmt::Display) {
         self.unreadable.push(what.to_string());
+    }
+
+    /// A path that could not be read or listed. Under a home, a link loop or
+    /// a file where a directory belongs is the owner's own construction and
+    /// fails the same way on every run, so it is recorded as a limit rather
+    /// than a failure: otherwise any account could make every baseline
+    /// incomparable with one symlink. Anywhere else, and for any other error,
+    /// the scan could not look, and the collector is Partial.
+    pub fn note_failed(&mut self, path: impl AsRef<Path>, e: &std::io::Error) {
+        let path = path.as_ref();
+        let what = format!("{}: {e}", path.display());
+        let built = [rustix::io::Errno::LOOP, rustix::io::Errno::NOTDIR]
+            .iter()
+            .any(|n| e.raw_os_error() == Some(n.raw_os_error()));
+        if built && self.root.in_home(path) {
+            self.note_limited(what);
+        } else {
+            self.note_unreadable(what);
+        }
+    }
+
+    /// A read the scan limited on purpose, or content it read but declined to
+    /// interpret: a file past its cap, a link it refused to follow, a database
+    /// too malformed to parse. These are properties of what is on disk, the
+    /// same on every run, so unlike `note_unreadable` they do not make the
+    /// collector Partial. Content an unprivileged user controls must never be
+    /// able to declare a baseline incomparable.
+    pub fn note_limited(&mut self, what: impl std::fmt::Display) {
+        self.truncated.push(what.to_string());
     }
 
     /// Builds an Entry with the facts about its backing file already filled
@@ -167,8 +209,11 @@ impl<'a> Ctx<'a> {
 
         // A world-writable directory is as good as a world-writable file:
         // anyone can replace what is inside it.
+        // The directory that actually holds the entry: a parent reached
+        // through a link is judged by what the link leads to, since a
+        // symlink's own mode is always 0777 and means nothing.
         if let Some(parent) = rel.parent() {
-            if let Ok(meta) = self.root.stat(parent) {
+            if let Ok(meta) = self.root.stat_follow(parent) {
                 if meta.world_writable() && !is_sticky(meta.mode) {
                     e.flag(Flag::WorldWritable);
                 }
@@ -220,9 +265,10 @@ pub struct CollectorStatus {
     pub status: Status,
     pub entries: usize,
     /// Reads that deliberately returned less than the whole file: one that
-    /// hit its cap, or a path that was not a regular file. Deterministic, so
-    /// it does not make two baselines incomparable, but the operator should
-    /// still see it.
+    /// hit its cap, a path that was not a regular file, a symlink out of a
+    /// home that was not followed, content too malformed to interpret.
+    /// Deterministic, so it does not make two baselines incomparable, but the
+    /// operator should still see it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub truncated: Vec<String>,
 }
@@ -236,6 +282,11 @@ pub struct Header {
     pub kernel: String,
     pub distro_id: String,
     pub distro_version: String,
+    /// os-release's ID_LIKE: the base a derivative is built on. Mint and LMDE
+    /// share an ID and differ only here, and which one a host is decides
+    /// whether snap is even possible on it.
+    #[serde(default)]
+    pub distro_like: String,
     pub root: PathBuf,
     pub live: bool,
     pub deep: bool,
@@ -246,6 +297,12 @@ pub struct Header {
     #[serde(default = "inferred")]
     pub enablement: String,
     pub collectors: Vec<CollectorStatus>,
+    /// Enrichment stages that panicked, and what each one left undone. The
+    /// entries are still reported, but the facts that stage adds — a
+    /// provenance verdict, a flag — may be missing from them, so a scan
+    /// carrying any of these is not comparable with one that carries none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub enrichment_failures: Vec<String>,
 }
 
 pub fn inferred() -> String {
@@ -362,7 +419,7 @@ fn skipped(name: &str, reason: &str) -> CollectorStatus {
     }
 }
 
-fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+pub fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = payload.downcast_ref::<&str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -374,7 +431,7 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 
 fn header(root: &Root, opts: &Options, collectors: Vec<CollectorStatus>) -> Header {
     let uname = rustix::system::uname();
-    let (distro_id, distro_version) = os_release(root);
+    let (distro_id, distro_version, distro_like) = os_release(root);
     Header {
         unbidden_version: env!("CARGO_PKG_VERSION").to_string(),
         schema_version: SCHEMA_VERSION,
@@ -397,19 +454,22 @@ fn header(root: &Root, opts: &Options, collectors: Vec<CollectorStatus>) -> Head
         },
         distro_id,
         distro_version,
+        distro_like,
         root: root.abs(""),
         live: root.is_live(),
         deep: opts.deep,
         privileged: rustix::process::geteuid().is_root(),
         enablement: inferred(),
         collectors,
+        enrichment_failures: Vec::new(),
     }
 }
 
 /// Distro detection reads the scan root, never the running system (§11).
-fn os_release(root: &Root) -> (String, String) {
+fn os_release(root: &Root) -> (String, String, String) {
     let mut id = String::new();
     let mut version = String::new();
+    let mut like = String::new();
     for path in ["etc/os-release", "usr/lib/os-release"] {
         let Ok((bytes, _)) = root.read_capped(path, 64 * 1024) else { continue };
         for line in String::from_utf8_lossy(&bytes).lines() {
@@ -418,6 +478,7 @@ fn os_release(root: &Root) -> (String, String) {
             match k {
                 "ID" if id.is_empty() => id = v,
                 "VERSION_ID" if version.is_empty() => version = v,
+                "ID_LIKE" if like.is_empty() => like = v,
                 _ => {}
             }
         }
@@ -425,7 +486,7 @@ fn os_release(root: &Root) -> (String, String) {
             break;
         }
     }
-    (id, version)
+    (id, version, like)
 }
 
 #[cfg(test)]
@@ -461,14 +522,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::write(dir.join("etc/rc.local"), "#!/bin/sh\n/tmp/x\n").unwrap();
-        std::fs::write(dir.join("etc/os-release"), "ID=debian\nVERSION_ID=\"12\"\n").unwrap();
+        std::fs::write(dir.join("etc/os-release"), "ID=linuxmint\nID_LIKE=debian\nVERSION_ID=\"6\"\n").unwrap();
 
         let root = Root::at(&dir).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Panicky), Box::new(Fine)];
         let scan = run(&root, &Options { deep: false }, &collectors);
 
         assert_eq!(scan.entries.len(), 1, "the healthy collector still reported");
-        assert_eq!(scan.header.distro_id, "debian");
+        assert_eq!(scan.header.distro_id, "linuxmint");
+        assert_eq!(scan.header.distro_like, "debian", "LMDE is told from mainline Mint by its base");
         let failed = scan.header.collectors.iter().find(|c| c.name == "panicky").unwrap();
         match &failed.status {
             Status::Failed { error } => assert!(error.contains("hostile input")),
@@ -547,6 +609,76 @@ mod tests {
     }
 
     #[test]
+    fn what_a_user_builds_in_their_home_cannot_make_a_collector_partial() {
+        let dir = std::env::temp_dir().join(format!("unbidden-homeloops-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["etc", "home/alice/.ssh", "home/alice/.config/autostart", "home/bob"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(
+            dir.join("etc/passwd"),
+            "alice:x:1000:1000::/home/alice:/bin/bash\nbob:x:1001:1001::/home/bob:/bin/bash\n",
+        )
+        .unwrap();
+        let link = |at: &str| {
+            let name = Path::new(at).file_name().unwrap();
+            std::os::unix::fs::symlink(name, dir.join(at)).unwrap();
+        };
+        // Links to themselves: every lookup through them is ELOOP.
+        link("home/alice/.ssh/authorized_keys");
+        link("home/alice/.config/autostart/loop.desktop");
+        link("home/alice/.bashrc");
+        // A file where a directory belongs: every lookup below it is ENOTDIR.
+        std::fs::write(dir.join("home/bob/.ssh"), b"").unwrap();
+        std::fs::write(dir.join("home/bob/.config"), b"").unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let scan = run(&root, &Options { deep: false }, &crate::collect::all());
+        let partial: Vec<_> = scan
+            .header
+            .collectors
+            .iter()
+            // An offline root has no /proc, which is its own honest Partial.
+            .filter(|c| c.name != "kernel")
+            .filter_map(|c| match &c.status {
+                Status::Partial { unreadable } => Some(format!("{}: {unreadable:?}", c.name)),
+                _ => None,
+            })
+            .collect();
+        assert!(partial.is_empty(), "{partial:#?}");
+        let limited: Vec<&String> = scan.header.collectors.iter().flat_map(|c| &c.truncated).collect();
+        // A looped ~/.bashrc is read by nothing, bash included, and the shell
+        // collector treats it as absent; it is planted above only to show it
+        // cannot make the shell collector Partial either.
+        for planted in ["authorized_keys", "loop.desktop", "bob/.config/autostart"] {
+            assert!(limited.iter().any(|t| t.contains(planted)), "{planted} not recorded: {limited:#?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_what_a_home_owner_can_build_is_excused() {
+        let dir = std::env::temp_dir().join(format!("unbidden-excused-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        root.set_homes(vec![PathBuf::from("/home/alice")]);
+        let users: Vec<User> = Vec::new();
+        let mut cx = Ctx { root: &root, users: &users, deep: false, unreadable: Vec::new(), truncated: Vec::new() };
+        let err = |e: rustix::io::Errno| std::io::Error::from_raw_os_error(e.raw_os_error());
+
+        cx.note_failed("home/alice/.ssh/authorized_keys", &err(rustix::io::Errno::LOOP));
+        cx.note_failed("/home/alice/.config/autostart", &err(rustix::io::Errno::NOTDIR));
+        assert_eq!((cx.truncated.len(), cx.unreadable.len()), (2, 0));
+
+        // A scan that was refused permission could not look, wherever it was.
+        cx.note_failed("home/alice/.profile", &err(rustix::io::Errno::ACCESS));
+        // A loop outside any home needed privilege to plant.
+        cx.note_failed("etc/cron.d/job", &err(rustix::io::Errno::LOOP));
+        assert_eq!((cx.truncated.len(), cx.unreadable.len()), (2, 2));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn world_writable_parent_flags_the_entry() {
         let dir = std::env::temp_dir().join(format!("unbidden-ww-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -576,8 +708,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("etc/init.d")).unwrap();
         std::fs::create_dir_all(dir.join("etc/rc2.d")).unwrap();
-        std::fs::write(dir.join("etc/init.d/ssh"), "#!/bin/sh
-").unwrap();
+        std::fs::write(dir.join("etc/init.d/ssh"), "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(
             dir.join("etc/init.d/ssh"),
             std::os::unix::fs::PermissionsExt::from_mode(0o755),

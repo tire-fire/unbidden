@@ -1,0 +1,5 @@
+#!/bin/sh -e
+#
+# rc.local
+/usr/local/sbin/firewall-up &
+exit 0

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use crate::entry::{Integrity, Provenance};
 use crate::root::Root;
 
-use super::{Answers, usr_aliases};
+use super::{Answers, spellings};
 
 const INFO: &str = "var/lib/dpkg/info";
 const STATUS: &str = "var/lib/dpkg/status";
@@ -44,7 +44,7 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
     // was then answered by nobody and reported Unpackaged.
     let mut alias_to_wanted: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     for w in wanted {
-        for alias in usr_aliases(w) {
+        for alias in spellings(root, w) {
             alias_to_wanted.entry(alias).or_default().push(w.clone());
         }
     }
@@ -175,7 +175,7 @@ fn verify(root: &Root, path: &Path, pkg: &str, info: &PkgInfo) -> Integrity {
     // A conffile is checked against the digest dpkg recorded for it, and a
     // difference is expected rather than alarming. Without this, every host
     // with an edited sshd_config lights up.
-    for spelling in usr_aliases(path) {
+    for spelling in spellings(root, path) {
         let key = spelling.to_string_lossy().into_owned();
         if let Some(expected) = info.conffiles.get(&key) {
             return if expected.eq_ignore_ascii_case(&actual.md5) {
@@ -222,7 +222,7 @@ fn verify(root: &Root, path: &Path, pkg: &str, info: &PkgInfo) -> Integrity {
 fn shipped_digest(root: &Root, pkg: &str, path: &Path) -> Option<String> {
     let (bytes, _) = root.read_capped(format!("{INFO}/{pkg}.md5sums"), DB_CAP).ok()?;
     let aliases: Vec<String> =
-        usr_aliases(path).iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        spellings(root, path).iter().map(|p| p.to_string_lossy().into_owned()).collect();
     for line in bytes.split(|b| *b == b'\n') {
         let line = String::from_utf8_lossy(line);
         let Some((digest, listed)) = line.split_once(char::is_whitespace) else { continue };
@@ -466,6 +466,6 @@ mod tests {
         assert!(answers.is_empty(), "the backend reports only what it can claim");
 
         let wanted: BTreeSet<PathBuf> = [PathBuf::from("etc/systemd/system/evil.service")].into_iter().collect();
-        assert_eq!(super::super::resolve(&root, &wanted)[Path::new("etc/systemd/system/evil.service")], Provenance::Unpackaged);
+        assert_eq!(super::super::resolve(&root, &wanted).answers[Path::new("etc/systemd/system/evil.service")], Provenance::Unpackaged);
     }
 }

@@ -1,0 +1,95 @@
+#!/usr/bin/python3
+import gi
+import os
+import psutil
+import subprocess
+import time
+gi.require_version('Gtk', '3.0')
+gi.require_version('Notify', '0.7')
+from gi.repository import Gtk, Gio, Notify
+
+class Monitor():
+
+    def __init__(self):
+        self.pid = subprocess.check_output('pidof cinnamon', shell=True).decode('UTF-8').strip()
+        self.process = psutil.Process(int(self.pid))
+
+    def get_used_memory(self):
+        # Used memory in MB
+        mem = self.process.memory_info()
+        memory = to_megabytes(mem.rss - mem.shared)
+        return ("%d MB" % memory)
+
+    def get_start_logs(self):
+        # Start logs
+        logs = []
+        log_file = os.path.expanduser("~/.xsession-errors")
+        if os.path.exists(log_file):
+            with open(log_file) as handle:
+                for line in handle:
+                    line = line.strip()
+                    if "LookingGlass/info" in line:
+                        try:
+                            line = " ".join(line.split()[5:])
+                            if "Cinnamon.AppSystem.get_default" in line:
+                                # Start of a new Cinnamon instance, ditch previous lines
+                                logs = []
+                            if " ms" in line:
+                                logs.append(line)
+                        except Exception as e:
+                            pass # ignore lines with different formats
+        return logs
+
+    def get_cpu_time(self):
+        # Used CPU time
+        cpu = self.process.cpu_times()
+        used = cpu.user + cpu.children_user + cpu.system + cpu.children_system
+        t = time.strftime('%H:%M:%S', time.gmtime(used))
+        return t
+
+    def get_cpu_percentage(self):
+        # Avg CPU percentage (since last call)
+        with self.process.oneshot():
+            # cpu_percent can be more than 100%, it's the sum of all cores percentages
+            # so we divide it by the number of cpu/cores being used by the process
+            percentage = self.process.cpu_percent() / psutil.cpu_count()
+            percentage = round(percentage, 2)
+        return percentage
+
+def print_and_save(output_file, data):
+    print(data)
+    output_file.write(data + "\n")
+    output_file.flush()
+
+def show_stats(notif, action):
+    subprocess.Popen(["xdg-open", os.path.expanduser("~/.cinnamon/stats.log")])
+    notif.close()
+    Gtk.main_quit()
+
+def to_megabytes(num_bytes):
+    return round(((num_bytes) / 1024 / 1024))
+
+if __name__ == '__main__':
+
+    settings = Gio.Settings("com.linuxmint.dev")
+    interval = settings.get_int("cinnamon-stats-tracker-interval")
+    measures = settings.get_int("cinnamon-stats-tracker-measures")
+
+    Notify.init("cinnamon-stats-tracker")
+
+    notification = Notify.Notification.new("Stats Tracker Started", "The Cinnamon stats are being tracked right now. Don't interact with Cinnamon for the next 10 minutes. A notification will pop up when the tracker is finished.", "cinnamon-symbolic")
+    notification.show()
+
+    with open(os.path.expanduser("~/.cinnamon/stats.log"), "w") as output_file:
+        monitor = Monitor()
+        process = monitor.process
+        io = process.io_counters()
+        print_and_save(output_file, "---------------------------------------------")
+        print_and_save(output_file, "  INITIAL STATS")
+        print_and_save(output_file, "---------------------------------------------")
+        print_and_save(output_file, "PID %s" % monitor.pid)
+        print_and_save(output_file, "\n".join(monitor.get_start_logs()))
+        print_and_save(output_file, "RAM: %s" % monitor.get_used_memory())
+        print_and_save(output_file, "CPU: %s (%s threads)" % (monitor.get_cpu_time(), process.num_threads()))
+        monitor.get_cpu_percentage() # Call this but don't use the value, it's always 0%. This initializes the reading for the next call.
+        print_and_save(output_file, "I/O: %s FDS, %s MB read, %s MB written" % (process.num_fds(), to_megabytes(io.read_bytes), to_megabytes(io.writ

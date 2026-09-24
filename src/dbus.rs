@@ -44,15 +44,24 @@ impl UnitFile {
     /// the user managers have to agree: an Entry holds one enablement for one
     /// path, so where two users report different states for the same file
     /// there is no answer to give, and the Entry keeps the inferred one.
-    fn agreed(&self) -> Option<(&str, Vec<&str>)> {
-        if let Some(state) = self.by_manager.get(SYSTEM) {
+    ///
+    /// Only the managers `may_answer` admits are heard at all: which ones
+    /// those are depends on whose unit it is, and is decided by the caller.
+    fn agreed(&self, may_answer: impl Fn(&str) -> bool) -> Option<(&str, Vec<&str>)> {
+        let heard: Vec<(&str, &str)> = self
+            .by_manager
+            .iter()
+            .filter(|(m, _)| may_answer(m))
+            .map(|(m, s)| (m.as_str(), s.as_str()))
+            .collect();
+        if let Some((_, state)) = heard.iter().find(|(m, _)| *m == SYSTEM) {
             return Some((state, vec![SYSTEM]));
         }
-        let first = self.by_manager.values().next()?;
-        if self.by_manager.values().any(|s| s != first) {
+        let (_, first) = heard.first()?;
+        if heard.iter().any(|(_, s)| s != first) {
             return None;
         }
-        Some((first, self.by_manager.keys().map(String::as_str).collect()))
+        Some((first, heard.iter().map(|(m, _)| *m).collect()))
     }
 
     /// Every answer, spelled out. What an operator needs when they differ,
@@ -98,7 +107,7 @@ impl Manager {
                 }
             }
         }
-        merged
+        merged.map(|m| m.canonical(root))
     }
 }
 
@@ -207,6 +216,29 @@ impl Manager {
         Some(Manager { by_path, active })
     }
 
+    /// Re-keys every answer on the path the collectors record: the unit
+    /// file's directory resolved on this root. systemd names a unit by the
+    /// search-path directory it was built with — /lib/systemd/system on
+    /// Debian 12, Ubuntu 22.04 and Mint 21, where /lib is a link to /usr/lib
+    /// — while the walk reports the directory it resolves to. Matched as
+    /// spelled, not one vendor unit on those systems ever took systemd's
+    /// answer.
+    ///
+    /// The unit file's own name is not resolved: an alias is a file of its
+    /// own, and systemd answers for it separately.
+    fn canonical(self, root: &Root) -> Manager {
+        let mut by_path: BTreeMap<PathBuf, UnitFile> = BTreeMap::new();
+        for (path, file) in self.by_path {
+            let rel = root.rel(&path);
+            let resolved = match (rel.parent(), rel.file_name()) {
+                (Some(dir), Some(name)) => root.resolve(dir).map(|d| root.abs(d.join(name))).unwrap_or(path),
+                _ => path,
+            };
+            by_path.entry(resolved).or_default().by_manager.extend(file.by_manager);
+        }
+        Manager { by_path, active: self.active }
+    }
+
     /// Folds another manager's answers in, keeping both where they cover the
     /// same path. Manager ids are unique, so nothing here can overwrite an
     /// answer — that decision belongs to `UnitFile::agreed`.
@@ -284,18 +316,21 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
         if file.by_manager.len() > 1 {
             e.note("enablement_managers", file.breakdown());
         }
-        let Some((state, from)) = file.agreed() else { continue };
-
         // A user's bus socket lives in that user's own runtime directory, so
         // a compromised account can run something that answers there and says
-        // whatever it likes. A user manager is believed about units the
-        // collector put in a user scope; a system unit's enablement comes
-        // from the system manager or it stays inferred.
-        if !file.by_manager.contains_key(SYSTEM)
-            && !e.raw.get("scope").is_some_and(|s| s.starts_with("user"))
-        {
-            continue;
-        }
+        // whatever it likes. So each manager is heard only about units that
+        // are its business: a system unit's enablement comes from the system
+        // manager, a unit in someone's home from that account's own manager,
+        // and a unit on the shared user search path from any user manager —
+        // which is then one account's view, and says whose.
+        let owner_manager = e.raw.get("scope_uid").map(|uid| format!("user:{uid}"));
+        let scope = e.raw.get("scope").map(String::as_str).unwrap_or("system");
+        let may_answer = |m: &str| match scope {
+            "user" => m.starts_with("user:"),
+            s if s.starts_with("user:") => owner_manager.as_deref() == Some(m),
+            _ => m == SYSTEM,
+        };
+        let Some((state, from)) = file.agreed(may_answer) else { continue };
 
         // Keeping the inferred answer is what makes the symlink-resolution
         // path testable. It is the offline implementation, and a live host
@@ -326,7 +361,12 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
             e.note("generated", "true");
             if matches!(e.provenance, Provenance::Unpackaged | Provenance::Unknown) {
                 e.provenance = Provenance::GeneratedBy { by: "systemd-generator".into() };
-                e.flags.retain(|f| *f != Flag::Unpackaged);
+                // The unit file was written by a generator; what it runs is a
+                // separate file with its own verdict. An Unpackaged flag that
+                // came from the target is still true and stays.
+                if e.raw.get("target_provenance").map(String::as_str) != Some("unpackaged") {
+                    e.flags.retain(|f| *f != Flag::Unpackaged);
+                }
             }
         }
     }
@@ -447,8 +487,23 @@ mod tests {
     }
 
     #[test]
+    fn a_generated_unit_keeps_the_unpackaged_flag_its_target_earned() {
+        let mut e = Entry::new(Kind::SystemdUnit, "/run/systemd/generator/x.service", "x.service");
+        e.provenance = Provenance::Unpackaged;
+        e.note("target_provenance", "unpackaged");
+        e.flag(Flag::Unpackaged);
+
+        let manager = manager_of(vec![("/run/systemd/generator/x.service", answers(&[("system", "generated")]))]);
+        let mut entries = vec![e];
+        apply(&manager, &mut entries);
+        assert!(matches!(&entries[0].provenance, Provenance::GeneratedBy { .. }));
+        assert!(entries[0].has_flag(Flag::Unpackaged), "what the unit runs is still unpackaged");
+    }
+
+    #[test]
     fn a_users_own_manager_answers_for_that_users_units() {
-        let e = user_unit("/home/alice/.config/systemd/user/evil.service", "evil.service", "user:alice");
+        let mut e = user_unit("/home/alice/.config/systemd/user/evil.service", "evil.service", "user:alice");
+        e.note("scope_uid", "1000");
 
         let manager = Manager {
             by_path: [(
@@ -476,11 +531,36 @@ mod tests {
     }
 
     #[test]
+    fn one_account_cannot_answer_for_units_in_another_accounts_home() {
+        // bob runs whatever he likes on /run/user/1001/bus. A reply naming
+        // alice's backdoor as disabled must not clear its caveat.
+        let mut e = user_unit("/home/alice/.config/systemd/user/evil.service", "evil.service", "user:alice");
+        e.note("scope_uid", "1000");
+        let manager = manager_of(vec![(
+            "/home/alice/.config/systemd/user/evil.service",
+            answers(&[("user:1001", "disabled")]),
+        )]);
+
+        let mut entries = vec![e];
+        assert_eq!(apply(&manager, &mut entries), 0);
+        assert!(entries[0].has_flag(Flag::DegradedEnablement));
+        assert!(!entries[0].raw.contains_key("enablement_from"));
+
+        // With no uid known for the home there is no manager to believe.
+        let e = user_unit("/home/ghost/.config/systemd/user/x.service", "x.service", "user:ghost");
+        let manager = manager_of(vec![("/home/ghost/.config/systemd/user/x.service", answers(&[("user:1000", "enabled")]))]);
+        let mut entries = vec![e];
+        assert_eq!(apply(&manager, &mut entries), 0);
+    }
+
+    #[test]
     fn a_user_with_no_running_manager_keeps_the_inferred_answer_and_its_flag() {
         // bob has unit files and no session. alice's manager cannot speak
         // for them, and the walk's answer is all there is.
-        let alice = user_unit("/home/alice/.config/systemd/user/x.service", "x.service", "user:alice");
-        let bob = user_unit("/home/bob/.config/systemd/user/x.service", "x.service", "user:bob");
+        let mut alice = user_unit("/home/alice/.config/systemd/user/x.service", "x.service", "user:alice");
+        alice.note("scope_uid", "1000");
+        let mut bob = user_unit("/home/bob/.config/systemd/user/x.service", "x.service", "user:bob");
+        bob.note("scope_uid", "1001");
 
         let manager = manager_of(vec![(
             "/home/alice/.config/systemd/user/x.service",
@@ -584,6 +664,34 @@ mod tests {
         assert_eq!(apply(&manager, &mut entries), 0);
         assert_eq!(entries[0].enabled, Enablement::Enabled);
         assert!(entries[0].has_flag(Flag::DegradedEnablement));
+    }
+
+    #[test]
+    fn a_unit_systemd_names_through_merged_usr_takes_its_answer() {
+        // systemd on Debian 12, Ubuntu 22.04 and Mint 21 lists vendor units
+        // under /lib/systemd/system; the walk reports /usr/lib/systemd/system.
+        let dir = std::env::temp_dir().join(format!("unbidden-dbus-usr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("usr/lib/systemd/system")).unwrap();
+        std::fs::write(dir.join("usr/lib/systemd/system/cron.service"), b"[Service]\n").unwrap();
+        std::os::unix::fs::symlink("usr/lib", dir.join("lib")).unwrap();
+        let root = Root::at(&dir).unwrap();
+
+        let manager = manager_of(vec![(
+            &dir.join("lib/systemd/system/cron.service").to_string_lossy(),
+            answers(&[("system", "enabled")]),
+        )])
+        .canonical(&root);
+
+        let mut e = Entry::new(Kind::SystemdUnit, dir.join("usr/lib/systemd/system/cron.service"), "cron.service");
+        e.enabled = Enablement::Disabled;
+        e.flag(Flag::DegradedEnablement);
+        e.note("scope", "system");
+        let mut entries = vec![e];
+        assert_eq!(apply(&manager, &mut entries), 1);
+        assert_eq!(entries[0].enabled, Enablement::Enabled);
+        assert!(!entries[0].has_flag(Flag::DegradedEnablement));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

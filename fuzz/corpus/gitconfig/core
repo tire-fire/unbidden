@@ -1,0 +1,8 @@
+[core]
+	pager = less -R
+	editor = vim
+	hooksPath = /opt/hooks
+[include]
+	path = ~/.gitconfig.local
+[alias]
+	x = !sh -c "id"

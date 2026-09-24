@@ -60,9 +60,21 @@ pub fn comparable(baseline: &Scan, current: &Scan) -> Result<(), String> {
 
     if baseline.header.enablement != current.header.enablement {
         return Err(format!(
-            "baseline enablement came from {} and this scan's from {};              every unit would appear to have changed",
+            "baseline enablement came from {} and this scan's from {}; \
+             every unit would appear to have changed",
             baseline.header.enablement, current.header.enablement
         ));
+    }
+
+    // A stage that panicked left its facts off some entries, so its flags
+    // would read as changes that never happened on the host.
+    for (when, s) in [("the baseline", baseline), ("this scan", current)] {
+        if !s.header.enrichment_failures.is_empty() {
+            return Err(format!(
+                "enrichment failed in {when}, so its provenance and flags are incomplete:\n  {}",
+                s.header.enrichment_failures.join("\n  ")
+            ));
+        }
     }
 
     let by_name = |s: &Scan| -> BTreeMap<String, CollectorStatus> {
@@ -226,6 +238,7 @@ mod tests {
             kernel: "k".into(),
             distro_id: "debian".into(),
             distro_version: "12".into(),
+                distro_like: String::new(),
             root: "/".into(),
             live: true,
             deep: false,
@@ -237,6 +250,7 @@ mod tests {
                 status: Status::Complete,
                 truncated: Vec::new(),
             }],
+            enrichment_failures: Vec::new(),
         }
     }
 
@@ -338,6 +352,20 @@ mod tests {
         let mut after = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
         after.header.deep = true;
         assert!(diff(&before, &after).unwrap_err().contains("deep"));
+
+        let mut after = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
+        after.header.enablement = "systemd-dbus".into();
+        assert_eq!(
+            diff(&before, &after).unwrap_err(),
+            "baseline enablement came from inferred and this scan's from systemd-dbus; \
+             every unit would appear to have changed"
+        );
+
+        let mut after = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
+        after.header.enrichment_failures.push("provenance: rpm database: boom".into());
+        let err = diff(&before, &after).unwrap_err();
+        assert!(err.contains("enrichment failed in this scan"), "{err}");
+        assert!(diff(&after, &before).unwrap_err().contains("enrichment failed in the baseline"));
     }
 
     #[test]

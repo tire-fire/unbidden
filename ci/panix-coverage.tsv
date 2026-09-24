@@ -1,0 +1,56 @@
+# The §13 coverage matrix: every mechanism PANIX implements, its MITRE
+# ATT&CK technique as PANIX's own table gives it, and what unbidden must
+# report when PANIX plants it with --default. panix-loop.sh reads this file.
+#
+# kinds    Entry kinds that count as detection, space-separated.
+# source   ERE the entry's source path must match.
+# flags    ERE one of the entry's flags must match, or - where PANIX changes a
+#          file a package ships in a way no manifest records (a mode bit, a
+#          capability) and so no provenance flag can apply.
+# marker   A string that must appear in the entry's command, notes, source file
+#          or target file, tying the entry to the payload PANIX planted: the
+#          callback port every planted payload dials. - where the mechanism
+#          carries no payload of its own.
+#
+# A row whose kinds is OUT_OF_SCOPE is a tracked gap, with the reason and the
+# section of the spec that makes it one. Adding a module to PANIX without
+# adding a row here fails the loop.
+#
+# module	technique	kinds	source	flags	marker	note
+at	T1053.002	at_job	^/var/spool/(cron/atjobs|at)/	unpackaged	9999	-
+authorized-keys	T1098.004	ssh_authorized_key	/\.ssh/authorized_keys2?$	unpackaged	-	-
+cap	T1548	file_capability	.	-	-	a capability set on an interpreter a package ships; the capability is the finding
+cron	T1053.003	cron	^/(etc/cron|var/spool/cron)	unpackaged|conffile-modified	9999	-
+dbus	T1543	dbus_service	^/(usr/share|etc)/dbus-1/	unpackaged	9999	-
+generator	T1543.002	systemd_generator	/systemd/system-generators/	unpackaged	9999	-
+git	T1546	git_hook	(\.git/hooks/|gitconfig$)	unpackaged	9999	-
+initd	T1037	sysv_init	^/etc/(init\.d|rc[0-6S]\.d|rc\.d)/	unpackaged	9999	-
+ld-preload	T1574.006	ld_preload	.	unpackaged	-	-
+lkm	T1547.006	kernel_module	.	unpackaged	-	-
+malicious-package	T1546.016	pkg_hook cron	.	-	-	the package is installed through the package manager and so is packaged; its cron job re-installing it is the unpackaged half
+motd	T1037	motd	^/etc/update-motd\.d/	unpackaged	9999	-
+network-manager	T1546	network_dispatcher	/NetworkManager/dispatcher\.d/	unpackaged	9999	-
+package-manager	T1546.016	pkg_hook	^/(etc/apt/|etc/dnf/|etc/yum/|usr/lib)	unpackaged	9999	-
+pam	T1556.003	pam	^/etc/pam\.(d/|conf$)	unpackaged|conffile-modified|packaged-modified	9999	-
+rc-local	T1037.004	rc_local	^/etc/(rc\.d/)?rc\.local$	unpackaged	9999	-
+shell-profile	T1546.004	shell_profile	(^/etc/profile$|/\.bash_profile$)	unpackaged|conffile-modified	9999	-
+ssh-key	T1098.004	ssh_authorized_key	/\.ssh/authorized_keys2?$	unpackaged	-	-
+sudoers	T1548.003	sudoers	^/etc/sudoers	unpackaged|conffile-modified	-	-
+suid	T1548.001	suid_binary	.	-	-	the setuid bit added to binaries a package ships; neither dpkg nor the file's digest records a mode
+systemd	T1543.002	systemd_unit systemd_timer	/systemd/(system|user)/	unpackaged	9999	-
+udev	T1546.017	udev	/udev/rules\.d/	unpackaged	-	-
+xdg	T1547.013	xdg_autostart	/autostart/	unpackaged	9999	-
+system-binary	T1554	OUT_OF_SCOPE	-	-	-	§1: a wrapped cat or ls runs when a person runs cat or ls, which is a human invoking it; nothing starts it unbidden
+backdoor-user	T1136.001	OUT_OF_SCOPE	-	-	-	§1: an account is a way in, not something that executes
+backdoor-system-user	T1098.004	OUT_OF_SCOPE	-	-	-	§1: an account is a way in, not something that executes
+create-user	T1136.001	OUT_OF_SCOPE	-	-	-	§1: an account is a way in, not something that executes
+passwd-user	T1098	OUT_OF_SCOPE	-	-	-	§1: an account is a way in, not something that executes
+password-change	T1098	OUT_OF_SCOPE	-	-	-	§1: a credential change is a way in, not something that executes
+bind-shell	T1059.004	OUT_OF_SCOPE	-	-	-	§1: a process running now, which survives nothing
+reverse-shell	T1059.004	OUT_OF_SCOPE	-	-	-	§1: a process running now, which survives nothing
+grub	T1542	OUT_OF_SCOPE	-	-	-	§5 defers GRUB: pre-OS, needs image parsing
+initramfs	T1542	OUT_OF_SCOPE	-	-	-	§5 defers initramfs: pre-OS, needs image parsing
+polkit	T1556	OUT_OF_SCOPE	-	-	-	§5 defers Polkit rules
+rootkit	T1014	OUT_OF_SCOPE	-	-	-	§2: a module that hides itself defeats userspace enumeration by construction
+web-shell	T1505.003	OUT_OF_SCOPE	-	-	-	§5 defers web shells: finding one needs content heuristics
+malicious-container	T1610	OUT_OF_SCOPE	-	-	-	§5 defers container runtimes

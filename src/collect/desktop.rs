@@ -553,14 +553,17 @@ struct Stack {
 
 fn read_gvdb(cx: &mut Ctx, rel: &Path) -> Option<Gvdb<'static>> {
     let bytes = cx.read_capped(rel, DCONF_CAP)?;
+    // Both of these describe the file, not the scan's reach: the user
+    // database is written by its owner, so an account that could make this
+    // collector Partial could make every later baseline incomparable.
     if bytes.len() >= DCONF_CAP {
-        cx.note_unreadable(format!("{}: larger than {DCONF_CAP} bytes, not parsed", rel.display()));
+        cx.note_limited(format!("{}: larger than {DCONF_CAP} bytes, not parsed", rel.display()));
         return None;
     }
     match Gvdb::from_bytes(Cow::Owned(bytes)) {
         Ok(f) => Some(f),
         Err(e) => {
-            cx.note_unreadable(format!("{}: {e}", rel.display()));
+            cx.note_limited(format!("{}: not a readable dconf database ({e}), not parsed", rel.display()));
             None
         }
     }
@@ -613,6 +616,11 @@ fn dconf_stack(cx: &mut Ctx, u: &User) -> Stack {
         if let Some(file) = read_gvdb(cx, &rel) {
             let locks = locks_of(&file);
             stack.dbs.push(Db { label: spec.clone(), file, locks });
+        } else if cx.root.exists(&rel) {
+            // A layer that is present but was not parsed leaves every answer
+            // below it resting on the layers that remain, and the entries
+            // have to say so rather than read as fully resolved.
+            stack.notes.push(("dconf_db_not_parsed".into(), spec.clone()));
         }
     }
     stack
@@ -1094,9 +1102,12 @@ mod tests {
             let (entries, status) = run(&dir);
             let e = by_name(&entries, Kind::DesktopExtension, "x@y.z");
             assert_eq!(e.len(), 1, "the extension is reported whatever the database does");
+            // The user database is written by the user. A collector it could
+            // turn Partial is one that account could use to make every later
+            // baseline incomparable.
             assert!(
-                !matches!(status, Status::Failed { .. }),
-                "a corrupt database must not fail the collector (cut {cut}): {status:?}"
+                matches!(status, Status::Complete),
+                "a corrupt database must leave the collector complete (cut {cut}): {status:?}"
             );
             if cut < 32 {
                 // Too short to carry a valid header, so nothing is known.
@@ -1113,7 +1124,7 @@ mod tests {
         put(&dir, "home/alice/.config/dconf/user", &noise);
         let (entries, status) = run(&dir);
         assert_eq!(by_name(&entries, Kind::DesktopExtension, "x@y.z").len(), 1);
-        assert!(!matches!(status, Status::Failed { .. }), "{status:?}");
+        assert!(matches!(status, Status::Complete), "{status:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
