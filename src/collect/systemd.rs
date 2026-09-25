@@ -1,4 +1,6 @@
-//! systemd: unit files, their drop-ins, and generators.
+//! systemd: unit files, their drop-ins, generators, and the two boot-time
+//! configurations beside them: tmpfiles.d, which writes files, and presets,
+//! which decide what a package install enables.
 //!
 //! Three things make this collector different from a directory walk.
 //!
@@ -18,9 +20,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
+use super::glob_match;
 use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, name_from_os};
 use crate::scan::{Collector, Ctx};
 
@@ -91,7 +94,10 @@ const HOME_USER_PATHS: [SearchDir; 3] = [
 ];
 
 /// Every directory systemd.generator(7) says generators are loaded from.
-const GENERATOR_PATHS: [&str; 10] = [
+/// Environment generators too (systemd.environment-generator(7)): their
+/// output is the environment of everything the manager starts, LD_PRELOAD
+/// included.
+const GENERATOR_PATHS: [&str; 20] = [
     "run/systemd/system-generators",
     "etc/systemd/system-generators",
     "usr/local/lib/systemd/system-generators",
@@ -102,6 +108,38 @@ const GENERATOR_PATHS: [&str; 10] = [
     "usr/local/lib/systemd/user-generators",
     "usr/lib/systemd/user-generators",
     "lib/systemd/user-generators",
+    "run/systemd/system-environment-generators",
+    "etc/systemd/system-environment-generators",
+    "usr/local/lib/systemd/system-environment-generators",
+    "usr/lib/systemd/system-environment-generators",
+    "lib/systemd/system-environment-generators",
+    "run/systemd/user-environment-generators",
+    "etc/systemd/user-environment-generators",
+    "usr/local/lib/systemd/user-environment-generators",
+    "usr/lib/systemd/user-environment-generators",
+    "lib/systemd/user-environment-generators",
+];
+
+/// tmpfiles.d(5), in the order a same-named file replaces another.
+const TMPFILES_PATHS: [&str; 5] =
+    ["etc/tmpfiles.d", "run/tmpfiles.d", "usr/local/lib/tmpfiles.d", "usr/lib/tmpfiles.d", "lib/tmpfiles.d"];
+const USER_TMPFILES_PATHS: [&str; 2] = ["usr/local/share/user-tmpfiles.d", "usr/share/user-tmpfiles.d"];
+const HOME_TMPFILES_PATHS: [&str; 2] = [".config/user-tmpfiles.d", ".local/share/user-tmpfiles.d"];
+
+/// systemd.preset(5).
+const PRESET_PATHS: [&str; 5] = [
+    "etc/systemd/system-preset",
+    "run/systemd/system-preset",
+    "usr/local/lib/systemd/system-preset",
+    "usr/lib/systemd/system-preset",
+    "lib/systemd/system-preset",
+];
+const USER_PRESET_PATHS: [&str; 5] = [
+    "etc/systemd/user-preset",
+    "run/systemd/user-preset",
+    "usr/local/lib/systemd/user-preset",
+    "usr/lib/systemd/user-preset",
+    "lib/systemd/user-preset",
 ];
 
 const UNIT_SUFFIXES: [&str; 4] = [".service", ".timer", ".socket", ".path"];
@@ -189,6 +227,9 @@ impl Collector for Systemd {
 
         let mut out = w.entries(cx);
         out.extend(generators(cx, &mut seen));
+        out.extend(tmpfiles(cx));
+        out.extend(presets(cx, &PRESET_PATHS, &SYSTEM_PATHS, "system"));
+        out.extend(presets(cx, &USER_PRESET_PATHS, &USER_PATHS, "user"));
         out
     }
 }
@@ -495,7 +536,7 @@ fn generators(cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>) -> Vec<Entry> {
                 continue;
             }
         }
-        let scope = if dir.ends_with("user-generators") { "user" } else { "system" };
+        let scope = if dir.contains("/user-") { "user" } else { "system" };
         for ent in cx.dir(dir) {
             if ent.is_dir {
                 continue;
@@ -522,6 +563,9 @@ fn generators(cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>) -> Vec<Entry> {
             e.command = Some(abs.clone().into_os_string().into_vec());
             e.target_path = Some(abs);
             e.note("scope", scope);
+            if dir.ends_with("environment-generators") {
+                e.note("generator_type", "environment");
+            }
             out.push(e);
         }
     }
@@ -529,6 +573,209 @@ fn generators(cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>) -> Vec<Entry> {
 }
 
 // ---------------------------------------------------------------- unit files
+
+/// The files in `dirs` in the order systemd reads them, by file name, each
+/// with the file that replaces it: a same-named file in an earlier directory
+/// is read instead, and a link to /dev/null there masks it.
+fn replaceable(cx: &mut Ctx, dirs: &[&str], suffix: &str) -> Vec<(PathBuf, Option<PathBuf>)> {
+    let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();
+    let mut first: BTreeMap<OsString, PathBuf> = BTreeMap::new();
+    let mut found = Vec::new();
+    for dir in dirs {
+        match cx.root.dir_identity(dir) {
+            Ok(id) if seen.insert(id) => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                cx.note_failed(dir, &e);
+                continue;
+            }
+        }
+        for ent in cx.dir(dir) {
+            if ent.is_dir || !ent.name.as_encoded_bytes().ends_with(suffix.as_bytes()) {
+                continue;
+            }
+            let rel = Path::new(dir).join(&ent.name);
+            let by = first.get(&ent.name).cloned();
+            first.entry(ent.name.clone()).or_insert_with(|| rel.clone());
+            found.push((ent.name, rel, by));
+        }
+    }
+    // Stable, so the copy that is read comes before the ones it replaces.
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found.into_iter().map(|(_, rel, by)| (rel, by)).collect()
+}
+
+/// Whitespace-separated fields, at most `n`, and what follows them.
+fn fields(line: &[u8], n: usize) -> (Vec<&[u8]>, &[u8]) {
+    let mut out = Vec::new();
+    let mut rest = line;
+    while out.len() < n {
+        let s = rest.trim_ascii_start();
+        if s.is_empty() {
+            rest = s;
+            break;
+        }
+        let end = s.iter().position(u8::is_ascii_whitespace).unwrap_or(s.len());
+        out.push(&s[..end]);
+        rest = &s[end..];
+    }
+    (out, rest.trim_ascii())
+}
+
+fn lossy(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+fn tmpfiles(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for (rel, by) in replaceable(cx, &TMPFILES_PATHS, ".conf") {
+        tmpfiles_file(cx, &rel, by.as_deref(), None, &mut out);
+    }
+    for (rel, by) in replaceable(cx, &USER_TMPFILES_PATHS, ".conf") {
+        tmpfiles_file(cx, &rel, by.as_deref(), None, &mut out);
+    }
+    // ponytail: an account's own files are reported, but not matched against
+    // the global user ones they replace.
+    let dirs: Vec<(String, PathBuf)> = cx
+        .users
+        .iter()
+        .flat_map(|u| HOME_TMPFILES_PATHS.iter().map(move |d| (u.name.clone(), u.in_home(d))))
+        .collect();
+    let mut walked = BTreeSet::new();
+    for (who, dir) in dirs {
+        if !walked.insert(dir.clone()) {
+            continue;
+        }
+        for ent in cx.dir(&dir) {
+            if !ent.is_dir && ent.name.as_encoded_bytes().ends_with(b".conf") {
+                tmpfiles_file(cx, &dir.join(&ent.name), None, Some(&who), &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// One entry per line that puts content somewhere at boot: `w` writes a
+/// file (a value under /proc/sys among them), `C` copies one, `L` makes a
+/// link, and `f` with an argument, or with `^` from a credential, creates a
+/// file with that content. Lines that only make directories, set modes or
+/// clean up run nothing and are not listed.
+fn tmpfiles_file(cx: &mut Ctx, rel: &Path, shadowed_by: Option<&Path>, principal: Option<&str>, out: &mut Vec<Entry>) {
+    let Some(bytes) = cx.read(rel) else { return };
+    let mut used: BTreeMap<String, usize> = BTreeMap::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        let line = line.trim_ascii();
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        // Type, path, mode, user, group, age; the argument is the rest.
+        // ponytail: a quoted path holding spaces is split at them; the line
+        // is still reported whole under `line`.
+        let (f, argument) = fields(line, 6);
+        let (Some(ty), Some(path)) = (f.first(), f.get(1)) else { continue };
+        let writes = match ty[0] {
+            b'w' | b'C' | b'L' => true,
+            b'f' | b'F' => !argument.is_empty() || ty.contains(&b'^'),
+            _ => false,
+        };
+        if !writes {
+            continue;
+        }
+        let base = format!("{} {}", lossy(ty), lossy(path));
+        let seen = used.entry(base.clone()).or_insert(0);
+        *seen += 1;
+        let name = if *seen == 1 { base } else { format!("{base}#{seen}") };
+        let mut e = cx.entry(Kind::Tmpfiles, rel, name);
+        e.trigger = Trigger::Boot;
+        e.principal = principal.map(str::to_string);
+        e.enabled = if shadowed_by.is_some() { Enablement::Disabled } else { Enablement::Enabled };
+        e.note("type", lossy(ty));
+        e.note("path", lossy(path));
+        if !argument.is_empty() {
+            e.note("argument", lossy(argument));
+        }
+        e.note("line", lossy(line));
+        if let Some(by) = shadowed_by {
+            e.note("shadowed_by", cx.root.abs(by).display().to_string());
+        }
+        if std::str::from_utf8(line).is_err() {
+            e.flag(Flag::EncodingAnomaly);
+        }
+        out.push(e);
+    }
+}
+
+/// One entry per `enable` line, the units a package install or `systemctl
+/// preset` would switch on. A named unit found on the search path is the
+/// target, so an unpackaged one flags the line through its provenance. The
+/// first line whose pattern matches a unit decides it, so an `enable` of one
+/// unit after a matching `disable` or `ignore` never applies and is reported
+/// off. An `enable` glob is left on: which units it decides depends on what
+/// is installed when it is applied.
+fn presets(cx: &mut Ctx, dirs: &[&str], units: &[SearchDir], scope: &str) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let mut decided: Vec<(Vec<u8>, String)> = Vec::new();
+    let mut by_rank: Vec<&SearchDir> = units.iter().collect();
+    by_rank.sort_by_key(|d| d.rank);
+    for (rel, shadowed_by) in replaceable(cx, dirs, ".preset") {
+        let Some(bytes) = cx.read(&rel) else { continue };
+        let mut used: BTreeMap<String, usize> = BTreeMap::new();
+        for line in bytes.split(|b| *b == b'\n') {
+            let line = line.trim_ascii();
+            if line.is_empty() || line[0] == b'#' || line[0] == b';' {
+                continue;
+            }
+            let (f, instances) = fields(line, 2);
+            let (Some(&directive), Some(&pattern)) = (f.first(), f.get(1)) else { continue };
+            if !matches!(directive, b"enable" | b"disable" | b"ignore") {
+                continue;
+            }
+            let literal = !pattern.iter().any(|b| b"*?[".contains(b));
+            let before = if literal {
+                decided.iter().find(|(p, _)| glob_match(p, pattern)).map(|(_, at)| at.clone())
+            } else {
+                None
+            };
+            if shadowed_by.is_none() {
+                decided.push((pattern.to_vec(), format!("{}: {}", cx.root.abs(&rel).display(), lossy(line))));
+            }
+            if directive != b"enable" {
+                continue;
+            }
+            let base = format!("enable {}", lossy(pattern));
+            let seen = used.entry(base.clone()).or_insert(0);
+            *seen += 1;
+            let name = if *seen == 1 { base } else { format!("{base}#{seen}") };
+            let mut e = cx.entry(Kind::SystemdPreset, &rel, name);
+            e.trigger = Trigger::PackageOp;
+            e.enabled =
+                if shadowed_by.is_some() || before.is_some() { Enablement::Disabled } else { Enablement::Enabled };
+            e.note("scope", scope);
+            e.note("pattern", lossy(pattern));
+            if !instances.is_empty() {
+                e.note("instances", lossy(instances));
+            }
+            if let Some(by) = &shadowed_by {
+                e.note("shadowed_by", cx.root.abs(by).display().to_string());
+            }
+            if let Some(at) = before {
+                e.note("decided_by", at);
+            }
+            if literal {
+                let name = std::ffi::OsStr::from_bytes(pattern);
+                if let Some(found) = by_rank.iter().map(|d| Path::new(d.path).join(name)).find(|p| cx.root.exists(p)) {
+                    e.target_path = Some(cx.root.abs(found));
+                }
+            }
+            if std::str::from_utf8(line).is_err() {
+                e.flag(Flag::EncodingAnomaly);
+            }
+            out.push(e);
+        }
+    }
+    out
+}
 
 struct Directive {
     section: String,
@@ -1284,6 +1531,90 @@ mod tests {
         assert_eq!(u.raw["env.LD_PRELOAD"], "/home/alice/.cache/hook.so");
         // ~/.config/systemd/user is the documented location for user units.
         assert!(!u.has_flag(Flag::HiddenPath));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_environment_generator_is_a_generator_that_says_so() {
+        let dir = tree("envgen");
+        write(&dir, "etc/systemd/system-environment-generators/10-preload", b"#!/bin/sh\necho LD_PRELOAD=/tmp/x.so\n");
+        write(&dir, "usr/local/lib/systemd/user-environment-generators/20-x", b"#!/bin/sh\n");
+        for f in ["etc/systemd/system-environment-generators/10-preload", "usr/local/lib/systemd/user-environment-generators/20-x"] {
+            std::fs::set_permissions(dir.join(f), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        }
+        let s = scan(&dir);
+        let sys = one(&s, "10-preload");
+        assert_eq!(sys.kind, Kind::SystemdGenerator);
+        assert_eq!(sys.raw["generator_type"], "environment");
+        assert_eq!(sys.raw["scope"], "system");
+        assert_eq!(one(&s, "20-x").raw["scope"], "user");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tmpfiles_lines_that_write_are_listed_and_a_replaced_file_is_off() {
+        let dir = tree("tmpfiles");
+        write(
+            &dir,
+            "etc/tmpfiles.d/evil.conf",
+            b"# comment\n\
+              w /proc/sys/kernel/core_pattern - - - - |/tmp/x %p\n\
+              L+ /etc/systemd/system/multi-user.target.wants/x.service - - - - /tmp/x.service\n\
+              d /run/x 0755 root root -\n\
+              f /var/log/empty 0644 root root -\n\
+              f^ /root/.ssh/authorized_keys 0600 root root - ssh.authorized_keys.root\n",
+        );
+        write(&dir, "etc/tmpfiles.d/same.conf", b"C /root/.bashrc - - - - /etc/skel/.bashrc\n");
+        write(&dir, "usr/lib/tmpfiles.d/same.conf", b"C /root/.profile - - - - /usr/share/x\n");
+        let s = scan(&dir);
+        let kinds: Vec<_> = s.entries.iter().filter(|e| e.kind == Kind::Tmpfiles).map(|e| e.name.as_str()).collect();
+        assert_eq!(kinds.len(), 5, "{kinds:?}");
+        let core = one(&s, "w /proc/sys/kernel/core_pattern");
+        assert_eq!(core.raw["argument"], "|/tmp/x %p");
+        assert_eq!(core.trigger, Trigger::Boot);
+        assert_eq!(one(&s, "L+ /etc/systemd/system/multi-user.target.wants/x.service").raw["argument"], "/tmp/x.service");
+        one(&s, "f^ /root/.ssh/authorized_keys");
+        assert!(named(&s, "f /var/log/empty").is_empty(), "an empty file writes nothing");
+        assert!(named(&s, "d /run/x").is_empty());
+        assert_eq!(one(&s, "C /root/.bashrc").enabled, Enablement::Enabled);
+        let vendor = one(&s, "C /root/.profile");
+        assert_eq!(vendor.enabled, Enablement::Disabled, "tmpfiles never reads the replaced file");
+        assert!(vendor.raw["shadowed_by"].ends_with("etc/tmpfiles.d/same.conf"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_preset_enable_names_its_unit_and_the_first_matching_line_decides() {
+        let dir = tree("preset");
+        write(&dir, "etc/systemd/system/evil.service", VENDOR);
+        write(&dir, "usr/lib/systemd/system/sshd.service", VENDOR);
+        write(&dir, "usr/lib/systemd/system/getty@.service", VENDOR);
+        write(&dir, "etc/systemd/system-preset/10-x.preset", b"enable evil.service\ndisable sshd.service\n");
+        write(
+            &dir,
+            "usr/lib/systemd/system-preset/90-default.preset",
+            b"# vendor\nenable sshd.service\nenable getty@.service tty1 tty2\nenable foo-*.service\ndisable *\n",
+        );
+        write(&dir, "usr/lib/systemd/system-preset/10-x.preset", b"enable replaced.service\n");
+        let s = scan(&dir);
+        let evil = one(&s, "enable evil.service");
+        assert_eq!(evil.kind, Kind::SystemdPreset);
+        assert_eq!(evil.trigger, Trigger::PackageOp);
+        assert_eq!(evil.enabled, Enablement::Enabled);
+        assert_eq!(evil.target_path, Some(dir.join("etc/systemd/system/evil.service")));
+        let sshd = one(&s, "enable sshd.service");
+        assert_eq!(sshd.enabled, Enablement::Disabled, "an earlier disable decided it");
+        assert!(sshd.raw["decided_by"].ends_with("10-x.preset: disable sshd.service"));
+        assert_eq!(sshd.target_path, Some(dir.join("usr/lib/systemd/system/sshd.service")));
+        let getty = one(&s, "enable getty@.service");
+        assert_eq!(getty.raw["instances"], "tty1 tty2");
+        assert_eq!(getty.target_path, Some(dir.join("usr/lib/systemd/system/getty@.service")));
+        let glob = one(&s, "enable foo-*.service");
+        assert_eq!((glob.enabled, glob.target_path.clone()), (Enablement::Enabled, None));
+        let replaced = one(&s, "enable replaced.service");
+        assert_eq!(replaced.enabled, Enablement::Disabled);
+        assert!(replaced.raw["shadowed_by"].ends_with("etc/systemd/system-preset/10-x.preset"));
+        assert!(named(&s, "disable *").is_empty(), "disable lines run nothing");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

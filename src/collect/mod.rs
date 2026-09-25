@@ -25,6 +25,33 @@ pub(crate) fn shell_word(word: &[u8]) -> &[u8] {
     &word[..end]
 }
 
+/// A shell-style glob with `*` and `?`, as sudoers includes and systemd
+/// preset patterns use it.
+pub(crate) fn glob_match(pat: &[u8], s: &[u8]) -> bool {
+    let (mut p, mut i) = (0, 0);
+    let (mut star, mut mark) = (usize::MAX, 0);
+    while i < s.len() {
+        if p < pat.len() && (pat[p] == b'?' || pat[p] == s[i]) {
+            p += 1;
+            i += 1;
+        } else if p < pat.len() && pat[p] == b'*' {
+            star = p;
+            p += 1;
+            mark = i;
+        } else if star != usize::MAX {
+            p = star + 1;
+            mark += 1;
+            i = mark;
+        } else {
+            return false;
+        }
+    }
+    while p < pat.len() && pat[p] == b'*' {
+        p += 1;
+    }
+    p == pat.len()
+}
+
 pub fn all() -> Vec<Box<dyn Collector>> {
     vec![
         Box::new(systemd::Systemd),

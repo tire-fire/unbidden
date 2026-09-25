@@ -290,3 +290,17 @@ path = "fuzz_targets/rpm_header.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tmpfiles"
+path = "fuzz_targets/tmpfiles.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "systemd_preset"
+path = "fuzz_targets/systemd_preset.rs"
+test = false
+doc = false
+bench = false

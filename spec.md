@@ -86,7 +86,7 @@ String
 Stable synthetic identity. See below.
 kind
 enum
-Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook
+Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset
 source
 PathBuf
 The file or directory the entry was read from. Always a real path on disk.
@@ -172,7 +172,11 @@ Sudoers is the one judgement call here. A correct parser must handle @includedir
 Collector
 Source of truth
 systemd generators
-Every directory systemd.generator(7) lists: /run, /etc, /usr/local/lib and /usr/lib/systemd/system-generators, and the user-generators equivalents
+Every directory systemd.generator(7) lists: /run, /etc, /usr/local/lib and /usr/lib/systemd/system-generators, and the user-generators equivalents; and the environment generators systemd.environment-generator(7) lists in the same four places, whose output is the environment of everything the manager starts. An environment generator is a systemd_generator with generator_type environment: it is the same mechanism, an executable the manager runs when it starts
+tmpfiles.d
+/etc, /run, /usr/local/lib and /usr/lib/tmpfiles.d, with a file in an earlier directory replacing a same-named one in a later directory; /usr/local/share and /usr/share/user-tmpfiles.d, and in every home ~/.config and ~/.local/share/user-tmpfiles.d. One entry per line that puts content somewhere at boot — w, C, L, and f with an argument or from a credential — since a w line can set any value under /proc/sys and an L or C line can place a file in any search path above
+systemd presets
+/etc, /run, /usr/local/lib and /usr/lib/systemd/system-preset and user-preset. One entry per enable line, the unit it names as the target, so an unpackaged unit a package operation would enable flags the line. The first line whose pattern matches a unit decides it, so an enable after a matching disable or ignore is reported off
 package manager hooks
 /etc/apt/apt.conf.d/*, /etc/dnf/plugins, /etc/yum/pluginconf.d, RPM transaction file triggers
 MOTD
@@ -469,7 +473,7 @@ Specific things to assert per distro, because they are the ones a generic test m
 RHEL, CentOS, Arch, openSUSE and Alpine are not tested. Community bug reports welcome; no release waits on them.
 Parser fuzzing
 Every parser gets a cargo-fuzz target. §3 establishes that parser input is adversarial; fuzzing is how that stops being an aspiration. Priority order: unit files, crontabs, .desktop files, udev rules, PAM configs.
-As built: 37 targets, one per parser. The five above get a minute each in CI, the rest twenty seconds; a smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
+As built: 40 targets, one per parser. The five above get a minute each in CI, the rest twenty seconds; a smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
 Golden files
 Collector output for a fixed synthetic filesystem tree, checked into the repository. Catches unintended changes to the Entry record, which is the schema contract of §10. Alongside it, a mutation pass takes the same tree apart 120 ways and requires every collector to survive each.
 Conventions
@@ -542,6 +546,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5 and §6: /usr/local/lib/systemd was never walked, and the generator directories' precedence was wrong.
 • §5: every per-account unit read as non-standard-location.
 • §5: environment.d drop-ins were reported twice on merged-usr hosts.
+• §5: environment generators, tmpfiles.d and systemd presets were not read.
 • §6: D-Bus answers never matched a vendor unit on distributions whose systemd names /lib.
 • §6: one account could answer for another's units.
 • §7: the snap verdict could be claimed by naming a file, and ran before the package databases.
