@@ -67,8 +67,13 @@ const PAM_ENV_CONF: &str = "etc/security/pam_env.conf";
 
 /// systemd's environment drop-ins, which apply to every user session it
 /// starts. Plain `KEY=value`, like /etc/environment.
-const ENVIRONMENT_D: &[&str] =
-    &["etc/environment.d", "run/environment.d", "usr/lib/environment.d", "lib/environment.d"];
+const ENVIRONMENT_D: &[&str] = &[
+    "etc/environment.d",
+    "run/environment.d",
+    "usr/local/lib/environment.d",
+    "usr/lib/environment.d",
+    "lib/environment.d",
+];
 
 /// How a file that carries environment assignments spells them.
 #[derive(Clone, Copy, PartialEq)]
@@ -162,6 +167,15 @@ impl Collector for Shell {
                 if let (Some(t), Some(e)) = (&home_link, out.get_mut(at)) {
                     e.note("home_symlink_target", t.to_string_lossy());
                 }
+            }
+            // The user manager reads the account's own drop-ins ahead of the
+            // system ones.
+            let dir = u.in_home(".config/environment.d");
+            for ent in cx.dir(&dir) {
+                if ent.is_dir || !ent.name.to_string_lossy().ends_with(".conf") {
+                    continue;
+                }
+                profile(cx, &dir.join(&ent.name), Some(u), Syntax::KeyValue, &mut seen, &mut out);
             }
         }
 
@@ -1058,6 +1072,24 @@ mod tests {
         let found: Vec<_> = scan.entries.iter().filter(|e| e.name == "99-environment.conf").collect();
         assert_eq!(found.len(), 1, "{:?}", found.iter().map(|e| &e.source).collect::<Vec<_>>());
         assert_eq!(found[0].source, dir.join("usr/lib/environment.d/99-environment.conf"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn environment_drop_ins_in_usr_local_and_the_home_are_read() {
+        let dir = tmpdir("envd-more");
+        fs::create_dir_all(dir.join("etc")).unwrap();
+        fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
+        fs::create_dir_all(dir.join("usr/local/lib/environment.d")).unwrap();
+        fs::write(dir.join("usr/local/lib/environment.d/10-local.conf"), "LD_PRELOAD=/opt/a.so\n").unwrap();
+        fs::create_dir_all(dir.join("home/alice/.config/environment.d")).unwrap();
+        fs::write(dir.join("home/alice/.config/environment.d/20-mine.conf"), "LD_PRELOAD=/opt/b.so\n").unwrap();
+
+        let scan = run(&dir);
+        by_name(&scan, Kind::ShellProfile, "10-local.conf");
+        let mine = by_name(&scan, Kind::ShellProfile, "20-mine.conf");
+        assert_eq!(mine.principal.as_deref(), Some("alice"));
+        assert_eq!(mine.raw.get("env.LD_PRELOAD").map(String::as_str), Some("/opt/b.so"));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

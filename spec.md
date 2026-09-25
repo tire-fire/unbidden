@@ -152,15 +152,15 @@ cron
 at jobs
 /var/spool/cron/atjobs, /var/spool/at
 XDG autostart
-/etc/xdg/autostart, every /home/*/.config/autostart, /root/.config/autostart
+/etc/xdg/autostart, each session's /etc/xdg/xdg-*/autostart, every /home/*/.config/autostart, /root/.config/autostart
 shell profiles
-/etc/profile, /etc/profile.d/*, /etc/bash.bashrc, /etc/zsh/*, and per-user .bashrc, .bash_profile, .bash_login, .profile, .zshrc, .zshenv; and the environment files that set variables for every session: /etc/environment, /etc/security/pam_env.conf, and the systemd environment.d drop-ins
+/etc/profile, /etc/profile.d/*, /etc/bash.bashrc, /etc/zsh/*, and per-user .bashrc, .bash_profile, .bash_login, .profile, .zshrc, .zshenv; and the environment files that set variables for every session: /etc/environment, /etc/security/pam_env.conf, and the systemd environment.d drop-ins, per-user ~/.config/environment.d included
 rc.local and SysV
 /etc/rc.local, /etc/rc.d/rc.local, /etc/init.d/*, /etc/rc*.d/*
 PAM
-/etc/pam.d/* — pam_exec lines and modules resolving outside standard module directories
+/etc/pam.d/*, and /usr/lib/pam.d/* for a service /etc/pam.d does not name — pam_exec lines and modules resolving outside standard module directories
 udev
-/etc/udev/rules.d/*, /run/udev/rules.d/*, /lib/udev/rules.d/* — rules carrying RUN+=
+/etc/udev/rules.d/*, /run/udev/rules.d/*, /usr/local/lib/udev/rules.d/*, /lib/udev/rules.d/* — rules carrying RUN+=
 ld.so preload
 /etc/ld.so.preload, and LD_PRELOAD assignments found in the shell-profile and systemd collectors
 SSH
@@ -186,7 +186,7 @@ NetworkManager
 D-Bus services
 The system and session services directories under /usr/share, /usr/local/share, /usr/lib, /run and /etc; the policy files in the system.d and session.d directories beside them are read to annotate the service each one names
 kernel modules
-/etc/modules, /etc/modules-load.d/*, /etc/modprobe.d/* install lines, and /proc/modules for what is loaded
+/etc/modules, modules-load.d/* and modprobe.d/* install lines under /etc, /run, /usr/local/lib and /usr/lib, and /proc/modules for what is loaded
 sudoers
 /etc/sudoers, /etc/sudoers.d/* — NOPASSWD and command aliases
 Tier three — behind --deep
@@ -546,6 +546,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5 and §6: /usr/local/lib/systemd was never walked, and the generator directories' precedence was wrong.
 • §5: every per-account unit read as non-standard-location.
 • §5: environment.d drop-ins were reported twice on merged-usr hosts.
+• §5: /usr/local/lib was not read for udev rules, modprobe.d, modules-load.d or environment.d, nor /run/modprobe.d, ~/.config/environment.d, /usr/lib/pam.d or the session autostart directories under /etc/xdg.
 • §5: environment generators, tmpfiles.d and systemd presets were not read.
 • §6: D-Bus answers never matched a vendor unit on distributions whose systemd names /lib.
 • §6: one account could answer for another's units.

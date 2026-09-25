@@ -6,7 +6,7 @@
 //! a rule carrying invalid UTF-8 survives as evidence rather than becoming
 //! replacement characters.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
@@ -218,16 +218,35 @@ fn is_pam_exec_opt(a: &[u8]) -> bool {
     OPTS.iter().any(|o| eqi(a, o)) || a.starts_with(b"log=") || a.starts_with(b"type=")
 }
 
+/// libpam reads a service's stack from /etc/pam.d, and from the vendor
+/// directory only when /etc/pam.d has no file of that name.
+const PAM_DIRS: [&str; 2] = ["etc/pam.d", "usr/lib/pam.d"];
+
 fn pam(cx: &mut Ctx, out: &mut Vec<Entry>) {
-    let mut files = vec![PathBuf::from("etc/pam.conf")];
-    for ent in cx.dir("etc/pam.d") {
-        if !ent.is_dir {
-            files.push(Path::new("etc/pam.d").join(&ent.name));
+    let mut files = vec![(PathBuf::from("etc/pam.conf"), None)];
+    // Each service's files, the one libpam uses first.
+    let mut copies: BTreeMap<OsString, Vec<PathBuf>> = BTreeMap::new();
+    for dir in PAM_DIRS {
+        for ent in cx.dir(dir) {
+            if !ent.is_dir {
+                let rel = Path::new(dir).join(&ent.name);
+                copies.entry(ent.name.clone()).or_default().push(rel.clone());
+                files.push((rel, Some(ent.name)));
+            }
         }
     }
 
-    for rel in files {
+    for (rel, service_file) in files {
         let Some(bytes) = cx.read(&rel) else { continue };
+        // A vendor stack replaced by one in /etc never runs. It is still
+        // reported, off, so the replacement does not read as a second stack.
+        let others = service_file.and_then(|n| copies.get(&n)).filter(|c| c.len() > 1);
+        let shown = |p: &PathBuf| cx.root.abs(p).display().to_string();
+        let (shadowed_by, shadows) = match others {
+            Some(c) if c[0] != rel => (Some(shown(&c[0])), None),
+            Some(c) => (None, Some(c[1..].iter().map(shown).collect::<Vec<_>>().join(", "))),
+            None => (None, None),
+        };
         let filename = rel.file_name().map(|n| lossy(n.as_encoded_bytes())).unwrap_or_default();
 
         for line in logical_lines(&bytes) {
@@ -267,7 +286,13 @@ fn pam(cx: &mut Ctx, out: &mut Vec<Entry>) {
             };
             let mut e = cx.entry(Kind::Pam, &rel, name);
             e.trigger = Trigger::Auth;
-            e.enabled = Enablement::Enabled;
+            e.enabled = if shadowed_by.is_some() { Enablement::Disabled } else { Enablement::Enabled };
+            if let Some(by) = &shadowed_by {
+                e.note("shadowed_by", by.clone());
+            }
+            if let Some(paths) = &shadows {
+                e.note("shadows", paths.clone());
+            }
             e.note("service", service);
             e.note("module_type", mtype);
             e.note("control", lossy(control));
@@ -1304,4 +1329,24 @@ mod tests {
         assert!(!module_is_standard(b"./x.so"));
     }
 
+
+    #[test]
+    fn a_vendor_stack_replaced_in_etc_is_reported_off() {
+        let d = tree("pamvendor");
+        put(&d, "etc/pam.d/login", "session optional /opt/admin.so\n");
+        put(&d, "usr/lib/pam.d/login", "session optional /opt/vendor.so\n");
+        put(&d, "usr/lib/pam.d/polkit-1", "auth optional /opt/only.so\n");
+        let s = scan(&d);
+        let admin = named(&s, "/opt/admin.so").pop().unwrap();
+        let vendor = named(&s, "/opt/vendor.so").pop().unwrap();
+        let only = named(&s, "/opt/only.so").pop().unwrap();
+        assert_eq!(admin.enabled, Enablement::Enabled);
+        assert!(admin.raw["shadows"].ends_with("usr/lib/pam.d/login"));
+        assert_eq!(vendor.enabled, Enablement::Disabled, "libpam never reads the replaced stack");
+        assert!(vendor.raw["shadowed_by"].ends_with("etc/pam.d/login"));
+        assert_eq!(only.enabled, Enablement::Enabled, "a vendor stack with no /etc copy is the one used");
+        assert_eq!(only.raw["service"], "polkit-1");
+        assert!(!only.raw.contains_key("shadowed_by"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }
