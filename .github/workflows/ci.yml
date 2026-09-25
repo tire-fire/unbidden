@@ -331,6 +331,16 @@ jobs:
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Only the run for main's tip releases. An older run's changes are
+          # in the tip, whose own run releases them; two runs releasing at once
+          # would both claim the next version, and an older run would compare
+          # against a release tag that is not in its history.
+          git fetch -q origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "main has moved past $GITHUB_SHA; the run for its tip releases"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           last=$(git tag -l 'v*' --sort=-v:refname | head -1)
           if [ -n "$last" ] && ! git diff --name-only "$last"..HEAD \
                | grep -qE '^(src/|Cargo\.toml$|Cargo\.lock$)'; then
@@ -368,9 +378,17 @@ jobs:
           sha256sum unbidden-* > SHA256SUMS
           cat SHA256SUMS
       - name: tag it, now that the binaries exist
+        id: tag
         if: steps.v.outputs.skip != '1' && github.ref_type != 'tag'
         run: |
           v=${{ steps.v.outputs.version }}
+          # Asked again: the builds above take minutes, and a push to main in
+          # the meantime makes this run the older one.
+          git fetch -q origin main
+          if [ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]; then
+            echo "main moved past $GITHUB_SHA during the build; the run for its tip releases"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # The first release takes the version Cargo.toml already holds, so
@@ -380,9 +398,12 @@ jobs:
           fi
           git tag "v$v"
           # Pushed with GITHUB_TOKEN, which by design starts no further run.
-          git push -q origin HEAD:main "v$v"
+          # Atomic: a rejected main must not leave the tag behind, pointing at
+          # a release commit main never got.
+          git push -q --atomic origin HEAD:main "v$v"
+          echo "pushed=1" >> "$GITHUB_OUTPUT"
       - name: publish the crate
-        if: steps.v.outputs.skip != '1'
+        if: steps.v.outputs.skip != '1' && (github.ref_type == 'tag' || steps.tag.outputs.pushed == '1')
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         # A version on crates.io can be yanked but never withdrawn, so a
@@ -397,7 +418,7 @@ jobs:
             cargo publish --locked
           fi
       - name: post it
-        if: steps.v.outputs.skip != '1'
+        if: steps.v.outputs.skip != '1' && (github.ref_type == 'tag' || steps.tag.outputs.pushed == '1')
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
