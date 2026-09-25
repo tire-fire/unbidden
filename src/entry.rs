@@ -75,6 +75,8 @@ str_enum!(Kind {
     SuidBinary => "suid_binary",
     FileCapability => "file_capability",
     GitHook => "git_hook",
+    Tmpfiles => "tmpfiles",
+    SystemdPreset => "systemd_preset",
 });
 
 str_enum!(Trigger {

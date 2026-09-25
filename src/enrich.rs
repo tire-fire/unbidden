@@ -825,6 +825,18 @@ fn standard_roots(kind: Kind) -> &'static [&'static str] {
         // ponytail: a prefix, since the session directories are globbed;
         // /etc/xdg/xdg-*/ is root's to write either way.
         Kind::XdgAutostart => &["/etc/xdg/autostart/", "/etc/xdg/xdg-"],
+        Kind::Tmpfiles => &[
+            "/etc/tmpfiles.d/",
+            "/run/tmpfiles.d/",
+            "/usr/local/lib/tmpfiles.d/",
+            "/usr/lib/tmpfiles.d/",
+            "/lib/tmpfiles.d/",
+            "/usr/local/share/user-tmpfiles.d/",
+            "/usr/share/user-tmpfiles.d/",
+        ],
+        Kind::SystemdPreset => {
+            &["/etc/systemd/", "/run/systemd/", "/usr/local/lib/systemd/", "/usr/lib/systemd/", "/lib/systemd/"]
+        }
         Kind::Cron => &["/etc/crontab", "/etc/cron", "/etc/anacrontab", "/var/spool/cron"],
         _ => &[],
     }
@@ -840,6 +852,7 @@ fn apply_location(root: &Root, entry: &mut Entry) {
     let mut acceptable: Vec<String> = roots.iter().map(|r| (*r).to_string()).collect();
     let per_home: &[&str] = match entry.kind {
         Kind::XdgAutostart => &[".config/autostart/"],
+        Kind::Tmpfiles => &[".config/user-tmpfiles.d/", ".local/share/user-tmpfiles.d/"],
         // The per-account half of the user manager's search path.
         Kind::SystemdUnit | Kind::SystemdTimer => {
             &[".config/systemd/user/", ".config/systemd/user.control/", ".local/share/systemd/user/"]
