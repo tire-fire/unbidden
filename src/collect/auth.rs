@@ -11,6 +11,7 @@ use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt;
 use std::path::{Path, PathBuf};
 
+use super::glob_match;
 use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, dedup_ids};
 use crate::scan::{Collector, Ctx};
 
@@ -584,31 +585,6 @@ fn sshd_kv(line: &[u8]) -> Option<(&[u8], &[u8])> {
         }
     }
     Some((keyword, &line[i..]))
-}
-
-fn glob_match(pat: &[u8], s: &[u8]) -> bool {
-    let (mut p, mut i) = (0, 0);
-    let (mut star, mut mark) = (usize::MAX, 0);
-    while i < s.len() {
-        if p < pat.len() && (pat[p] == b'?' || pat[p] == s[i]) {
-            p += 1;
-            i += 1;
-        } else if p < pat.len() && pat[p] == b'*' {
-            star = p;
-            p += 1;
-            mark = i;
-        } else if star != usize::MAX {
-            p = star + 1;
-            mark += 1;
-            i = mark;
-        } else {
-            return false;
-        }
-    }
-    while p < pat.len() && pat[p] == b'*' {
-        p += 1;
-    }
-    p == pat.len()
 }
 
 /// An include path resolved root-relative: absolute means relative to the scan
