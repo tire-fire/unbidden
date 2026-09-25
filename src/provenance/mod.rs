@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::entry::Provenance;
+use crate::entry::{Integrity, Provenance};
 use crate::root::Root;
 
 pub type Answers = BTreeMap<PathBuf, Provenance>;
@@ -44,8 +44,26 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Resolution {
 
 type Backend = fn(&Root, &BTreeSet<PathBuf>) -> Option<Answers>;
 
+/// Files a package installs by copying a template it ships, from a
+/// maintainer script, rather than shipping the file itself: libc-bin's
+/// postinst puts /usr/share/libc-bin/nsswitch.conf in place as
+/// /etc/nsswitch.conf. No package database claims the copy. One that is
+/// byte for byte the template, while the template is packaged and intact,
+/// takes the template's verdict; any difference leaves it Unpackaged.
+const TEMPLATES: [(&str, &str); 1] = [("etc/nsswitch.conf", "usr/share/libc-bin/nsswitch.conf")];
+
+/// Largest template compared; nsswitch.conf is a few hundred bytes.
+const TEMPLATE_CAP: usize = 64 * 1024;
+
 fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Backend)]) -> Resolution {
     let mut out = Answers::new();
+    // The templates are asked about too, so their verdict is known below.
+    let asked: BTreeSet<PathBuf> = wanted
+        .iter()
+        .cloned()
+        .chain(TEMPLATES.iter().filter(|(copy, _)| wanted.contains(Path::new(copy))).map(|(_, t)| PathBuf::from(t)))
+        .collect();
+    let wanted = &asked;
     let mut failures = Vec::new();
 
     // A backend returns None when its database is not on this root, which is
@@ -64,6 +82,22 @@ fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Back
             Err(payload) => {
                 failures.push(format!("{name} database: {}", crate::scan::panic_message(payload)));
                 backend_failed = true;
+            }
+        }
+    }
+
+    for (copy, template) in TEMPLATES {
+        let (copy, template) = (Path::new(copy), Path::new(template));
+        if !wanted.contains(copy) || out.contains_key(copy) {
+            continue;
+        }
+        let Some(verdict @ Provenance::Packaged { integrity: Integrity::Intact, .. }) = out.get(template) else {
+            continue;
+        };
+        let read = |p: &Path| root.read_capped(p, TEMPLATE_CAP).ok().filter(|(_, truncated)| !truncated).map(|(b, _)| b);
+        if let (Some(a), Some(b)) = (read(copy), read(template)) {
+            if a == b {
+                out.insert(copy.to_path_buf(), verdict.clone());
             }
         }
     }
@@ -245,6 +279,35 @@ mod tests {
             Provenance::Packaged { integrity: crate::entry::Integrity::Modified, .. }
         ));
         assert_eq!(answers[Path::new("etc/systemd/system/snap.evil.x.service")], Provenance::Unpackaged);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_copy_of_an_intact_packaged_template_takes_its_verdict() {
+        fn ships_template(_: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
+            let mut a = Answers::new();
+            let t = PathBuf::from("usr/share/libc-bin/nsswitch.conf");
+            if wanted.contains(&t) {
+                let v = Provenance::Packaged { package: "libc-bin".into(), version: "2.39".into(), integrity: Integrity::Intact };
+                a.insert(t, v);
+            }
+            Some(a)
+        }
+        let dir = std::env::temp_dir().join(format!("unbidden-prov-template-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::create_dir_all(dir.join("usr/share/libc-bin")).unwrap();
+        std::fs::write(dir.join("usr/share/libc-bin/nsswitch.conf"), b"passwd: files\n").unwrap();
+        let root = Root::at(&dir).unwrap();
+        let wanted: BTreeSet<PathBuf> = [PathBuf::from("etc/nsswitch.conf")].into_iter().collect();
+
+        std::fs::write(dir.join("etc/nsswitch.conf"), b"passwd: files\n").unwrap();
+        let r = resolve_with(&root, &wanted, &[("dpkg", ships_template)]);
+        assert!(r.answers[Path::new("etc/nsswitch.conf")].is_packaged_intact());
+
+        std::fs::write(dir.join("etc/nsswitch.conf"), b"passwd: files evil\n").unwrap();
+        let r = resolve_with(&root, &wanted, &[("dpkg", ships_template)]);
+        assert_eq!(r.answers[Path::new("etc/nsswitch.conf")], Provenance::Unpackaged, "one byte off is not the template");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

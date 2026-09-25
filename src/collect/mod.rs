@@ -4,7 +4,11 @@
 //! reads six spool layouts and emits two kinds, and splitting it would mean
 //! parsing crontab syntax twice.
 
-use crate::scan::Collector;
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+
+use crate::scan::{Collector, Ctx};
 
 pub mod auth;
 pub mod cron;
@@ -52,6 +56,78 @@ pub(crate) fn glob_match(pat: &[u8], s: &[u8]) -> bool {
     p == pat.len()
 }
 
+/// An include path resolved root-relative: absolute means relative to the scan
+/// root, bare means relative to `base`.
+pub(crate) fn include_rel(base: &Path, spec: &[u8]) -> PathBuf {
+    let p = Path::new(OsStr::from_bytes(spec));
+    match p.strip_prefix("/") {
+        Ok(stripped) => stripped.to_path_buf(),
+        Err(_) => base.join(p),
+    }
+}
+
+/// The files a glob in the last path component matches, sorted as glob(3)
+/// returns them; a path with no glob is itself.
+pub(crate) fn expand_glob(cx: &mut Ctx, rel: &Path) -> Vec<PathBuf> {
+    let name = rel.file_name().map(|n| n.as_encoded_bytes().to_vec()).unwrap_or_default();
+    if !name.contains(&b'*') && !name.contains(&b'?') {
+        return vec![rel.to_path_buf()];
+    }
+    let dir = rel.parent().unwrap_or(Path::new("")).to_path_buf();
+    let mut out = Vec::new();
+    for ent in cx.dir(&dir) {
+        if !ent.is_dir && glob_match(&name, ent.name.as_encoded_bytes()) {
+            out.push(dir.join(&ent.name));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The directories ldconfig puts in the loader's cache, read from
+/// /etc/ld.so.conf as ldconfig reads it: `#` starts a comment anywhere, an
+/// `include` line names whitespace-separated patterns relative to the file
+/// it is in, a `hwcap` line is ignored, and any other line is one directory.
+/// A file that is not included is never read, whatever directory it sits in.
+pub(crate) fn ld_so_conf_dirs(cx: &mut Ctx) -> Vec<String> {
+    let mut out = Vec::new();
+    ld_so_conf(cx, Path::new("etc/ld.so.conf"), 0, &mut out);
+    out
+}
+
+fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<String>) {
+    // An include loop ends here rather than in the stack.
+    if depth > 8 {
+        return;
+    }
+    let Some(bytes) = cx.read_capped(rel, 64 * 1024) else { return };
+    let base = rel.parent().unwrap_or(Path::new("")).to_path_buf();
+    for raw in bytes.split(|b| *b == b'\n') {
+        let line = raw.split(|b| *b == b'#').next().unwrap_or_default().trim_ascii();
+        let (word, rest) = line.split_at(line.iter().position(u8::is_ascii_whitespace).unwrap_or(line.len()));
+        if line.is_empty() || word.eq_ignore_ascii_case(b"hwcap") {
+            continue;
+        }
+        if word == b"include" && !rest.is_empty() {
+            for pat in rest.split(u8::is_ascii_whitespace).filter(|p| !p.is_empty()) {
+                for f in expand_glob(cx, &include_rel(&base, pat)) {
+                    ld_so_conf(cx, &f, depth + 1, out);
+                }
+            }
+            continue;
+        }
+        // ldconfig strips trailing slashes, and an old `dir=TYPE` suffix.
+        let dir = line.split(|b| *b == b'=').next().unwrap_or_default().trim_ascii();
+        let mut d = String::from_utf8_lossy(dir).into_owned();
+        while d.len() > 1 && d.ends_with('/') {
+            d.pop();
+        }
+        if !d.is_empty() && !out.contains(&d) {
+            out.push(d);
+        }
+    }
+}
+
 pub fn all() -> Vec<Box<dyn Collector>> {
     vec![
         Box::new(systemd::Systemd),
@@ -65,4 +141,19 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(deep::GitConfig),
         Box::new(deep::Deep),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn glob_matching_is_not_a_prefix_check() {
+        assert!(glob_match(b"*.conf", b"10-evil.conf"));
+        assert!(!glob_match(b"*.conf", b"notes.txt"));
+        assert!(glob_match(b"sshd_config_?", b"sshd_config_1"));
+        assert!(glob_match(b"*", b"anything"));
+        assert!(!glob_match(b"a*b", b"ab_"));
+        assert!(glob_match(b"a*b*c", b"axxbxxc"));
+    }
 }
