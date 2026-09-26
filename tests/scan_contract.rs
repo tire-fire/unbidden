@@ -218,6 +218,12 @@ fn collector_output_matches_the_golden_record() {
     build_tree(&dir);
     let scan = scan_tree(&dir);
 
+    // A baseline diff decides which differences to believe by the collector
+    // an entry came from, so an entry without one would be judged by none.
+    for e in &scan.entries {
+        assert!(e.collector.is_some(), "{} ({:?}) names no collector", e.name, e.kind);
+    }
+
     // Nothing may fail on input this ordinary.
     for c in &scan.header.collectors {
         assert!(

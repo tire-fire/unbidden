@@ -155,6 +155,11 @@ impl Provenance {
 pub struct Entry {
     pub id: String,
     pub kind: Kind,
+    /// The collector that produced this entry, or whose entry it was made
+    /// from. A baseline diff trusts an entry's differences only as far as
+    /// this collector saw the same things both times. None in a baseline
+    /// written before the field existed.
+    pub collector: Option<String>,
     pub source: PathBuf,
     pub name: String,
     pub command: Option<Vec<u8>>,
@@ -178,6 +183,7 @@ impl Entry {
         Entry {
             id: entry_id(kind, &source, &name),
             kind,
+            collector: None,
             source,
             name,
             command: None,
@@ -308,6 +314,7 @@ impl Serialize for Entry {
         let mut m = ser.serialize_map(None)?;
         m.serialize_entry("id", &self.id)?;
         m.serialize_entry("kind", &self.kind)?;
+        m.serialize_entry("collector", &self.collector)?;
         put_bytes(&mut m, "source", self.source.as_os_str().as_bytes())?;
         m.serialize_entry("name", &self.name)?;
         match &self.command {
@@ -367,6 +374,7 @@ impl<'de> Deserialize<'de> for Entry {
             fn visit_map<M: MapAccess<'de>>(self, mut m: M) -> Result<Entry, M::Error> {
                 let mut id = None;
                 let mut kind = None;
+                let mut collector = None;
                 let mut source = None;
                 let mut name = None;
                 let mut command = None;
@@ -386,6 +394,7 @@ impl<'de> Deserialize<'de> for Entry {
                     match key.as_str() {
                         "id" => id = Some(m.next_value()?),
                         "kind" => kind = Some(m.next_value()?),
+                        "collector" => collector = m.next_value()?,
                         "source" => source = Some(to_path(m.next_value()?)),
                         "name" => name = Some(m.next_value()?),
                         "command" => {
@@ -413,6 +422,7 @@ impl<'de> Deserialize<'de> for Entry {
                 Ok(Entry {
                     id: id.ok_or_else(|| missing("id"))?,
                     kind: kind.ok_or_else(|| missing("kind"))?,
+                    collector,
                     source: source.ok_or_else(|| missing("source"))?,
                     name: name.ok_or_else(|| missing("name"))?,
                     command,

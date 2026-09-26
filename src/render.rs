@@ -554,6 +554,7 @@ pub fn diff_table(
     w: &mut impl Write,
     scan: &Scan,
     diffs: &[crate::diff::Diffed],
+    coverage: &std::collections::BTreeMap<String, String>,
     filters: &Filters,
     opts: &TableOpts,
 ) -> io::Result<()> {
@@ -578,6 +579,8 @@ pub fn diff_table(
     for d in &shown {
         let detail = match &d.delta {
             crate::diff::Delta::Changed { fields } => fields.join(", "),
+            crate::diff::Delta::Uncertain { would_be, fields, .. } if fields.is_empty() => format!("would be {would_be}"),
+            crate::diff::Delta::Uncertain { would_be, fields, .. } => format!("would be {would_be}: {}", fields.join(", ")),
             _ => match &d.entry.command {
                 Some(c) => String::from_utf8_lossy(c).into_owned(),
                 None => d.entry.source.to_string_lossy().into_owned(),
@@ -595,7 +598,16 @@ pub fn diff_table(
     }
 
     writeln!(w)?;
-    writeln!(w, "{} entries differ.", shown.len())?;
+    let uncertain = shown.iter().filter(|d| matches!(d.delta, crate::diff::Delta::Uncertain { .. })).count();
+    writeln!(w, "{} entries differ.", shown.len() - uncertain)?;
+    if !coverage.is_empty() {
+        // A difference a coverage change could have produced is shown, not
+        // dropped and not asserted: it may be the host, or the scan.
+        writeln!(w, "{uncertain} uncertain, because a collector did not see the same things both times:")?;
+        for why in coverage.values() {
+            writeln!(w, "  {}", visible(why, false))?;
+        }
+    }
     if unchanged > 0 {
         writeln!(w, "{unchanged} entries unchanged — use --all")?;
     }
@@ -606,9 +618,14 @@ pub fn diff_ndjson(
     w: &mut impl Write,
     scan: &Scan,
     diffs: &[crate::diff::Diffed],
+    coverage: &std::collections::BTreeMap<String, String>,
     filters: &Filters,
 ) -> io::Result<()> {
-    serde_json::to_writer(&mut *w, &scan.header)?;
+    let mut header = serde_json::to_value(&scan.header)?;
+    if let Some(map) = header.as_object_mut() {
+        map.insert("coverage_changes".into(), serde_json::json!(coverage));
+    }
+    serde_json::to_writer(&mut *w, &header)?;
     w.write_all(b"\n")?;
     for d in diffs.iter().filter(|d| filters.keep(&d.entry)) {
         serde_json::to_writer(&mut *w, &crate::diff::to_json(d))?;

@@ -5,7 +5,7 @@
 //! `command` and `target_sha256`, not as a removal and an unrelated addition
 //! that an operator has to notice are the same thing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
@@ -19,6 +19,9 @@ pub enum Delta {
     Removed,
     Changed { fields: Vec<&'static str> },
     Unchanged,
+    /// Would be `would_be`, but its collector did not see the same things
+    /// both times, so the difference may be the coverage and not the host.
+    Uncertain { would_be: &'static str, fields: Vec<&'static str>, because: String },
 }
 
 impl Delta {
@@ -28,6 +31,7 @@ impl Delta {
             Delta::Removed => "removed",
             Delta::Changed { .. } => "changed",
             Delta::Unchanged => "unchanged",
+            Delta::Uncertain { .. } => "uncertain",
         }
     }
 }
@@ -77,28 +81,86 @@ pub fn comparable(baseline: &Scan, current: &Scan) -> Result<(), String> {
         }
     }
 
+    Ok(())
+}
+
+/// What one collector could see: everything, everything but some paths, or
+/// nothing at all.
+#[derive(Clone, Debug, PartialEq)]
+enum Coverage {
+    All,
+    AllBut(BTreeSet<String>),
+    Nothing,
+}
+
+impl Coverage {
+    fn of(s: Option<&CollectorStatus>) -> Coverage {
+        match s.map(|c| &c.status) {
+            Some(Status::Complete) => Coverage::All,
+            Some(Status::Partial { unreadable }) => Coverage::AllBut(unreadable.iter().cloned().collect()),
+            _ => Coverage::Nothing,
+        }
+    }
+
+    /// Whether this saw at least everything `other` saw.
+    fn covers(&self, other: &Coverage) -> bool {
+        match (self, other) {
+            (Coverage::All, _) | (_, Coverage::Nothing) => true,
+            (Coverage::AllBut(mine), Coverage::AllBut(theirs)) => mine.is_subset(theirs),
+            _ => false,
+        }
+    }
+}
+
+/// Which of a collector's differences can be believed. Where the baseline
+/// saw everything the current scan saw, anything new is new; where the
+/// current scan saw everything the baseline saw, anything gone is gone.
+/// A change to an entry both scans hold is believed only when both saw the
+/// same things: an unreadable drop-in changes what a unit runs.
+struct Trust {
+    added: bool,
+    removed: bool,
+    changed: bool,
+    because: String,
+}
+
+/// Per collector, how far its differences can be trusted, for the ones
+/// whose coverage moved. A collector absent from this map saw the same
+/// things both times.
+pub fn coverage_changes(baseline: &Scan, current: &Scan) -> BTreeMap<String, String> {
+    trust(baseline, current).into_iter().map(|(name, t)| (name, t.because)).collect()
+}
+
+fn trust(baseline: &Scan, current: &Scan) -> BTreeMap<String, Trust> {
     let by_name = |s: &Scan| -> BTreeMap<String, CollectorStatus> {
         s.header.collectors.iter().map(|c| (c.name.clone(), c.clone())).collect()
     };
     let (old, new) = (by_name(baseline), by_name(current));
-
-    let mut problems = Vec::new();
-    for name in old.keys().chain(new.keys()).collect::<std::collections::BTreeSet<_>>() {
-        match (old.get(name), new.get(name)) {
-            (Some(a), Some(b)) if kind_of(&a.status) != kind_of(&b.status) => problems.push(format!(
-                "{name}: {} then, {} now",
-                kind_of(&a.status),
-                kind_of(&b.status)
-            )),
-            (Some(_), None) => problems.push(format!("{name}: present in the baseline, absent now")),
-            (None, Some(_)) => problems.push(format!("{name}: absent from the baseline, present now")),
-            _ => {}
+    let mut out = BTreeMap::new();
+    for name in old.keys().chain(new.keys()).collect::<BTreeSet<_>>() {
+        let (then, now) = (Coverage::of(old.get(name)), Coverage::of(new.get(name)));
+        let (narrowed, widened) = (then.covers(&now), now.covers(&then));
+        if narrowed && widened {
+            continue;
         }
+        let status = |c: Option<&CollectorStatus>| c.map_or("absent", |c| kind_of(&c.status));
+        let mut because = format!("{name}: {} then, {} now", status(old.get(name)), status(new.get(name)));
+        let unreadable = |c: Option<&CollectorStatus>| match c.map(|c| &c.status) {
+            Some(Status::Partial { unreadable }) => unreadable.clone(),
+            _ => Vec::new(),
+        };
+        let (was, is) = (unreadable(old.get(name)), unreadable(new.get(name)));
+        let fresh: Vec<&String> = is.iter().filter(|u| !was.contains(u)).collect();
+        let cleared: Vec<&String> = was.iter().filter(|u| !is.contains(u)).collect();
+        if !fresh.is_empty() {
+            because.push_str(&format!("; newly unreadable: {}", fresh.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+        if !cleared.is_empty() {
+            because.push_str(&format!("; readable again: {}", cleared.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+        out.insert(name.clone(), Trust { added: narrowed, removed: widened, changed: false, because });
     }
-    if !problems.is_empty() {
-        return Err(format!("collector coverage differs, so the scans are not comparable:\n  {}", problems.join("\n  ")));
-    }
-    Ok(())
+    out
 }
 
 fn depth(deep: bool) -> &'static str {
@@ -140,13 +202,41 @@ fn index(scan: &Scan, which: &str) -> Result<BTreeMap<String, Entry>, String> {
 
 pub fn diff(baseline: &Scan, current: &Scan) -> Result<Vec<Diffed>, String> {
     comparable(baseline, current)?;
+    let trust = trust(baseline, current);
+    // A baseline written before entries named their collector cannot say
+    // which differences a coverage change touches, so it refuses as every
+    // baseline used to.
+    if !trust.is_empty() && baseline.entries.iter().any(|e| e.collector.is_none()) {
+        let because: Vec<&str> = trust.values().map(|t| t.because.as_str()).collect();
+        return Err(format!(
+            "collector coverage differs, and this baseline predates per-collector comparison; \
+             take a new baseline:\n  {}",
+            because.join("\n  ")
+        ));
+    }
     let mut old = index(baseline, "baseline")?;
     let new = index(current, "current scan")?;
+
+    // The delta an entry has, or Uncertain where its collector's coverage
+    // moved in a way that could have produced it.
+    let judged = |entry: &Entry, delta: Delta| -> Delta {
+        let Some(t) = entry.collector.as_ref().and_then(|c| trust.get(c)) else { return delta };
+        let (trusted, would_be, fields) = match &delta {
+            Delta::Added => (t.added, "added", Vec::new()),
+            Delta::Removed => (t.removed, "removed", Vec::new()),
+            Delta::Changed { fields } => (t.changed, "changed", fields.clone()),
+            _ => return delta,
+        };
+        if trusted { delta } else { Delta::Uncertain { would_be, fields, because: t.because.clone() } }
+    };
 
     let mut out = Vec::new();
     for (id, entry) in new {
         match old.remove(&id) {
-            None => out.push(Diffed { entry, delta: Delta::Added }),
+            None => {
+                let delta = judged(&entry, Delta::Added);
+                out.push(Diffed { entry, delta });
+            }
             Some(before) => {
                 let fields = changed_fields(&before, &entry);
                 // A timestamp that moved on its own is not a change. systemd
@@ -160,7 +250,7 @@ pub fn diff(baseline: &Scan, current: &Scan) -> Result<Vec<Diffed>, String> {
                 let delta = if substantive.is_empty() {
                     Delta::Unchanged
                 } else {
-                    Delta::Changed { fields }
+                    judged(&entry, Delta::Changed { fields })
                 };
                 out.push(Diffed { entry, delta });
             }
@@ -168,7 +258,8 @@ pub fn diff(baseline: &Scan, current: &Scan) -> Result<Vec<Diffed>, String> {
     }
     // Whatever the baseline still holds was not seen this time.
     for (_, entry) in old {
-        out.push(Diffed { entry, delta: Delta::Removed });
+        let delta = judged(&entry, Delta::Removed);
+        out.push(Diffed { entry, delta });
     }
 
     out.sort_by(|a, b| (a.entry.kind, &a.entry.source, &a.entry.name).cmp(&(b.entry.kind, &b.entry.source, &b.entry.name)));
@@ -216,8 +307,18 @@ pub fn to_json(d: &Diffed) -> serde_json::Value {
     let mut value = serde_json::to_value(&d.entry).unwrap_or(serde_json::Value::Null);
     if let Some(map) = value.as_object_mut() {
         map.insert("delta".into(), serde_json::Value::String(d.delta.label().into()));
-        if let Delta::Changed { fields } = &d.delta {
-            map.insert("changed".into(), serde_json::json!(fields));
+        match &d.delta {
+            Delta::Changed { fields } => {
+                map.insert("changed".into(), serde_json::json!(fields));
+            }
+            Delta::Uncertain { would_be, fields, because } => {
+                map.insert("would_be".into(), serde_json::json!(would_be));
+                if !fields.is_empty() {
+                    map.insert("changed".into(), serde_json::json!(fields));
+                }
+                map.insert("uncertain_because".into(), serde_json::json!(because));
+            }
+            _ => {}
         }
     }
     value
@@ -258,6 +359,7 @@ mod tests {
         let mut e = Entry::new(Kind::SystemdUnit, format!("/etc/systemd/system/{name}"), name);
         e.command = Some(command.to_vec());
         e.enabled = Enablement::Enabled;
+        e.collector = Some("systemd".into());
         e
     }
 
@@ -344,10 +446,14 @@ mod tests {
         let err = diff(&before, &after).unwrap_err();
         assert!(err.contains("unprivileged"), "{err}");
 
+        // A baseline written before entries named their collector cannot
+        // tell which differences a coverage change touches.
+        let mut old = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
+        old.entries[0].collector = None;
         let mut after = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
         after.header.collectors[0].status = Status::Failed { error: "boom".into() };
-        let err = diff(&before, &after).unwrap_err();
-        assert!(err.contains("complete then, failed now"), "{err}");
+        let err = diff(&old, &after).unwrap_err();
+        assert!(err.contains("predates per-collector comparison") && err.contains("complete then, failed now"), "{err}");
 
         let mut after = scan_of(vec![unit("a.service", b"/usr/bin/a")]);
         after.header.deep = true;
@@ -389,5 +495,59 @@ mod tests {
         assert_eq!(json["changed"][0], "command");
         assert_eq!(json["kind"], "systemd_unit");
         assert_eq!(json["command"], "/tmp/stage2");
+    }
+
+    #[test]
+    fn a_collector_that_saw_less_makes_only_its_own_differences_uncertain() {
+        let partial = |unreadable: &[&str]| Status::Partial { unreadable: unreadable.iter().map(|s| s.to_string()).collect() };
+        let dbus = |name: &str| {
+            let mut e = Entry::new(Kind::DbusService, format!("/usr/share/dbus-1/system-services/{name}"), name);
+            e.collector = Some("pkg".into());
+            e
+        };
+        let scan = |entries: Vec<Entry>, systemd: Status| {
+            let mut s = scan_of(entries);
+            s.header.collectors[0].status = systemd;
+            s.header.collectors.push(CollectorStatus { name: "pkg".into(), entries: 0, status: Status::Complete, truncated: Vec::new() });
+            s
+        };
+        let delta = |d: &[Diffed], name: &str| d.iter().find(|x| x.entry.name == name).unwrap().delta.clone();
+
+        // The CI flake: systemd went partial after a plant, and the planted
+        // D-Bus service, another collector's, must still read as added.
+        let before = scan(vec![unit("gone.service", b"/a"), unit("edited.service", b"/a"), unit("same.service", b"/a")], Status::Complete);
+        let after = scan(
+            vec![unit("edited.service", b"/b"), unit("same.service", b"/a"), unit("new.service", b"/a"), dbus("org.evil.service")],
+            partial(&["etc/systemd/system/x.service: permission denied"]),
+        );
+        let d = diff(&before, &after).unwrap();
+        assert_eq!(delta(&d, "org.evil.service"), Delta::Added, "another collector's finding is untouched");
+        assert_eq!(delta(&d, "new.service"), Delta::Added, "the baseline saw everything, so what is new is new");
+        assert_eq!(delta(&d, "same.service"), Delta::Unchanged);
+        let Delta::Uncertain { would_be, because, .. } = delta(&d, "gone.service") else { panic!() };
+        assert_eq!(would_be, "removed", "it may only be unreadable now");
+        assert!(because.contains("systemd: complete then, partial now") && because.contains("newly unreadable: etc/systemd/system/x.service"), "{because}");
+        let Delta::Uncertain { would_be, fields, .. } = delta(&d, "edited.service") else { panic!() };
+        assert_eq!((would_be, fields), ("changed", vec!["command"]), "a drop-in it could not read changes what a unit runs");
+        assert_eq!(coverage_changes(&before, &after).len(), 1);
+
+        // The other way round: removals are believed, additions are not.
+        let d = diff(&after, &before).unwrap();
+        assert_eq!(delta(&d, "new.service"), Delta::Removed);
+        assert!(matches!(delta(&d, "gone.service"), Delta::Uncertain { would_be: "added", .. }));
+        assert_eq!(delta(&d, "org.evil.service"), Delta::Removed);
+
+        // Unreadable in different places each time: nothing is believed.
+        let a = scan(vec![unit("x.service", b"/a")], partial(&["one"]));
+        let b = scan(vec![unit("y.service", b"/a")], partial(&["two"]));
+        let d = diff(&a, &b).unwrap();
+        assert!(matches!(delta(&d, "x.service"), Delta::Uncertain { would_be: "removed", .. }));
+        assert!(matches!(delta(&d, "y.service"), Delta::Uncertain { would_be: "added", .. }));
+
+        // The same unreadable paths both times: comparable as ever.
+        let a = scan(vec![unit("x.service", b"/a")], partial(&["one"]));
+        let b = scan(vec![unit("y.service", b"/a")], partial(&["one"]));
+        assert!(coverage_changes(&a, &b).is_empty());
+        assert_eq!(delta(&diff(&a, &b).unwrap(), "y.service"), Delta::Added);
     }
 }

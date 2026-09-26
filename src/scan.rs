@@ -352,7 +352,10 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
                     let unreadable = cx.unreadable;
                     let truncated = cx.truncated;
                     match collected {
-                        Ok(entries) => {
+                        Ok(mut entries) => {
+                            for e in &mut entries {
+                                e.collector = Some(c.name().to_string());
+                            }
                             let status = if unreadable.is_empty() {
                                 Status::Complete
                             } else {
