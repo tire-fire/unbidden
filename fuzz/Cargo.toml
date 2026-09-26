@@ -311,3 +311,10 @@ path = "fuzz_targets/nsswitch.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sudo_conf"
+path = "fuzz_targets/sudo_conf.rs"
+test = false
+doc = false
+bench = false

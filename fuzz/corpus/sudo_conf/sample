@@ -1,0 +1,5 @@
+Plugin sudoers_policy sudoers.so
+Path plugin_dir /opt/p
+Path noexec /a.so:/b.so
+Path askpass /usr/bin/ssh-askpass
+Set disable_coredump false
