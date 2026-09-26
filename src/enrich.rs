@@ -283,6 +283,7 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
                     // Kind and source are the carrier's, as in the interpreter
                     // chain: cron or systemd is still what makes this run.
                     let mut e = Entry::new(entry.kind, &entry.source, &name);
+                    e.collector = entry.collector.clone();
                     e.rekey_declared(&root.rel(&entry.source), &entry.id);
                     e.target_path = run.program.as_deref().and_then(|p| program_path(root, entry.kind, p));
                     e.command = Some(run.words.join(" ").into_bytes());
@@ -1061,6 +1062,7 @@ fn preload_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
                     continue;
                 }
                 let mut e = Entry::new(Kind::LdPreload, &carrier.source, library);
+                e.collector = carrier.collector.clone();
                 e.rekey(&root.rel(&carrier.source));
                 e.command = Some(format!("{variable}={library}").into_bytes());
                 e.target_path = Some(root.abs(root.rel(Path::new(library))));
@@ -1281,6 +1283,7 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
             // hangs off is the one whose own location and ownership the
             // operator is already being shown.
             let mut e = Entry::new(carrier.kind, &carrier.source, &name);
+            e.collector = carrier.collector.clone();
             if via == "python" {
                 e.rekey_declared(&root.rel(&carrier.source), &carrier.id);
             } else {

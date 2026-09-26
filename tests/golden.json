@@ -1,6 +1,7 @@
 {
   "entries": [
     {
+      "collector": "systemd",
       "command": null,
       "enabled": "masked",
       "flags": [
@@ -31,6 +32,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "systemd",
       "command": null,
       "enabled": "not-applicable",
       "flags": [
@@ -59,6 +61,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "systemd",
       "command": "/opt/telemetry --quiet",
       "command_utf8": true,
       "enabled": "enabled",
@@ -96,6 +99,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "systemd",
       "command": "/bin/sh",
       "command_utf8": true,
       "enabled": "disabled",
@@ -126,6 +130,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "systemd",
       "command": "/usr/sbin/sshd -D",
       "command_utf8": true,
       "enabled": "disabled",
@@ -162,6 +167,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "systemd",
       "command": null,
       "enabled": "disabled",
       "flags": [
@@ -193,6 +199,7 @@
       "trigger": "schedule"
     },
     {
+      "collector": "cron",
       "command": "/bin/sh",
       "command_utf8": true,
       "enabled": "enabled",
@@ -223,6 +230,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "cron",
       "command": "/usr/local/bin/agent --daemon",
       "command_utf8": true,
       "enabled": "enabled",
@@ -252,6 +260,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "cron",
       "command": "/bin/sh",
       "command_utf8": true,
       "enabled": "enabled",
@@ -282,6 +291,7 @@
       "trigger": "schedule"
     },
     {
+      "collector": "cron",
       "command": null,
       "enabled": "enabled",
       "flags": [
@@ -308,6 +318,7 @@
       "trigger": "schedule"
     },
     {
+      "collector": "cron",
       "command": "cd / && run-parts --report /etc/cron.hourly",
       "command_utf8": true,
       "enabled": "enabled",
@@ -337,6 +348,7 @@
       "trigger": "schedule"
     },
     {
+      "collector": "desktop",
       "command": "/bin/sh",
       "command_utf8": true,
       "enabled": "enabled",
@@ -367,6 +379,7 @@
       "trigger": "login"
     },
     {
+      "collector": "desktop",
       "command": "/usr/bin/nm-applet --indicator",
       "command_utf8": true,
       "enabled": "enabled",
@@ -397,6 +410,7 @@
       "trigger": "login"
     },
     {
+      "collector": "desktop",
       "command": "/home/alice/.local/bin/upd",
       "command_utf8": true,
       "enabled": "enabled",
@@ -431,6 +445,7 @@
       "trigger": "login"
     },
     {
+      "collector": "shell",
       "command": null,
       "enabled": "not-applicable",
       "flags": [
@@ -459,6 +474,7 @@
       "trigger": "login"
     },
     {
+      "collector": "shell",
       "command": null,
       "enabled": "not-applicable",
       "flags": [
@@ -485,6 +501,7 @@
       "trigger": "login"
     },
     {
+      "collector": "shell",
       "command": null,
       "enabled": "not-applicable",
       "flags": [
@@ -514,6 +531,7 @@
       "trigger": "login"
     },
     {
+      "collector": "shell",
       "command": null,
       "enabled": "not-applicable",
       "flags": [
@@ -544,6 +562,7 @@
       "trigger": "login"
     },
     {
+      "collector": "auth",
       "command": "/usr/local/sbin/notify",
       "command_utf8": true,
       "enabled": "enabled",
@@ -578,6 +597,7 @@
       "trigger": "auth"
     },
     {
+      "collector": "kernel",
       "command": "/usr/local/bin/on-usb.sh",
       "command_utf8": true,
       "enabled": "enabled",
@@ -611,6 +631,7 @@
       "trigger": "device-event"
     },
     {
+      "collector": "initscripts",
       "command": "/bin/sh",
       "command_utf8": true,
       "enabled": "enabled",
@@ -641,6 +662,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "initscripts",
       "command": null,
       "enabled": "enabled",
       "flags": [
@@ -670,6 +692,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "initscripts",
       "command": "/bin/sh",
       "command_utf8": true,
       "enabled": "enabled",
@@ -700,6 +723,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "initscripts",
       "command": "/usr/sbin/legacyd",
       "command_utf8": true,
       "enabled": "enabled",
@@ -730,6 +754,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "initscripts",
       "command": null,
       "enabled": "enabled",
       "flags": [
@@ -762,6 +787,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "auth",
       "command": "/usr/local/bin/shell-wrap",
       "command_utf8": true,
       "enabled": "enabled",
@@ -797,6 +823,7 @@
       "trigger": "login"
     },
     {
+      "collector": "auth",
       "command": "/usr/local/bin/wrap, --strict",
       "command_utf8": true,
       "enabled": "enabled",
@@ -832,6 +859,7 @@
       "trigger": "login"
     },
     {
+      "collector": "auth",
       "command": "/usr/bin/systemctl",
       "command_utf8": true,
       "enabled": "enabled",
@@ -868,6 +896,7 @@
       "trigger": "always"
     },
     {
+      "collector": "auth",
       "command": "ALL",
       "command_utf8": true,
       "enabled": "enabled",
@@ -900,6 +929,7 @@
       "trigger": "always"
     },
     {
+      "collector": "cron",
       "command": "LD_PRELOAD=/tmp/hook.so",
       "command_utf8": true,
       "enabled": "enabled",
@@ -930,6 +960,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "shell",
       "command": "/usr/lib/libsnoop.so",
       "command_utf8": true,
       "enabled": "enabled",
@@ -958,6 +989,7 @@
       "trigger": "always"
     },
     {
+      "collector": "systemd",
       "command": "LD_PRELOAD=/tmp/hook.so",
       "command_utf8": true,
       "enabled": "enabled",
@@ -988,6 +1020,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "shell",
       "command": "LD_PRELOAD=/home/alice/.cache/x.so",
       "command_utf8": true,
       "enabled": "not-applicable",
@@ -1018,6 +1051,7 @@
       "trigger": "login"
     },
     {
+      "collector": "kernel",
       "command": "/sbin/modprobe --ignore-install nf_tables",
       "command_utf8": true,
       "enabled": "unknown",
@@ -1048,6 +1082,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "kernel",
       "command": "/tmp/stage.sh",
       "command_utf8": true,
       "enabled": "unknown",
@@ -1078,6 +1113,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "kernel",
       "command": "/bin/sh -c '/tmp/stage.sh; /sbin/modprobe --ignore-install nf_tables'",
       "command_utf8": true,
       "enabled": "unknown",
@@ -1110,6 +1146,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "kernel",
       "command": null,
       "enabled": "unknown",
       "flags": [
@@ -1138,6 +1175,7 @@
       "trigger": "boot"
     },
     {
+      "collector": "desktop",
       "command": null,
       "enabled": "enabled",
       "flags": [
@@ -1175,6 +1213,7 @@
       "trigger": "login"
     },
     {
+      "collector": "desktop",
       "command": null,
       "enabled": "enabled",
       "flags": [
