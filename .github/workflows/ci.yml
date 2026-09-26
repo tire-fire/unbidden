@@ -6,47 +6,25 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
-  # The VM matrix is skipped on pull requests that do not touch the tool, so
-  # it also runs nightly: a distribution image can change under an unchanged
+  # The PANIX loop runs on main and nightly rather than on pull requests, and
+  # nightly also because a distribution image can change under an unchanged
   # tree.
   schedule:
     - cron: '17 4 * * *'
 
-jobs:
-  changes:
-    # The VM matrix is the slowest part of a run, five to fifteen minutes a
-    # job. A pull request that touches only prose waits for none of it.
-    # Pushes to main, tags, the nightly run and a manual run always get it,
-    # because a release is gated on it.
-    runs-on: ubuntu-latest
-    outputs:
-      vm: ${{ steps.diff.outputs.vm }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - id: diff
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
-            echo "vm=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # The whole pull request, not the latest push to it. A docs-only
-          # push after a red VM run would otherwise mark those jobs skipped,
-          # and a required check counts skipped as passing.
-          if git diff --name-only "$BASE...$HEAD_SHA" | grep -qE '^(src/|Cargo\.(toml|lock)$|ci/|\.github/workflows/)'; then
-            echo "vm=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "vm=false" >> "$GITHUB_OUTPUT"
-          fi
+# A newer push to a pull request makes its older run moot. The free plan runs
+# twenty jobs at once, and a stale run holding them delays the current one.
+# Runs on main are never cancelled: each one may be a release.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --all-targets
       - run: cargo build --locked --release
       - name: no warnings
@@ -68,31 +46,31 @@ jobs:
     #
     # It fails the run: a collector that panics is a whole mechanism class the
     # operator silently loses, and a fuzzer that cannot redden a build is
-    # decoration. A minute on each of the five §13 names first, twenty seconds
-    # on every other parser: a smoke run, not a soak. It catches a shallow
-    # panic on every push; the deep ones are what a corpus and a real fuzzing
-    # host are for.
+    # decoration. On main and nightly, a minute on each of the §13 names and
+    # twenty seconds on every other parser; on a pull request ten and five, a
+    # smoke run of the smoke run, so the checks a change waits on stay short.
+    # Either catches a shallow panic; the deep ones are what a corpus and a
+    # real fuzzing host are for.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install nightly --profile minimal
-      - run: cargo install cargo-fuzz --locked
-      - run: cargo +nightly fuzz build -O
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      # Named, because the prebuilt cargo-fuzz is a musl binary and would
+      # otherwise build for musl, where the sanitizers cannot link.
+      - run: cargo +nightly fuzz build -O --target x86_64-unknown-linux-gnu
       - name: every target
         run: |
-          for t in $(cargo +nightly fuzz list); do
-            case "$t" in
-              unit_file|crontab|desktop_file|udev_rules|pam_config|shell_text) secs=60 ;;
-              *) secs=20 ;;
-            esac
-            echo "::group::$t (${secs}s)"
-            # -timeout turns a hang into a reported crash rather than a job
-            # that runs until GitHub kills it; the two memory limits are how
-            # "no unbounded memory" gets checked at all.
-            cargo +nightly fuzz run -O "$t" -- \
-              -max_total_time=$secs -timeout=10 -rss_limit_mb=2048 -malloc_limit_mb=512
-            echo "::endgroup::"
-          done
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            ci/fuzz-all.sh 10 5
+          else
+            ci/fuzz-all.sh 60 20
+          fi
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -112,7 +90,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup target add ${{ matrix.target }}
-      - run: cargo install cross --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - run: cross build --locked --release --target ${{ matrix.target }}
       - name: the binary must be static
         run: ci/static-check.sh target/${{ matrix.target }}/release/unbidden
@@ -124,9 +107,11 @@ jobs:
   persistence:
     # §13's PANIX loop, on every supported distribution that publishes a cloud
     # image, in a real VM: a real boot, a real systemd, a kernel of its own.
-    # It gates a release, as §1 says every supported distribution does.
-    needs: [static, changes]
-    if: needs.changes.outputs.vm == 'true'
+    # It gates a release, as §1 says every supported distribution does, so it
+    # runs on every push to main, on tags and nightly. It is too slow for a
+    # pull request to wait on: nine to fourteen minutes an image.
+    needs: static
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -154,13 +139,24 @@ jobs:
           chmod +x target/x86_64-unknown-linux-musl/release/unbidden
           sudo apt-get update -qq
           sudo apt-get install -y qemu-system-x86 qemu-utils xorriso
+      # The cloud image is two and a half minutes of download a run. A week's
+      # copy is kept, since the distributions refresh their images too. The
+      # VM boots from an overlay, so the cached base is never written.
+      - id: week
+        run: echo "week=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: /var/tmp/unbidden-vm/cache/${{ matrix.image }}.qcow2
+          key: vm-image-${{ matrix.image }}-${{ steps.week.outputs.week }}
       - run: ci/vm-harness.sh --image ${{ matrix.image }}
 
   persistence-mint:
     # Mint and LMDE publish no cloud image, so the same loop and the same live
     # checks run in a privileged container booted with systemd. lkm is the one
-    # module a container cannot host, and the loop names it as not run.
+    # module a container cannot host, and the loop names it as not run. The
+    # same loop as above, so it runs where that does.
     needs: static
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -223,6 +219,14 @@ jobs:
           pull() {
             for i in 1 2 3; do
               docker pull "$1" && return 0
+              # AWS caps anonymous pulls by volume, and the runners share
+              # addresses. Google's mirror of the same library stands in.
+              case "$1" in
+                public.ecr.aws/docker/library/*)
+                  alt="mirror.gcr.io/library/${1#public.ecr.aws/docker/library/}"
+                  docker pull "$alt" && docker tag "$alt" "$1" && return 0
+                  ;;
+              esac
               sleep $((i * 10))
             done
             return 1
@@ -296,6 +300,14 @@ jobs:
           pull() {
             for i in 1 2 3; do
               docker pull "$1" && return 0
+              # AWS caps anonymous pulls by volume, and the runners share
+              # addresses. Google's mirror of the same library stands in.
+              case "$1" in
+                public.ecr.aws/docker/library/*)
+                  alt="mirror.gcr.io/library/${1#public.ecr.aws/docker/library/}"
+                  docker pull "$alt" && docker tag "$alt" "$1" && return 0
+                  ;;
+              esac
               sleep $((i * 10))
             done
             return 1
