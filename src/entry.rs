@@ -80,6 +80,7 @@ str_enum!(Kind {
     PolkitRule => "polkit_rule",
     PolkitAction => "polkit_action",
     InetdService => "inetd_service",
+    LibraryDir => "library_dir",
     SystemdPreset => "systemd_preset",
     NssModule => "nss_module",
 });
@@ -117,6 +118,7 @@ str_enum!(Flag {
     ShadowsVendorUnit => "shadows-vendor-unit",
     DegradedEnablement => "degraded-enablement",
     EncodingAnomaly => "encoding-anomaly",
+    WritableSearchPath => "writable-search-path",
 });
 
 str_enum!(Integrity {

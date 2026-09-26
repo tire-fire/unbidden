@@ -313,7 +313,7 @@ fn nss(cx: &mut Ctx, out: &mut Vec<Entry>) {
         return;
     }
 
-    let mut dirs = super::ld_so_conf_dirs(cx);
+    let mut dirs: Vec<String> = super::ld_so_conf_dirs(cx).into_iter().map(|(d, _)| d).collect();
     let layout = LOADER_DIRS.iter().find(|l| cx.root.exists(l[0])).copied().unwrap_or(&[]);
     dirs.extend(layout.iter().map(|d| format!("/{d}")));
     for (name, databases, after_hash) in modules {
