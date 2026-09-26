@@ -84,6 +84,7 @@ str_enum!(Kind {
     KernelCallout => "kernel_callout",
     SystemdPreset => "systemd_preset",
     NssModule => "nss_module",
+    Doas => "doas",
 });
 
 str_enum!(Trigger {

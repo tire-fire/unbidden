@@ -395,3 +395,10 @@ path = "fuzz_targets/authselect_template.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "doas_conf"
+path = "fuzz_targets/doas_conf.rs"
+test = false
+doc = false
+bench = false

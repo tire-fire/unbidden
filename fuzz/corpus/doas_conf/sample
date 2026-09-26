@@ -1,0 +1,6 @@
+# local rules
+permit persist keepenv setenv { PATH -HOME } :wheel
+permit nopass alice as root cmd /usr/bin/systemctl args restart web
+deny bob
+permit \
+  carol cmd "/opt/my tool"

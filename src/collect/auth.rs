@@ -29,6 +29,7 @@ impl Collector for Auth {
         ssh(cx, &mut out);
         sudoers(cx, &mut out);
         sudo_conf(cx, &mut out);
+        doas(cx, &mut out);
         dedup_ids(&mut out);
         out
     }
@@ -1273,6 +1274,341 @@ fn finish_sudoers(e: &mut Entry, line: &[u8], inert: bool) {
     flag_non_utf8(e, line);
 }
 
+// ---------------------------------------------------------------------- doas
+
+#[derive(Debug, PartialEq)]
+enum DoasTok {
+    Newline,
+    Open,
+    Close,
+    /// A word, and whether a quote or a continuation inside it stops it
+    /// being read as a keyword, as it does in doas.
+    Word(Vec<u8>, bool),
+}
+
+/// doas.conf split into tokens by OpenDoas's own lexer (parse.y, yylex):
+/// `#` comments to the end of the line with no continuation, `"` quotes
+/// without being kept, a backslash escapes the next byte and joins a line it
+/// ends, and `{`, `}` and newline stand alone. The errors it would report,
+/// which make doas refuse the whole file, come back beside the tokens.
+fn doas_tokens(s: &[u8]) -> (Vec<(DoasTok, usize)>, Vec<String>) {
+    let mut toks = Vec::new();
+    let mut errs = Vec::new();
+    let mut line = 1;
+    let mut i = 0;
+    // A continuation that ends in whitespace yields no word, and doas goes
+    // back for the next one without clearing the flag the continuation set:
+    // `permit \` then `nopass alice` on the next line makes `nopass` the
+    // identity, not an option.
+    let mut carry = false;
+    loop {
+        while matches!(s.get(i), Some(b' ' | b'\t')) {
+            i += 1;
+        }
+        match s.get(i) {
+            None => break,
+            Some(b'\n') => {
+                carry = false;
+                toks.push((DoasTok::Newline, line));
+                line += 1;
+                i += 1;
+                continue;
+            }
+            Some(b'{') => {
+                carry = false;
+                toks.push((DoasTok::Open, line));
+                i += 1;
+                continue;
+            }
+            Some(b'}') => {
+                carry = false;
+                toks.push((DoasTok::Close, line));
+                i += 1;
+                continue;
+            }
+            Some(b'#') => {
+                carry = false;
+                match s[i..].iter().position(|b| *b == b'\n') {
+                    Some(n) => i += n,
+                    None => break,
+                }
+                continue;
+            }
+            Some(_) => {}
+        }
+        let start_line = line;
+        let (mut word, mut quotes, mut escape, mut nonkw, mut quoted) = (Vec::new(), false, false, carry, false);
+        while let Some(&c) = s.get(i) {
+            match c {
+                0 => {
+                    errs.push(format!("line {line}: NUL"));
+                    escape = false;
+                    i += 1;
+                    continue;
+                }
+                b'\\' => {
+                    escape = !escape;
+                    if escape {
+                        i += 1;
+                        continue;
+                    }
+                }
+                b'\n' => {
+                    if quotes {
+                        errs.push(format!("line {line}: unterminated quotes"));
+                    }
+                    if escape {
+                        nonkw = true;
+                        escape = false;
+                        line += 1;
+                        i += 1;
+                        continue;
+                    }
+                    break;
+                }
+                b'{' | b'}' | b'#' | b' ' | b'\t' if !escape && !quotes => break,
+                b'"' if !escape => {
+                    quotes = !quotes;
+                    if quotes {
+                        nonkw = true;
+                        quoted = true;
+                    }
+                    i += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            word.push(c);
+            // doas reads a word into 1024 bytes and starts it again when
+            // they fill.
+            if word.len() == 1024 {
+                errs.push(format!("line {line}: too long line"));
+                word.clear();
+            }
+            escape = false;
+            i += 1;
+        }
+        if i == s.len() {
+            if escape {
+                errs.push(format!("line {line}: unterminated escape"));
+            }
+            if quotes {
+                errs.push(format!("line {line}: unterminated quotes"));
+            }
+        }
+        // An empty word is a token only when it was quoted: `args ""`.
+        if !word.is_empty() || quoted {
+            toks.push((DoasTok::Word(word, nonkw), start_line));
+            carry = false;
+        } else {
+            carry = nonkw;
+        }
+    }
+    (toks, errs)
+}
+
+#[derive(Debug, Default)]
+struct DoasRule {
+    line: usize,
+    permit: bool,
+    options: Vec<&'static str>,
+    setenv: Vec<Vec<u8>>,
+    ident: Vec<u8>,
+    target: Option<Vec<u8>>,
+    cmd: Option<Vec<u8>>,
+    /// `None` is any arguments; `Some` of an empty list is none.
+    args: Option<Vec<Vec<u8>>>,
+    words: Vec<Vec<u8>>,
+}
+
+/// The rules doas.conf holds, parsed by OpenDoas's grammar:
+///
+/// ```text
+/// rule    := ("permit" option* | "deny") ident ["as" word] ["cmd" word ["args" word*]] "\n"
+/// option  := "nopass" | "nolog" | "persist" | "keepenv" | "setenv" "{" word* "}"
+/// ```
+///
+/// A line that does not parse is skipped to its newline, as yacc's error
+/// rule does, and reported; so is a rule without its newline at the end of
+/// the file, which doas also rejects.
+fn doas_rules(s: &[u8]) -> (Vec<DoasRule>, Vec<String>) {
+    let (toks, mut errs) = doas_tokens(s);
+    let kw = |t: Option<&(DoasTok, usize)>, k: &str| matches!(t, Some((DoasTok::Word(w, false), _)) if w == k.as_bytes());
+    let word = |t: Option<&(DoasTok, usize)>| match t {
+        Some((DoasTok::Word(w, nonkw), _)) if *nonkw || !DOAS_KEYWORDS.iter().any(|k| w == k.as_bytes()) => Some(w.clone()),
+        _ => None,
+    };
+    let mut rules = Vec::new();
+    let mut i = 0;
+    while i < toks.len() {
+        if toks[i].0 == DoasTok::Newline {
+            i += 1;
+            continue;
+        }
+        let line = toks[i].1;
+        let mut r = DoasRule { line, ..Default::default() };
+        let parsed = (|| {
+            let mut j = i;
+            let at = |j: usize| toks.get(j);
+            if kw(at(j), "permit") {
+                r.permit = true;
+                j += 1;
+                while let Some((DoasTok::Word(w, false), _)) = at(j) {
+                    let Some(o) = ["nopass", "nolog", "persist", "keepenv"].into_iter().find(|o| w == o.as_bytes()) else {
+                        if w != b"setenv" {
+                            break;
+                        }
+                        if r.options.contains(&"setenv") {
+                            return Err("two setenv sections");
+                        }
+                        r.options.push("setenv");
+                        if at(j + 1).map(|t| &t.0) != Some(&DoasTok::Open) {
+                            return Err("setenv without {");
+                        }
+                        j += 2;
+                        while let Some(w) = word(at(j)) {
+                            r.setenv.push(w);
+                            j += 1;
+                        }
+                        if at(j).map(|t| &t.0) != Some(&DoasTok::Close) {
+                            return Err("setenv without }");
+                        }
+                        j += 1;
+                        continue;
+                    };
+                    if !r.options.contains(&o) {
+                        r.options.push(o);
+                    }
+                    j += 1;
+                }
+                if r.options.contains(&"nopass") && r.options.contains(&"persist") {
+                    return Err("can't combine nopass and persist");
+                }
+            } else if kw(at(j), "deny") {
+                j += 1;
+            } else {
+                return Err("syntax error");
+            }
+            r.ident = word(at(j)).ok_or("syntax error")?;
+            j += 1;
+            if kw(at(j), "as") {
+                r.target = Some(word(at(j + 1)).ok_or("syntax error")?);
+                j += 2;
+            }
+            if kw(at(j), "cmd") {
+                r.cmd = Some(word(at(j + 1)).ok_or("syntax error")?);
+                j += 2;
+                if kw(at(j), "args") {
+                    j += 1;
+                    let mut args = Vec::new();
+                    while let Some(w) = word(at(j)) {
+                        args.push(w);
+                        j += 1;
+                    }
+                    r.args = Some(args);
+                }
+            }
+            match at(j) {
+                Some((DoasTok::Newline, _)) => Ok(j + 1),
+                None => Err("no newline at the end of the file"),
+                _ => Err("syntax error"),
+            }
+        })();
+        match parsed {
+            Ok(next) => {
+                r.words = toks[i..next - 1]
+                    .iter()
+                    .map(|(t, _)| match t {
+                        DoasTok::Word(w, _) => w.clone(),
+                        DoasTok::Open => b"{".to_vec(),
+                        DoasTok::Close => b"}".to_vec(),
+                        DoasTok::Newline => Vec::new(),
+                    })
+                    .collect();
+                rules.push(r);
+                i = next;
+            }
+            Err(why) => {
+                errs.push(format!("line {line}: {why}"));
+                while i < toks.len() && toks[i].0 != DoasTok::Newline {
+                    i += 1;
+                }
+            }
+        }
+    }
+    (rules, errs)
+}
+
+const DOAS_KEYWORDS: [&str; 10] = ["deny", "permit", "as", "cmd", "args", "nopass", "nolog", "persist", "keepenv", "setenv"];
+
+/// /etc/doas.conf, the path OpenDoas is built with on every distribution
+/// that packages it. One entry per rule. doas takes the last rule that
+/// matches, so a permit can be undone by a later deny; like sudoers this is
+/// a line scan, not a resolved policy. doas refuses to run at all when the
+/// file is writable by group or other, is not owned by root, or does not
+/// parse, and those are noted: the first two leave every rule inert.
+fn doas(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let rel = Path::new("etc/doas.conf");
+    let Some(bytes) = cx.read_capped(rel, 1024 * 1024) else { return };
+    let (rules, errs) = doas_rules(&bytes);
+    let refused = match cx.root.stat_follow(rel) {
+        Ok(m) if m.mode & 0o022 != 0 => Some("writable by group or other"),
+        Ok(m) if m.uid != 0 => Some("not owned by root"),
+        _ => None,
+    };
+    for r in &rules {
+        let action = if r.permit { "permit" } else { "deny" };
+        let joined: Vec<u8> = r.words.join(&0u8);
+        let mut e = cx.entry(Kind::Doas, rel, format!("{action}:{}:{}", lossy(&r.ident), hash12(&joined)));
+        e.trigger = Trigger::Always;
+        e.enabled = Enablement::Enabled;
+        e.principal = Some(r.target.as_deref().map_or_else(|| "root".to_string(), lossy));
+        e.note("analysis", "line-level");
+        e.note("action", action);
+        e.note("identity", lossy(&r.ident));
+        e.note("line", r.line.to_string());
+        if !r.options.is_empty() {
+            e.note("options", r.options.join(","));
+        }
+        if r.options.contains(&"nopass") {
+            e.note("nopasswd", "true");
+        }
+        for v in &r.setenv {
+            append_note(&mut e, "setenv", lossy(v));
+        }
+        if let Some(c) = &r.cmd {
+            let mut command = c.clone();
+            match &r.args {
+                Some(args) => {
+                    for a in args {
+                        command.push(b' ');
+                        command.extend_from_slice(a);
+                    }
+                    e.note("args", if args.is_empty() { "none" } else { "exact" });
+                }
+                None => e.note("args", "any"),
+            }
+            // doas searches its safe PATH for a bare name; only a full path
+            // names a file.
+            if c.starts_with(b"/") {
+                e.target_path = Some(bpath(c));
+            }
+            e.command = Some(command);
+        }
+        if let Some(why) = refused {
+            e.enabled = Enablement::Disabled;
+            e.note("doas_refuses", why);
+        } else if !errs.is_empty() {
+            e.enabled = Enablement::Unknown;
+            e.note("doas_refuses", format!("parse errors: {}", errs.join("; ")));
+        }
+        if r.words.iter().any(|w| std::str::from_utf8(w).is_err()) {
+            e.flag(Flag::EncodingAnomaly);
+        }
+        out.push(e);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1841,4 +2177,81 @@ mod tests {
         assert_eq!(apc.command.as_deref(), Some(b"/usr/local/bin/principals %u".as_slice()));
         std::fs::remove_dir_all(&d).unwrap();
     }
+
+    #[test]
+    fn doas_conf_is_read_by_the_rules_opendoas_parses_it_with() {
+        use std::os::unix::fs::PermissionsExt;
+        let (rules, errs) = doas_rules(
+            b"# comment\n\
+              permit persist keepenv setenv { PATH=/tmp -HOME } :wheel\n\
+              permit nopass alice as root cmd /bin/sh args -c \"id; x\"\n\
+              permit nopass bob cmd reboot args\n\
+              deny carol\n\
+              permit \"as\" as \\\n  root # trailing\n\
+              permit nopass persist dave\n\
+              frobnicate\n\
+              permit eve cmd /usr/bin/vi args \"\"\n\
+              permit erin",
+        );
+        let summary: Vec<String> = rules
+            .iter()
+            .map(|r| format!("{} {} {:?} {:?}", r.permit, lossy(&r.ident), r.options, r.args.as_ref().map(|a| a.len())))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                "true :wheel [\"persist\", \"keepenv\", \"setenv\"] None",
+                "true alice [\"nopass\"] Some(2)",
+                "true bob [\"nopass\"] Some(0)",
+                "false carol [] None",
+                "true as [] None",
+                "true eve [] Some(1)",
+            ],
+        );
+        assert_eq!(rules[0].setenv, [b"PATH=/tmp".to_vec(), b"-HOME".to_vec()]);
+        assert_eq!(rules[1].args.as_ref().unwrap()[1], b"id; x", "quotes group, and are not kept");
+        assert_eq!(rules[4].target.as_deref(), Some(&b"root"[..]), "a continuation joins the line");
+        assert_eq!(rules[5].args.as_ref().unwrap()[0], b"", "an empty quoted word is an argument");
+        assert_eq!(errs.len(), 3, "{errs:?}");
+        assert!(errs[0].contains("nopass and persist"));
+        assert!(errs[0].contains("line 8") && errs[1].contains("line 9"), "a continued line still counts");
+        assert!(errs[2].contains("no newline"));
+
+        // A quoted or continued keyword is a word; an escaped one is not.
+        let (rules, _) = doas_rules(b"permit \\\nas as \"cmd\"\n");
+        assert_eq!((rules[0].ident.as_slice(), rules[0].target.as_deref()), (&b"as"[..], Some(&b"cmd"[..])));
+        // A continuation followed by whitespace leaves the next word a word
+        // too, so `nopass` here is who is permitted.
+        let (rules, errs) = doas_rules(b"permit \\\n nopass alice\n");
+        assert_eq!((rules.len(), errs.len()), (0, 1), "the stray alice is a syntax error");
+        let (rules, _) = doas_rules(b"permit \\\n nopass\n");
+        assert_eq!((rules[0].ident.as_slice(), rules[0].options.len()), (&b"nopass"[..], 0));
+        let long = [b"permit ".as_slice(), &[b'a'; 1024], b"\n"].concat();
+        assert!(doas_rules(&long).1[0].contains("too long"), "doas reads a word into 1024 bytes");
+
+        let d = tree("doas");
+        put(&d, "etc/doas.conf", "permit nopass alice as root cmd /bin/sh\ndeny bob\npermit :wheel cmd sh\n");
+        std::fs::set_permissions(d.join("etc/doas.conf"), PermissionsExt::from_mode(0o644)).unwrap();
+        let s = scan(&d);
+        let mut names: Vec<String> = s.entries.iter().filter(|e| e.kind == Kind::Doas).map(|e| e.name[..e.name.rfind(':').unwrap()].to_string()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["deny:bob", "permit::wheel", "permit:alice"]);
+        let alice = named(&s, "permit:alice").pop().unwrap();
+        assert_eq!(alice.raw["nopasswd"], "true");
+        assert_eq!(alice.target_path, Some(PathBuf::from("/bin/sh")));
+        assert_eq!(alice.command.as_deref(), Some(&b"/bin/sh"[..]));
+        assert_eq!(alice.raw["args"], "any");
+        assert_eq!(named(&s, "permit::wheel").pop().unwrap().target_path, None, "a bare name is searched for");
+        // The test runner is not root, so doas would refuse this file.
+        if rustix::process::geteuid().is_root() {
+            assert_eq!(alice.enabled, Enablement::Enabled);
+        } else {
+            assert_eq!((alice.enabled, alice.raw["doas_refuses"].as_str()), (Enablement::Disabled, "not owned by root"));
+        }
+        std::fs::set_permissions(d.join("etc/doas.conf"), PermissionsExt::from_mode(0o666)).unwrap();
+        let s = scan(&d);
+        assert_eq!(named(&s, "permit:alice").pop().unwrap().raw["doas_refuses"], "writable by group or other");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }
+

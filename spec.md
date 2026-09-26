@@ -87,7 +87,7 @@ String
 Stable synthetic identity. See below.
 kind
 enum
-Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module, sudo_plugin, polkit_rule, polkit_action, inetd_service, library_dir, kernel_callout
+Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module, sudo_plugin, polkit_rule, polkit_action, inetd_service, library_dir, kernel_callout, doas
 collector
 Option<String>
 The collector that produced the entry, or, for an entry enrichment made from another, that entry's collector. A diff judges each entry's differences by what this collector saw in both scans (§9). Absent from records written before the field existed.
@@ -207,6 +207,8 @@ kernel modules
 /etc/modules, modules-load.d/* and modprobe.d/* install lines under /etc, /run, /usr/local/lib and /usr/lib, and /proc/modules for what is loaded
 sudoers
 /etc/sudoers, /etc/sudoers.d/* — NOPASSWD and command aliases
+doas
+/etc/doas.conf, one entry per rule, permit or deny, read by OpenDoas's own lexer and grammar: its quotes, escapes, continuations and 1024-byte words, and its refusal of a file missing the final newline or combining nopass with persist. Checked against doas -C from OpenDoas 6.8.2 on 12,000 generated files. Like sudoers a line scan: doas takes the last matching rule, which is not resolved. doas refuses to run when the file is writable by group or other or not owned by root, which leaves every rule disabled; when it does not parse, which is noted with the rules left unknown
 Tier three — behind --deep
 These require walking the whole filesystem. On a host with a large /home or a build cache that is minutes of wall time and sustained disk I/O, so they are opt-in rather than default. An operator who wants them knows they want them.
 Collector
@@ -499,7 +501,7 @@ Specific things to assert per distro, because they are the ones a generic test m
 RHEL, CentOS, Arch, openSUSE and Alpine are not tested. Community bug reports welcome; no release waits on them.
 Parser fuzzing
 Every parser gets a cargo-fuzz target. §3 establishes that parser input is adversarial; fuzzing is how that stops being an aspiration. Priority order: unit files, crontabs, .desktop files, udev rules, PAM configs.
-As built: 53 targets, one per parser. On main and nightly the five above get a minute each, the rest twenty seconds; any other branch gets ten and five. The targets run one per CPU at a time. A smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
+As built: 54 targets, one per parser. On main and nightly the five above get a minute each, the rest twenty seconds; any other branch gets ten and five. The targets run one per CPU at a time. A smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
 Golden files
 Collector output for a fixed synthetic filesystem tree, checked into the repository. Catches unintended changes to the Entry record, which is the schema contract of §10. Alongside it, a mutation pass takes the same tree apart 120 ways and requires every collector to survive each.
 Conventions
