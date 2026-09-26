@@ -12,13 +12,14 @@
 
 pub mod dpkg;
 pub mod generated;
+pub mod reproduced;
 pub mod rpm;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::entry::{Integrity, Provenance};
+use crate::entry::Provenance;
 use crate::root::Root;
 
 pub type Answers = BTreeMap<PathBuf, Provenance>;
@@ -44,26 +45,11 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Resolution {
 
 type Backend = fn(&Root, &BTreeSet<PathBuf>) -> Option<Answers>;
 
-/// Files a package installs by copying a template it ships, from a
-/// maintainer script, rather than shipping the file itself: libc-bin's
-/// postinst puts /usr/share/libc-bin/nsswitch.conf in place as
-/// /etc/nsswitch.conf. No package database claims the copy, and none may be
-/// said to: the package owns the template, not what its script wrote. A copy
-/// byte for byte the template, while the template is packaged and intact, is
-/// GeneratedBy that package; any difference leaves it Unpackaged.
-const TEMPLATES: [(&str, &str); 1] = [("etc/nsswitch.conf", "usr/share/libc-bin/nsswitch.conf")];
-
-/// Largest template compared; nsswitch.conf is a few hundred bytes.
-const TEMPLATE_CAP: usize = 64 * 1024;
-
 fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Backend)]) -> Resolution {
     let mut out = Answers::new();
-    // The templates are asked about too, so their verdict is known below.
-    let asked: BTreeSet<PathBuf> = wanted
-        .iter()
-        .cloned()
-        .chain(TEMPLATES.iter().filter(|(copy, _)| wanted.contains(Path::new(copy))).map(|(_, t)| PathBuf::from(t)))
-        .collect();
+    // What a reproduction reads is asked about too, so its verdict is known
+    // below.
+    let asked: BTreeSet<PathBuf> = wanted.iter().cloned().chain(reproduced::inputs(root, wanted)).collect();
     let wanted = &asked;
     let mut failures = Vec::new();
 
@@ -87,21 +73,9 @@ fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Back
         }
     }
 
-    for (copy, template) in TEMPLATES {
-        let (copy, template) = (Path::new(copy), Path::new(template));
-        if !wanted.contains(copy) || out.contains_key(copy) {
-            continue;
-        }
-        let Some(Provenance::Packaged { package, integrity: Integrity::Intact, .. }) = out.get(template) else {
-            continue;
-        };
-        let by = format!("{package}, identical to /{}", template.display());
-        let read = |p: &Path| root.read_capped(p, TEMPLATE_CAP).ok().filter(|(_, truncated)| !truncated).map(|(b, _)| b);
-        if let (Some(a), Some(b)) = (read(copy), read(template)) {
-            if a == b {
-                out.insert(copy.to_path_buf(), Provenance::GeneratedBy { by });
-            }
-        }
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reproduced::classify(root, wanted, &out))) {
+        Ok(answers) => out.extend(answers),
+        Err(payload) => failures.push(format!("reproductions: {}", crate::scan::panic_message(payload))),
     }
 
     let unclaimed: BTreeSet<PathBuf> = wanted.iter().filter(|p| !out.contains_key(*p)).cloned().collect();
@@ -208,6 +182,7 @@ pub fn digests(root: &Root, rel: &Path) -> Option<FileDigests> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entry::Integrity;
 
     #[test]
     fn merged_usr_lookups_try_both_spellings() {
@@ -307,13 +282,69 @@ mod tests {
         let r = resolve_with(&root, &wanted, &[("dpkg", ships_template)]);
         assert_eq!(
             r.answers[Path::new("etc/nsswitch.conf")],
-            Provenance::GeneratedBy { by: "libc-bin, identical to /usr/share/libc-bin/nsswitch.conf".into() },
+            Provenance::Reproduced { by: "libc-bin, identical to /usr/share/libc-bin/nsswitch.conf".into() },
             "the package owns the template, not the copy its script wrote"
         );
 
         std::fs::write(dir.join("etc/nsswitch.conf"), b"passwd: files evil\n").unwrap();
         let r = resolve_with(&root, &wanted, &[("dpkg", ships_template)]);
         assert_eq!(r.answers[Path::new("etc/nsswitch.conf")], Provenance::Unpackaged, "one byte off is not the template");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_pam_auth_update_stack_is_reproduced_only_from_packaged_profiles() {
+        const TEMPLATE: &str = "# managed by pam-auth-update\n\
+            # here are the per-package modules (the \"Primary\" block)\n\
+            $auth_primary\n\
+            # here's the fallback if no module succeeds\n\
+            auth\trequisite\t\t\tpam_deny.so\n\
+            auth\trequired\t\t\tpam_permit.so\n\
+            # and here are more per-package modules (the \"Additional\" block)\n\
+            $auth_additional\n\
+            # end of pam-auth-update config\n";
+        const UNIX: &str = "Name: Unix authentication\nPriority: 256\nAuth-Type: Primary\nAuth:\n\t[success=end default=ignore]\tpam_unix.so nullok try_first_pass\nAuth-Initial:\n\t[success=end default=ignore]\tpam_unix.so nullok\n";
+        const CAP: &str = "Name: capabilities\nPriority: 0\nAuth-Type: Additional\nAuth:\n\toptional\t\t\tpam_cap.so\n";
+        // What pam-auth-update 1.5 writes for these two profiles.
+        const GENERATED: &str = "# managed by pam-auth-update\n\
+            # here are the per-package modules (the \"Primary\" block)\n\
+            auth\t[success=1 default=ignore]\tpam_unix.so nullok\n\
+            # here's the fallback if no module succeeds\n\
+            auth\trequisite\t\t\tpam_deny.so\n\
+            auth\trequired\t\t\tpam_permit.so\n\
+            # and here are more per-package modules (the \"Additional\" block)\n\
+            auth\toptional\t\t\tpam_cap.so \n\
+            # end of pam-auth-update config\n";
+        fn ships_everything(_: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
+            let intact = Provenance::Packaged { package: "libpam-runtime".into(), version: "1.5".into(), integrity: Integrity::Intact };
+            Some(wanted.iter().filter(|p| p.starts_with("usr/share")).map(|p| (p.clone(), intact.clone())).collect())
+        }
+        fn ships_template_only(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
+            let mut a = ships_everything(root, wanted)?;
+            a.remove(Path::new("usr/share/pam-configs/capability"));
+            Some(a)
+        }
+        let dir = std::env::temp_dir().join(format!("unbidden-prov-pam-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (rel, body) in [
+            ("usr/share/pam/common-auth", TEMPLATE),
+            ("usr/share/pam-configs/unix", UNIX),
+            ("usr/share/pam-configs/capability", CAP),
+            ("var/lib/pam/auth", "Module: unix\n[success=end default=ignore]\tpam_unix.so nullok\nModule: capability\n\toptional\t\t\tpam_cap.so\n"),
+            ("etc/pam.d/common-auth", GENERATED),
+        ] {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        let root = Root::at(&dir).unwrap();
+        let wanted: BTreeSet<PathBuf> = [PathBuf::from("etc/pam.d/common-auth")].into_iter().collect();
+        let verdict = |backend: Backend| resolve_with(&root, &wanted, &[("dpkg", backend)]).answers[Path::new("etc/pam.d/common-auth")].clone();
+
+        assert_eq!(verdict(ships_everything), Provenance::Reproduced { by: "pam-auth-update".into() });
+        assert_eq!(verdict(ships_template_only), Provenance::Unpackaged, "a profile no package vouches for");
+        std::fs::write(dir.join("etc/pam.d/common-auth"), GENERATED.replace("auth\trequisite", "auth\tsufficient\tpam_permit.so\nauth\trequisite")).unwrap();
+        assert_eq!(verdict(ships_everything), Provenance::Unpackaged, "one added line");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

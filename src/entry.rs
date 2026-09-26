@@ -139,6 +139,10 @@ pub enum Provenance {
     /// Produced at runtime by a named component — snapd, cloud-init, a systemd
     /// generator. Neither packaged nor attacker-authored.
     GeneratedBy { by: String },
+    /// No package owns the file, but it is byte for byte what `by` makes from
+    /// files that are packaged and intact: a template a maintainer script
+    /// copied, a stack pam-auth-update assembled. As trustworthy as those.
+    Reproduced { by: String },
     Unpackaged,
     Unknown,
 }
@@ -148,6 +152,11 @@ impl Provenance {
     /// the file and its contents still match the manifest.
     pub fn is_packaged_intact(&self) -> bool {
         matches!(self, Provenance::Packaged { integrity: Integrity::Intact, .. })
+    }
+
+    /// Packaged and intact, or reproduced exactly from files that are.
+    pub fn is_verified(&self) -> bool {
+        self.is_packaged_intact() || matches!(self, Provenance::Reproduced { .. })
     }
 }
 

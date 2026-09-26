@@ -381,3 +381,17 @@ path = "fuzz_targets/request_key_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "pam_profile"
+path = "fuzz_targets/pam_profile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "authselect_template"
+path = "fuzz_targets/authselect_template.rs"
+test = false
+doc = false
+bench = false

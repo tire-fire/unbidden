@@ -63,14 +63,14 @@ pub fn suppressed(e: &Entry) -> bool {
     // packaged and intact, or when there is none and glibc skips the name,
     // and never when it follows a `#` a person reads as a comment. An
     // unpackaged or modified library shows through target_provenance.
-    if e.kind == Kind::NssModule && !e.provenance.is_packaged_intact() {
+    if e.kind == Kind::NssModule && !e.provenance.is_verified() {
         let source_only = e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
         return source_only && target_verified && !e.raw.contains_key("after_hash");
     }
     // A file whose inode changed after its package installed it was touched
     // by something other than the package manager, however it verifies.
     let untouched = !e.raw.contains_key("changed_after_install");
-    quiet && target_verified && untouched && (e.provenance.is_packaged_intact() || from_package_database(e))
+    quiet && target_verified && untouched && (e.provenance.is_verified() || from_package_database(e))
 }
 
 /// An entry that is the package manager's own machinery: an rpm scriptlet or
@@ -383,7 +383,7 @@ mod tests {
             e
         };
         // Debian: libc-bin's copy of its own template.
-        let generated = Provenance::GeneratedBy { by: "libc-bin, identical to /usr/share/libc-bin/nsswitch.conf".into() };
+        let generated = Provenance::Reproduced { by: "libc-bin, identical to /usr/share/libc-bin/nsswitch.conf".into() };
         assert!(suppressed(&nss(generated, &[], None, false)));
         // Mint: the file is unowned, the library ships with systemd.
         assert!(suppressed(&nss(Provenance::Unpackaged, &[Flag::Unpackaged], Some("libnss-systemd (intact)"), false)));
