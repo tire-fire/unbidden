@@ -144,6 +144,21 @@ fn build_tree(dir: &Path) {
     // not be.
     w("bin/sh", b"ELF-ish\n");
     exec("bin/sh");
+
+    // Every directory at 0755, for the reason the files get 0644: under a
+    // 0002 umask create_dir_all leaves them group-writable, and a PATH
+    // naming one reads as writable-search-path.
+    fn pin(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        for ent in std::fs::read_dir(dir).unwrap().flatten() {
+            let ty = ent.file_type().unwrap();
+            if ty.is_dir() {
+                std::fs::set_permissions(ent.path(), PermissionsExt::from_mode(0o755)).unwrap();
+                pin(&ent.path());
+            }
+        }
+    }
+    pin(dir);
 }
 
 /// A dconf database in the on-disk format, written by gvdb itself rather than
