@@ -87,7 +87,7 @@ String
 Stable synthetic identity. See below.
 kind
 enum
-Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module
+Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module, sudo_plugin
 source
 PathBuf
 The file or directory the entry was read from. Always a real path on disk.
@@ -160,6 +160,8 @@ rc.local and SysV
 /etc/rc.local, /etc/rc.d/rc.local, /etc/init.d/*, /etc/rc*.d/*
 PAM
 /etc/pam.d/*, and /usr/lib/pam.d/* for a service /etc/pam.d does not name — pam_exec lines and modules resolving outside standard module directories
+sudo plugins
+/etc/sudo.conf, read as sudo reads it: Plugin and Path match without regard to case, a later Path line replaces an earlier one, and a Path with no value turns its feature off. One entry per Plugin line, per library or program an askpass, sesh, intercept or noexec path names, and for plugin_dir; and one for the default policy when plugin_dir is moved and no Plugin line names one. sudo joins plugin_dir to a relative plugin path by concatenation, adding no slash, and the target is resolved the same way
 NSS modules
 /etc/nsswitch.conf, parsed as glibc 2.39 parses it: a database name, any run of whitespace and colons, then sources, each with an optional bracketed action list. There is no comment syntax after the database name, so passwd: files # nis loads libnss_#.so.2 and libnss_nis.so.2, and a source after a # is marked as such. One entry per module, with the databases that name it; files and dns are built into libc. The library is looked for in the ld.so.conf directories, standing in for the loader's cache, then the default directories with their glibc-hwcaps levels first; a name with no library is dormant, since glibc skips it
 udev
@@ -477,7 +479,7 @@ Specific things to assert per distro, because they are the ones a generic test m
 RHEL, CentOS, Arch, openSUSE and Alpine are not tested. Community bug reports welcome; no release waits on them.
 Parser fuzzing
 Every parser gets a cargo-fuzz target. §3 establishes that parser input is adversarial; fuzzing is how that stops being an aspiration. Priority order: unit files, crontabs, .desktop files, udev rules, PAM configs.
-As built: 41 targets, one per parser. On main and nightly the five above get a minute each, the rest twenty seconds; a pull request gets ten and five. The targets run one per CPU at a time. A smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
+As built: 42 targets, one per parser. On main and nightly the five above get a minute each, the rest twenty seconds; a pull request gets ten and five. The targets run one per CPU at a time. A smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
 Golden files
 Collector output for a fixed synthetic filesystem tree, checked into the repository. Catches unintended changes to the Entry record, which is the schema contract of §10. Alongside it, a mutation pass takes the same tree apart 120 ways and requires every collector to survive each.
 Conventions
@@ -553,6 +555,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5: environment.d drop-ins were reported twice on merged-usr hosts.
 • §5: /usr/local/lib was not read for udev rules, modprobe.d, modules-load.d or environment.d, nor /run/modprobe.d, ~/.config/environment.d, /usr/lib/pam.d or the session autostart directories under /etc/xdg.
 • §5: environment generators, tmpfiles.d and systemd presets were not read.
+• §5: /etc/sudo.conf was not read.
 • §5: nsswitch.conf was not read. ld.so.conf's include lines were skipped and every file in ld.so.conf.d read instead, so an included file elsewhere was missed and a file the include glob never matches was reported as read.
 • §6: D-Bus answers never matched a vendor unit on distributions whose systemd names /lib.
 • §6: one account could answer for another's units.
