@@ -1077,6 +1077,29 @@ fn preload_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
     out
 }
 
+/// A PATH value split where the shell splits it: at colons outside `${...}`,
+/// whose own colons, as in `${PATH:+$PATH:}`, belong to the expansion.
+fn path_components(path: &str) -> Vec<String> {
+    let mut out = vec![String::new()];
+    let mut depth = 0usize;
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '$' if chars.peek() == Some(&'{') => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            ':' if depth == 0 => {
+                out.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        if let Some(last) = out.last_mut() {
+            last.push(c);
+        }
+    }
+    out
+}
+
 /// A search path naming a directory that an account the declaring file does
 /// not already trust can write: whoever can put a file there chooses what a
 /// bare command name, or a library soname, resolves to. Trusted are root and
@@ -1088,7 +1111,7 @@ fn preload_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
 fn writable_search_path(root: &Root, e: &mut Entry) {
     let dirs: Vec<String> = match (e.kind, e.raw.get("env.PATH")) {
         (Kind::LibraryDir, _) => vec![e.name.clone()],
-        (_, Some(path)) => path.split(':').map(String::from).collect(),
+        (_, Some(path)) => path_components(path),
         _ => return,
     };
     let mut found = Vec::new();
@@ -2339,6 +2362,12 @@ mod tests {
 
         let mut quiet = Entry::new(Kind::ShellProfile, dir.join("etc/environment"), "environment");
         quiet.note("env.PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        writable_search_path(&root, &mut quiet);
+        assert!(quiet.flags.is_empty());
+        // Debian's /etc/init.d/ssh: the colons inside ${...} are the
+        // expansion's, not separators.
+        let mut quiet = Entry::new(Kind::SysvInit, dir.join("etc/init.d/ssh"), "ssh");
+        quiet.note("env.PATH", "${PATH:+$PATH:}/usr/sbin:/sbin");
         writable_search_path(&root, &mut quiet);
         assert!(quiet.flags.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
