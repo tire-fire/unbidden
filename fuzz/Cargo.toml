@@ -353,3 +353,10 @@ path = "fuzz_targets/inetd_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ld_so_conf"
+path = "fuzz_targets/ld_so_conf.rs"
+test = false
+doc = false
+bench = false

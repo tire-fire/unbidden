@@ -1,0 +1,5 @@
+/usr/local/lib
+include nested/*.conf
+/var/tmp/.lib/ # comment
+hwcap 1 nosegneg
+/opt/x=libc6
