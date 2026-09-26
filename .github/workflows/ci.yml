@@ -392,6 +392,8 @@ jobs:
       - name: tag it, now that the binaries exist
         id: tag
         if: steps.v.outputs.skip != '1' && github.ref_type != 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           v=${{ steps.v.outputs.version }}
           # Asked again: the builds above take minutes, and a push to main in
@@ -401,18 +403,37 @@ jobs:
             echo "main moved past $GITHUB_SHA during the build; the run for its tip releases"
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # The first release takes the version Cargo.toml already holds, so
-          # there is nothing to commit and an unconditional commit would fail.
+          # The release commit is made through the API rather than pushed:
+          # GitHub signs a commit it creates for this workflow's token, and
+          # one pushed with git is unsigned. expectedHeadOid refuses it if
+          # main moved since the check above. The first release takes the
+          # version Cargo.toml already holds, and has nothing to commit.
+          commit=$GITHUB_SHA
           if ! git diff --quiet; then
-            git commit -qam "Release v$v"
+            payload=$(git diff --name-only | jq -R -s \
+              --arg repo "$GITHUB_REPOSITORY" --arg head "$GITHUB_SHA" --arg message "Release v$v" '
+              {query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid } } }",
+               variables: {input: {
+                 branch: {repositoryNameWithOwner: $repo, branchName: "main"},
+                 expectedHeadOid: $head,
+                 message: {headline: $message},
+                 fileChanges: {additions: [split("\n")[] | select(. != "") | {path: ., contents: ""}]}}}}')
+            # The contents go in after, one file at a time, base64 as the
+            # mutation wants them.
+            for f in $(git diff --name-only); do
+              payload=$(echo "$payload" | jq --arg f "$f" --arg c "$(base64 -w0 "$f")" \
+                '(.variables.input.fileChanges.additions[] | select(.path == $f) | .contents) = $c')
+            done
+            commit=$(echo "$payload" | gh api graphql --input - --jq '.data.createCommitOnBranch.commit.oid') || commit=""
+            if [ -z "$commit" ]; then
+              echo "main moved past $GITHUB_SHA before the release commit; the run for its tip releases"
+              exit 0
+            fi
           fi
-          git tag "v$v"
-          # Pushed with GITHUB_TOKEN, which by design starts no further run.
-          # Atomic: a rejected main must not leave the tag behind, pointing at
-          # a release commit main never got.
-          git push -q --atomic origin HEAD:main "v$v"
+          # Made with GITHUB_TOKEN, so neither starts a further run.
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$v" -f sha="$commit" > /dev/null
+          # The later steps build and publish from this checkout, which
+          # already holds the release's files.
           echo "pushed=1" >> "$GITHUB_OUTPUT"
       - name: publish the crate
         if: steps.v.outputs.skip != '1' && (github.ref_type == 'tag' || steps.tag.outputs.pushed == '1')
