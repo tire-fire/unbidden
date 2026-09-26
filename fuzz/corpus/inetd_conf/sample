@@ -1,0 +1,2 @@
+telnet stream tcp nowait root.root /usr/sbin/tcpd /usr/sbin/in.telnetd
+echo stream tcp nowait root internal

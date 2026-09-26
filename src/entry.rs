@@ -79,6 +79,7 @@ str_enum!(Kind {
     SudoPlugin => "sudo_plugin",
     PolkitRule => "polkit_rule",
     PolkitAction => "polkit_action",
+    InetdService => "inetd_service",
     SystemdPreset => "systemd_preset",
     NssModule => "nss_module",
 });
