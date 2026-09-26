@@ -28,6 +28,7 @@ impl Collector for Auth {
         nss(cx, &mut out);
         ssh(cx, &mut out);
         sudoers(cx, &mut out);
+        sudo_conf(cx, &mut out);
         dedup_ids(&mut out);
         out
     }
@@ -871,6 +872,88 @@ const SUDO_TAGS: &[&str] = &[
     "NOINTERCEPT",
 ];
 
+/// sudo's compiled-in plugin directory, the same on every supported
+/// distribution. It ends in a slash because sudo joins it to a relative
+/// plugin path by concatenation: with `Path plugin_dir /opt/p`, sudoers.so
+/// is loaded from /opt/psudoers.so.
+const SUDO_PLUGIN_DIR: &str = "/usr/libexec/sudo/";
+
+/// The Path settings that load or run something: askpass and sesh are
+/// programs, intercept and noexec libraries preloaded into commands.
+const SUDO_RUNS: [&str; 4] = ["askpass", "sesh", "intercept", "noexec"];
+
+/// /etc/sudo.conf decides which shared objects sudo loads into itself, as
+/// root, before it authenticates anyone, and which helpers it runs. Read as
+/// sudo reads it (lib/util/sudo_conf.c): the keyword and a Path name match
+/// without regard to case, a later Path line replaces an earlier one, and a
+/// Path with no value turns its feature off. There is no include.
+fn sudo_conf(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let rel = Path::new("etc/sudo.conf");
+    let Some(bytes) = cx.read_capped(rel, 64 * 1024) else { return };
+    let mut plugins: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut paths: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for raw in bytes.split(|b| *b == b'\n') {
+        let mut words = raw.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty());
+        let Some(keyword) = words.next() else { continue };
+        if keyword.eq_ignore_ascii_case(b"plugin") {
+            let (Some(symbol), Some(path)) = (words.next(), words.next()) else { continue };
+            plugins.push((symbol.to_vec(), path.to_vec(), join_ws(&words.collect::<Vec<_>>())));
+        } else if keyword.eq_ignore_ascii_case(b"path") {
+            let Some(name) = words.next() else { continue };
+            paths.insert(lossy(name).to_ascii_lowercase(), words.next().unwrap_or_default().to_vec());
+        }
+    }
+    let dir = match paths.get("plugin_dir") {
+        Some(d) if !d.is_empty() => d.clone(),
+        _ => SUDO_PLUGIN_DIR.as_bytes().to_vec(),
+    };
+    let resolve = |p: &[u8]| if p.starts_with(b"/") { p.to_vec() } else { [dir.as_slice(), p].concat() };
+
+    let entry = |cx: &mut Ctx, name: String, target: Vec<u8>| {
+        let mut e = cx.entry(Kind::SudoPlugin, rel, name);
+        e.trigger = Trigger::Auth;
+        e.enabled = Enablement::Enabled;
+        e.principal = Some("root".into());
+        e.target_path = Some(bpath(&target));
+        if std::str::from_utf8(&target).is_err() {
+            e.flag(Flag::EncodingAnomaly);
+        }
+        e
+    };
+    for (symbol, path, options) in &plugins {
+        let mut e = entry(cx, format!("Plugin {} {}", lossy(symbol), lossy(path)), resolve(path));
+        e.note("symbol", lossy(symbol));
+        if !options.is_empty() {
+            e.note("options", lossy(options));
+        }
+        out.push(e);
+    }
+    // With no Plugin line sudo loads its default policy from plugin_dir, so
+    // moving the directory alone changes what every sudo loads.
+    if plugins.is_empty() && paths.get("plugin_dir").is_some_and(|d| !d.is_empty()) {
+        let mut e = entry(cx, "default policy sudoers.so".into(), resolve(b"sudoers.so"));
+        e.note("symbol", "sudoers_policy");
+        out.push(e);
+    }
+    for (name, value) in &paths {
+        if value.is_empty() {
+            continue;
+        }
+        if name == "plugin_dir" {
+            let mut e = entry(cx, "Path plugin_dir".into(), value.clone());
+            e.note("path_setting", name.as_str());
+            out.push(e);
+        } else if SUDO_RUNS.contains(&name.as_str()) {
+            // intercept and noexec may name two libraries, one per word size.
+            for part in value.split(|b| *b == b':').filter(|p| !p.is_empty()) {
+                let mut e = entry(cx, format!("Path {name} {}", lossy(part)), part.to_vec());
+                e.note("path_setting", name.as_str());
+                out.push(e);
+            }
+        }
+    }
+}
+
 fn sudoers(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     sudoers_file(cx, out, Path::new("etc/sudoers"), 1, false, &mut seen);
@@ -1516,6 +1599,56 @@ mod tests {
         assert_eq!(sss.raw["databases"], "group", "the action list is not a source");
         assert_eq!(sss.target_path, Some(d.join("opt/sss/lib/libnss_sss.so.2")));
         assert_eq!(named(&s, "nis").pop().unwrap().enabled, Enablement::Disabled);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn sudo_conf_is_read_the_way_sudo_reads_it() {
+        let d = tree("sudoconf");
+        put(
+            &d,
+            "etc/sudo.conf",
+            "# Plugin sudoers_policy /commented/out.so\n\
+             \x20  pLuGiN sudoers_policy /opt/evil.so extra=1\n\
+             Plugin sudoers_io rel.so\n\
+             Path plugin_dir /opt/p\n\
+             Path askpass /tmp/first\n\
+             PATH ASKPASS /tmp/ask\n\
+             Path noexec /opt/n32.so:/opt/n64.so\n\
+             Path sesh\n\
+             Path devsearch /dev/pts\n\
+             Set disable_coredump false\n",
+        );
+        let s = scan(&d);
+        let mut names: Vec<&str> = s.entries.iter().filter(|e| e.kind == Kind::SudoPlugin).map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "Path askpass /tmp/ask",
+                "Path noexec /opt/n32.so",
+                "Path noexec /opt/n64.so",
+                "Path plugin_dir",
+                "Plugin sudoers_io rel.so",
+                "Plugin sudoers_policy /opt/evil.so",
+            ],
+            "the later askpass wins; an empty sesh and devsearch run nothing"
+        );
+        let evil = named(&s, "Plugin sudoers_policy /opt/evil.so").pop().unwrap();
+        assert_eq!(evil.target_path, Some(PathBuf::from("/opt/evil.so")));
+        assert_eq!((evil.trigger, evil.principal.as_deref()), (Trigger::Auth, Some("root")));
+        assert_eq!(evil.raw["options"], "extra=1");
+        // sudo concatenates: no slash is added.
+        let rel = named(&s, "Plugin sudoers_io rel.so").pop().unwrap();
+        assert_eq!(rel.target_path, Some(PathBuf::from("/opt/prel.so")));
+        std::fs::remove_dir_all(&d).unwrap();
+
+        // A moved plugin_dir alone changes where the default policy loads.
+        let d = tree("sudoconf-dir");
+        put(&d, "etc/sudo.conf", "Path plugin_dir /opt/plugins/\n");
+        let s = scan(&d);
+        let default = named(&s, "default policy sudoers.so").pop().unwrap();
+        assert_eq!(default.target_path, Some(PathBuf::from("/opt/plugins/sudoers.so")));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

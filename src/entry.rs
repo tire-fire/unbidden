@@ -76,6 +76,7 @@ str_enum!(Kind {
     FileCapability => "file_capability",
     GitHook => "git_hook",
     Tmpfiles => "tmpfiles",
+    SudoPlugin => "sudo_plugin",
     SystemdPreset => "systemd_preset",
     NssModule => "nss_module",
 });
