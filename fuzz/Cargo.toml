@@ -339,3 +339,17 @@ path = "fuzz_targets/polkit_policy.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "xinetd_conf"
+path = "fuzz_targets/xinetd_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inetd_conf"
+path = "fuzz_targets/inetd_conf.rs"
+test = false
+doc = false
+bench = false

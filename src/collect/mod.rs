@@ -15,6 +15,7 @@ pub mod auth;
 pub mod cron;
 pub mod deep;
 pub mod desktop;
+pub mod inetd;
 pub mod initscripts;
 pub mod kernel;
 pub mod pkg;
@@ -171,6 +172,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(initscripts::InitScripts),
         Box::new(auth::Auth),
         Box::new(polkit::Polkit),
+        Box::new(inetd::Inetd),
         Box::new(kernel::Kernel),
         Box::new(pkg::PkgHooks),
         Box::new(deep::GitConfig),

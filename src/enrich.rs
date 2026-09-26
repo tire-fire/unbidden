@@ -164,6 +164,9 @@ const WRAPPERS: &[(&str, &[&str], usize)] = &[
     ("ionice", &["-c", "-n", "-p", "-P", "-u", "--class", "--classdata"], 0),
     ("sudo", &["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "--user", "--group"], 0),
     ("command", &[], 0),
+    // TCP wrappers: inetd runs tcpd, which checks hosts.allow and then execs
+    // the daemon named as its argv[0].
+    ("tcpd", &[], 0),
     ("time", &["-f", "-o", "--format", "--output"], 0),
     ("xargs", &["-a", "-d", "-E", "-I", "-L", "-n", "-P", "-s", "--arg-file", "--delimiter", "--max-args", "--max-procs"], 0),
     // A priority, a duration, a lock file.
