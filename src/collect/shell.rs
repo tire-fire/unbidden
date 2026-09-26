@@ -180,6 +180,7 @@ impl Collector for Shell {
         }
 
         preload(cx, &mut out);
+        library_dirs(cx, &mut out);
         out
     }
 }
@@ -346,7 +347,25 @@ fn preload(cx: &mut Ctx, out: &mut Vec<Entry>) {
 /// has. Recorded as a note on the preload entries, never as entries of their
 /// own — a configured directory is not itself something that runs.
 fn nonstandard_lib_dirs(cx: &mut Ctx) -> Vec<String> {
-    super::ld_so_conf_dirs(cx).into_iter().filter(|d| !is_standard_lib_dir(d)).collect()
+    super::ld_so_conf_dirs(cx).into_iter().map(|(d, _)| d).filter(|d| !is_standard_lib_dir(d)).collect()
+}
+
+/// A directory ld.so.conf adds to the loader's search outside the set every
+/// distribution already has. Every dynamically linked program looks there,
+/// so a library dropped into it under a common soname is loaded in place of
+/// the real one. The file that names it is the source; a vendor's packaged
+/// drop-in is hidden like any other packaged file.
+fn library_dirs(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    for (dir, rel) in super::ld_so_conf_dirs(cx) {
+        if is_standard_lib_dir(&dir) {
+            continue;
+        }
+        let mut e = cx.entry(Kind::LibraryDir, &rel, dir.clone());
+        e.trigger = Trigger::Always;
+        e.enabled = Enablement::Enabled;
+        e.target_path = Some(PathBuf::from(&dir));
+        out.push(e);
+    }
 }
 
 fn is_standard_lib_dir(d: &str) -> bool {
@@ -1074,6 +1093,22 @@ mod tests {
         let mine = by_name(&scan, Kind::ShellProfile, "20-mine.conf");
         assert_eq!(mine.principal.as_deref(), Some("alice"));
         assert_eq!(mine.raw.get("env.LD_PRELOAD").map(String::as_str), Some("/opt/b.so"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_nonstandard_library_directory_is_an_entry_of_the_file_that_names_it() {
+        let dir = tmpdir("libdir");
+        fs::create_dir_all(dir.join("etc/ld.so.conf.d")).unwrap();
+        fs::write(dir.join("etc/ld.so.conf"), "include /etc/ld.so.conf.d/*.conf\n").unwrap();
+        fs::write(dir.join("etc/ld.so.conf.d/x86_64-linux-gnu.conf"), "/usr/lib/x86_64-linux-gnu\n/usr/local/lib\n").unwrap();
+        fs::write(dir.join("etc/ld.so.conf.d/zz-evil.conf"), "/var/tmp/.lib\n").unwrap();
+        let scan = run(&dir);
+        let dirs: Vec<_> = scan.entries.iter().filter(|e| e.kind == Kind::LibraryDir).collect();
+        assert_eq!(dirs.len(), 1, "{:?}", dirs.iter().map(|e| &e.name).collect::<Vec<_>>());
+        assert_eq!(dirs[0].name, "/var/tmp/.lib");
+        assert_eq!(dirs[0].source, dir.join("etc/ld.so.conf.d/zz-evil.conf"));
+        assert_eq!(dirs[0].trigger, Trigger::Always);
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -75,6 +75,8 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
         scan.entries.extend(preloads);
     }
 
+    per_entry(&mut failed, "search paths", &mut scan.entries, |e| writable_search_path(root, e));
+
     // Last, so the synthesised entries — a preload, a chained interpreter —
     // are measured by the same threshold as a collector's own.
     per_entry(&mut failed, "encoding", &mut scan.entries, apply_encoding);
@@ -1073,6 +1075,74 @@ fn preload_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
         }
     }
     out
+}
+
+/// A PATH value split where the shell splits it: at colons outside `${...}`,
+/// whose own colons, as in `${PATH:+$PATH:}`, belong to the expansion.
+fn path_components(path: &str) -> Vec<String> {
+    let mut out = vec![String::new()];
+    let mut depth = 0usize;
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '$' if chars.peek() == Some(&'{') => depth += 1,
+            '}' if depth > 0 => depth -= 1,
+            ':' if depth == 0 => {
+                out.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        if let Some(last) = out.last_mut() {
+            last.push(c);
+        }
+    }
+    out
+}
+
+/// A search path naming a directory that an account the declaring file does
+/// not already trust can write: whoever can put a file there chooses what a
+/// bare command name, or a library soname, resolves to. Trusted are root and
+/// the owner of the file that sets the path, who could edit the path itself,
+/// so `~/bin` in a user's own profile is not a finding and `/tmp` anywhere
+/// is. A relative component, `.` or an empty one, searches the current
+/// directory, which is the same thing. A component the shell would have to
+/// expand is left alone rather than guessed at.
+fn writable_search_path(root: &Root, e: &mut Entry) {
+    let dirs: Vec<String> = match (e.kind, e.raw.get("env.PATH")) {
+        (Kind::LibraryDir, _) => vec![e.name.clone()],
+        (_, Some(path)) => path_components(path),
+        _ => return,
+    };
+    let mut found = Vec::new();
+    for d in &dirs {
+        if d.contains('$') || d.starts_with('~') {
+            continue;
+        }
+        if !d.starts_with('/') {
+            let shown = if d.is_empty() { "an empty entry" } else { d.as_str() };
+            found.push(format!("{shown} (relative: the current directory)"));
+            continue;
+        }
+        let Ok(m) = root.stat_follow(root.rel(Path::new(d))) else { continue };
+        if !m.is_dir {
+            continue;
+        }
+        let why = if m.mode & 0o002 != 0 {
+            "world-writable".to_string()
+        } else if m.mode & 0o020 != 0 && m.gid != 0 {
+            format!("writable by group {}", m.gid)
+        } else if m.uid != 0 && m.uid != e.owner_uid {
+            format!("owned by uid {}", m.uid)
+        } else {
+            continue;
+        };
+        found.push(format!("{d} ({why})"));
+    }
+    if !found.is_empty() {
+        e.flag(Flag::WritableSearchPath);
+        e.note("writable_search_path", found.join("; "));
+    }
 }
 
 // -------------------------------------------------- the interpreter chain ----
@@ -2243,6 +2313,63 @@ mod tests {
         let mut e = Entry::new(Kind::Udev, dir.join("opt/udev/rules.d/60-x.rules"), "x");
         apply_location(&root, &mut e);
         assert!(e.has_flag(Flag::NonStandardLocation), "the check still fails closed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_search_path_someone_untrusted_can_write_is_flagged() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("unbidden-searchpath-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (d, mode) in [("ww", 0o1777), ("mine", 0o755), ("gw", 0o775), ("ok", 0o755)] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+            std::fs::set_permissions(dir.join(d), std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let meta = std::fs::metadata(dir.join("mine")).unwrap();
+        let (uid, gid) = (meta.uid(), meta.gid());
+        let root = Root::at(&dir).unwrap();
+        let carrier = |owner: u32| {
+            let mut e = Entry::new(Kind::ShellProfile, dir.join("etc/profile"), "profile");
+            e.note("env.PATH", "/usr/bin:/ww:/mine:$HOME/bin:.::/nonexistent:/gw");
+            e.owner_uid = owner;
+            writable_search_path(&root, &mut e);
+            e
+        };
+
+        // Declared in a root-owned file: the scanning user's own directories
+        // are not trusted either.
+        let e = carrier(0);
+        assert!(e.has_flag(Flag::WritableSearchPath));
+        let mut want = vec!["/ww (world-writable)".to_string(), format!("/mine (owned by uid {uid})")];
+        want.push(". (relative: the current directory)".into());
+        want.push("an empty entry (relative: the current directory)".into());
+        if gid != 0 {
+            want.push(format!("/gw (writable by group {gid})"));
+        }
+        assert_eq!(e.raw["writable_search_path"], want.join("; "));
+
+        // Declared in a file the directory's owner already controls.
+        let e = carrier(uid);
+        assert!(!e.raw["writable_search_path"].contains("/mine"), "{}", e.raw["writable_search_path"]);
+
+        let mut lib = Entry::new(Kind::LibraryDir, dir.join("etc/ld.so.conf.d/x.conf"), "/ok");
+        lib.owner_uid = uid;
+        writable_search_path(&root, &mut lib);
+        assert!(!lib.has_flag(Flag::WritableSearchPath), "owned by the file's owner, mode 755");
+        let mut lib = Entry::new(Kind::LibraryDir, dir.join("etc/ld.so.conf.d/x.conf"), "/ww");
+        writable_search_path(&root, &mut lib);
+        assert!(lib.has_flag(Flag::WritableSearchPath));
+
+        let mut quiet = Entry::new(Kind::ShellProfile, dir.join("etc/environment"), "environment");
+        quiet.note("env.PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        writable_search_path(&root, &mut quiet);
+        assert!(quiet.flags.is_empty());
+        // Debian's /etc/init.d/ssh: the colons inside ${...} are the
+        // expansion's, not separators.
+        let mut quiet = Entry::new(Kind::SysvInit, dir.join("etc/init.d/ssh"), "ssh");
+        quiet.note("env.PATH", "${PATH:+$PATH:}/usr/sbin:/sbin");
+        writable_search_path(&root, &mut quiet);
+        assert!(quiet.flags.is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

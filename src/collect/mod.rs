@@ -92,13 +92,14 @@ pub(crate) fn expand_glob(cx: &mut Ctx, rel: &Path) -> Vec<PathBuf> {
 /// `include` line names whitespace-separated patterns relative to the file
 /// it is in, a `hwcap` line is ignored, and any other line is one directory.
 /// A file that is not included is never read, whatever directory it sits in.
-pub(crate) fn ld_so_conf_dirs(cx: &mut Ctx) -> Vec<String> {
+/// Each directory comes with the file that first named it.
+pub(crate) fn ld_so_conf_dirs(cx: &mut Ctx) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     ld_so_conf(cx, Path::new("etc/ld.so.conf"), 0, &mut out);
     out
 }
 
-fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<String>) {
+fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(String, PathBuf)>) {
     // An include loop ends here rather than in the stack.
     if depth > 8 {
         return;
@@ -125,8 +126,8 @@ fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<String>) {
         while d.len() > 1 && d.ends_with('/') {
             d.pop();
         }
-        if !d.is_empty() && !out.contains(&d) {
-            out.push(d);
+        if !d.is_empty() && !out.iter().any(|(seen, _)| *seen == d) {
+            out.push((d, rel.to_path_buf()));
         }
     }
 }
