@@ -8,10 +8,25 @@ Finds what runs automatically on Linux.
 
 ![unbidden finding planted persistence on a Debian host](docs/scan.svg)
 
-systemd units and timers, cron and at, udev rules, PAM, sudoers, SSH keys, XDG
-autostart, GNOME and Cinnamon extensions, package manager hooks, shell startup
-files, rc.local, SysV init. If it runs without a person typing something, it
-should turn up here.
+What it reads, grouped by when each thing runs:
+
+- Boot: systemd units, generators and presets, SysV init scripts and
+  rc.local, kernel modules and modprobe `install` lines, tmpfiles.d
+- A schedule: cron, anacron, at, systemd timers
+- Login: shell startup files, XDG autostart, GNOME and Cinnamon
+  extensions, MOTD scripts, SSH keys and the sshd settings that decide which
+  keys count
+- Authentication: PAM, sudoers and sudo plugins, polkit rules
+- A device or network event: udev rules, NetworkManager dispatcher
+  scripts, xinetd and inetd services
+- Package installs: apt and dnf hooks, dpkg and rpm scriptlets
+- Any time, or whenever something asks: `ld.so.preload`, library search
+  paths, NSS modules, D-Bus services, and what the kernel runs itself
+  (`core_pattern`, binfmt_misc, request-key)
+- With `--deep`: setuid binaries, file capabilities, hooks in every git
+  repository
+
+If it runs without a person typing something, it should turn up here.
 
 Most of what turns up is noise. A desktop has well over a thousand autostart
 entries, nearly all of them from a package and untouched since. unbidden reads

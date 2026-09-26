@@ -15,9 +15,11 @@ use unbidden::{collect, diff, enrich, explain, render, scan};
     name = "unbidden",
     version,
     about = "Enumerate what runs automatically on a Linux host",
-    long_about = "Reports every mechanism by which code executes without a human invoking it: \
-                  boot, login, authentication, elapsed time, device attachment, package \
-                  operations and shell startup.\n\n\
+    long_about = "Reports the mechanisms by which code runs without a person invoking it: at \
+                  boot, on a schedule, at login, on authentication, on device and network \
+                  events, on package operations, and at any time through preloaded \
+                  libraries, NSS modules, D-Bus services and the programs the kernel runs \
+                  itself.\n\n\
                   Reads only. Never executes a binary on the host under examination.",
     args_conflicts_with_subcommands = true
 )]
