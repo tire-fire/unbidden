@@ -1,0 +1,46 @@
+name: pr
+
+# Opens a pull request for a pushed branch that has none, so a change can be
+# proposed with nothing but a git push. The title and description are the
+# branch's first commit message; later commits are listed under it.
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: write
+
+jobs:
+  open:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: open a pull request if the branch has none
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [ -n "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            echo "a pull request is already open for $BRANCH"
+            exit 0
+          fi
+          first=$(git rev-list --reverse --no-merges origin/main..HEAD | head -1)
+          if [ -z "$first" ]; then
+            echo "$BRANCH has nothing main lacks"
+            exit 0
+          fi
+          title=$(git log -1 --format=%s "$first")
+          body=$(git log -1 --format=%b "$first")
+          rest=$(git log --reverse --no-merges --format='- %s' "$first..HEAD")
+          if [ -n "$rest" ]; then
+            body=$(printf '%s\n\nAlso on this branch:\n%s\n' "$body" "$rest")
+          fi
+          gh pr create --base main --head "$BRANCH" --title "$title" --body "$body"
+          # A pull request opened with this workflow's token starts no
+          # workflow of its own; a dispatch is the exception, so CI is
+          # started here. Later pushes to the branch start it as usual.
+          gh workflow run ci.yml --ref "$BRANCH"
