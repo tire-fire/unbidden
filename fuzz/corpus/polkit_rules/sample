@@ -1,0 +1,6 @@
+polkit.addRule(function(action, subject) {
+  if (subject.isInGroup("staff") || subject.user == "bob") {
+    polkit.spawn(["/opt/hook", "--x"]);
+    return polkit.Result.YES;
+  }
+});

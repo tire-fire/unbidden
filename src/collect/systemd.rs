@@ -23,7 +23,7 @@ use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use super::glob_match;
+use super::{glob_match, replaceable};
 use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, name_from_os};
 use crate::scan::{Collector, Ctx};
 
@@ -573,38 +573,6 @@ fn generators(cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>) -> Vec<Entry> {
 }
 
 // ---------------------------------------------------------------- unit files
-
-/// The files in `dirs` in the order systemd reads them, by file name, each
-/// with the file that replaces it: a same-named file in an earlier directory
-/// is read instead, and a link to /dev/null there masks it.
-fn replaceable(cx: &mut Ctx, dirs: &[&str], suffix: &str) -> Vec<(PathBuf, Option<PathBuf>)> {
-    let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();
-    let mut first: BTreeMap<OsString, PathBuf> = BTreeMap::new();
-    let mut found = Vec::new();
-    for dir in dirs {
-        match cx.root.dir_identity(dir) {
-            Ok(id) if seen.insert(id) => {}
-            Ok(_) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                cx.note_failed(dir, &e);
-                continue;
-            }
-        }
-        for ent in cx.dir(dir) {
-            if ent.is_dir || !ent.name.as_encoded_bytes().ends_with(suffix.as_bytes()) {
-                continue;
-            }
-            let rel = Path::new(dir).join(&ent.name);
-            let by = first.get(&ent.name).cloned();
-            first.entry(ent.name.clone()).or_insert_with(|| rel.clone());
-            found.push((ent.name, rel, by));
-        }
-    }
-    // Stable, so the copy that is read comes before the ones it replaces.
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    found.into_iter().map(|(_, rel, by)| (rel, by)).collect()
-}
 
 /// Whitespace-separated fields, at most `n`, and what follows them.
 fn fields(line: &[u8], n: usize) -> (Vec<&[u8]>, &[u8]) {

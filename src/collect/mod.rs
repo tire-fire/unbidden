@@ -4,7 +4,8 @@
 //! reads six spool layouts and emits two kinds, and splitting it would mean
 //! parsing crontab syntax twice.
 
-use std::ffi::OsStr;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,7 @@ pub mod desktop;
 pub mod initscripts;
 pub mod kernel;
 pub mod pkg;
+pub mod polkit;
 pub mod shell;
 pub mod systemd;
 
@@ -128,6 +130,38 @@ fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<String>) {
     }
 }
 
+/// The files in `dirs` in the order systemd and polkit read them, by file
+/// name, each with the file that replaces it: a same-named file in an
+/// earlier directory is read instead, and a link to /dev/null there masks it.
+pub(crate) fn replaceable(cx: &mut Ctx, dirs: &[&str], suffix: &str) -> Vec<(PathBuf, Option<PathBuf>)> {
+    let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();
+    let mut first: BTreeMap<OsString, PathBuf> = BTreeMap::new();
+    let mut found = Vec::new();
+    for dir in dirs {
+        match cx.root.dir_identity(dir) {
+            Ok(id) if seen.insert(id) => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                cx.note_failed(dir, &e);
+                continue;
+            }
+        }
+        for ent in cx.dir(dir) {
+            if ent.is_dir || !ent.name.as_encoded_bytes().ends_with(suffix.as_bytes()) {
+                continue;
+            }
+            let rel = Path::new(dir).join(&ent.name);
+            let by = first.get(&ent.name).cloned();
+            first.entry(ent.name.clone()).or_insert_with(|| rel.clone());
+            found.push((ent.name, rel, by));
+        }
+    }
+    // Stable, so the copy that is read comes before the ones it replaces.
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found.into_iter().map(|(_, rel, by)| (rel, by)).collect()
+}
+
 pub fn all() -> Vec<Box<dyn Collector>> {
     vec![
         Box::new(systemd::Systemd),
@@ -136,6 +170,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(shell::Shell),
         Box::new(initscripts::InitScripts),
         Box::new(auth::Auth),
+        Box::new(polkit::Polkit),
         Box::new(kernel::Kernel),
         Box::new(pkg::PkgHooks),
         Box::new(deep::GitConfig),

@@ -77,6 +77,8 @@ str_enum!(Kind {
     GitHook => "git_hook",
     Tmpfiles => "tmpfiles",
     SudoPlugin => "sudo_plugin",
+    PolkitRule => "polkit_rule",
+    PolkitAction => "polkit_action",
     SystemdPreset => "systemd_preset",
     NssModule => "nss_module",
 });

@@ -1,0 +1,1 @@
+<policyconfig><action id="a.b"><defaults><allow_any>no</allow_any><allow_active>yes</allow_active></defaults><annotate key="org.freedesktop.policykit.exec.path">/usr/bin/x</annotate></action></policyconfig>

@@ -318,3 +318,24 @@ path = "fuzz_targets/sudo_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "polkit_rules"
+path = "fuzz_targets/polkit_rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "polkit_pkla"
+path = "fuzz_targets/polkit_pkla.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "polkit_policy"
+path = "fuzz_targets/polkit_policy.rs"
+test = false
+doc = false
+bench = false

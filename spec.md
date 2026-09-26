@@ -87,7 +87,7 @@ String
 Stable synthetic identity. See below.
 kind
 enum
-Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module, sudo_plugin
+Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module, sudo_plugin, polkit_rule, polkit_action
 source
 PathBuf
 The file or directory the entry was read from. Always a real path on disk.
@@ -160,6 +160,8 @@ rc.local and SysV
 /etc/rc.local, /etc/rc.d/rc.local, /etc/init.d/*, /etc/rc*.d/*
 PAM
 /etc/pam.d/*, and /usr/lib/pam.d/* for a service /etc/pam.d does not name — pam_exec lines and modules resolving outside standard module directories
+polkit
+The engine is read from the daemon, since each reads different files and Ubuntu's 0.105 ships rules.d files it never reads: only the JavaScript engine holds polkit._runRules. JavaScript engine (121 and later): *.rules in /etc, /run, /usr/local/share and /usr/share/polkit-1/rules.d (124 reads the first and last, 125 and later all four), in file-name order with a same-named file in an earlier directory replacing the later one; the JavaScript is not run, and what is read from it literally is whether it can answer YES, the user and group names it tests, and a literal polkit.spawn argv, whose program is the target. polkit 0.105 (Ubuntu 22.04, Mint 21): each section of every .pkla one level down in /etc and /var/lib/polkit-1/localauthority, and AdminIdentities in /etc/polkit-1/localauthority.conf.d, which makes an account's own password an administrator's. Either engine: every action definition in /etc, /run, /usr/local/share and /usr/share/polkit-1/actions, noting the actions that need no authentication and the programs an exec.path annotation lets pkexec run. No daemon, nothing is read
 sudo plugins
 /etc/sudo.conf, read as sudo reads it: Plugin and Path match without regard to case, a later Path line replaces an earlier one, and a Path with no value turns its feature off. One entry per Plugin line, per library or program an askpass, sesh, intercept or noexec path names, and for plugin_dir; and one for the default policy when plugin_dir is moved and no Plugin line names one. sudo joins plugin_dir to a relative plugin path by concatenation, adding no slash, and the target is resolved the same way
 NSS modules
@@ -228,7 +230,7 @@ Three caveats:
 • The gvdb crate is written for GResource. Verified: it reads a real ~/.config/dconf/user, as written by a GNOME and a Cinnamon session booted in CI, and system databases compiled by dconf itself, locks included.
 • zgvariant has very few downloads. Same bus-factor note as rpmdb (§7): be ready to vendor.
 Deferred
-GRUB and initramfs (pre-OS, needs image parsing), container runtimes, web shells (requires content heuristics, out of scope for a mechanical tool), Polkit rules, X11 ~/.xinitrc and ~/.xprofile.
+GRUB and initramfs (pre-OS, needs image parsing), container runtimes, web shells (requires content heuristics, out of scope for a mechanical tool), X11 ~/.xinitrc and ~/.xprofile.
 The user-enumeration problem
 Several collectors are per-user. With CGO-free static linking there is no NSS, so accounts come from parsing /etc/passwd directly. That misses LDAP and SSSD accounts.
 Decision: enumerate the union of /etc/passwd entries, directories present under /home, /root, and any account named by a crontab spool file. Record the discovery source per user. Document the LDAP gap explicitly rather than silently under-reporting.
@@ -479,7 +481,7 @@ Specific things to assert per distro, because they are the ones a generic test m
 RHEL, CentOS, Arch, openSUSE and Alpine are not tested. Community bug reports welcome; no release waits on them.
 Parser fuzzing
 Every parser gets a cargo-fuzz target. §3 establishes that parser input is adversarial; fuzzing is how that stops being an aspiration. Priority order: unit files, crontabs, .desktop files, udev rules, PAM configs.
-As built: 42 targets, one per parser. The five above get a minute each in CI, the rest twenty seconds; a smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
+As built: 45 targets, one per parser. The five above get a minute each in CI, the rest twenty seconds; a smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
 Golden files
 Collector output for a fixed synthetic filesystem tree, checked into the repository. Catches unintended changes to the Entry record, which is the schema contract of §10. Alongside it, a mutation pass takes the same tree apart 120 ways and requires every collector to survive each.
 Conventions
@@ -555,6 +557,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5: environment.d drop-ins were reported twice on merged-usr hosts.
 • §5: /usr/local/lib was not read for udev rules, modprobe.d, modules-load.d or environment.d, nor /run/modprobe.d, ~/.config/environment.d, /usr/lib/pam.d or the session autostart directories under /etc/xdg.
 • §5: environment generators, tmpfiles.d and systemd presets were not read.
+• §5: polkit was deferred with no reason given, and not read.
 • §5: /etc/sudo.conf was not read.
 • §5: nsswitch.conf was not read. ld.so.conf's include lines were skipped and every file in ld.so.conf.d read instead, so an included file elsewhere was missed and a file the include glob never matches was reported as read.
 • §6: D-Bus answers never matched a vendor unit on distributions whose systemd names /lib.
