@@ -57,11 +57,12 @@ pub fn suppressed(e: &Entry) -> bool {
     // nsswitch.conf is written at install time on every supported
     // distribution, by libc-bin's postinst from a template and edited by
     // libnss-systemd's, or rendered by authselect, and no package database
-    // records what it should hold. Where the file could not be matched to its
-    // template, a module is judged by the library glibc loads for it: hidden
-    // when that is packaged and intact, or when there is none and glibc skips
-    // the name, and never when it follows a `#` a person reads as a comment.
-    // An unpackaged or modified library shows through target_provenance.
+    // records what it should hold, so the file is never packaged and intact:
+    // at best it is GeneratedBy libc-bin, a copy of its template. A module is
+    // judged by the library glibc loads for it instead: hidden when that is
+    // packaged and intact, or when there is none and glibc skips the name,
+    // and never when it follows a `#` a person reads as a comment. An
+    // unpackaged or modified library shows through target_provenance.
     if e.kind == Kind::NssModule && !e.provenance.is_packaged_intact() {
         let source_only = e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
         return source_only && target_verified && !e.raw.contains_key("after_hash");
@@ -378,6 +379,9 @@ mod tests {
             }
             e
         };
+        // Debian: libc-bin's copy of its own template.
+        let generated = Provenance::GeneratedBy { by: "libc-bin, identical to /usr/share/libc-bin/nsswitch.conf".into() };
+        assert!(suppressed(&nss(generated, &[], None, false)));
         // Mint: the file is unowned, the library ships with systemd.
         assert!(suppressed(&nss(Provenance::Unpackaged, &[Flag::Unpackaged], Some("libnss-systemd (intact)"), false)));
         // Fedora: authselect's ghost file, which has no digest.
