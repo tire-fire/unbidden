@@ -1,10 +1,12 @@
 name: ci
 
+# A change is pushed to a branch, tested there, and main is moved to it once
+# green; there are no pull requests. A branch other than main gets the short
+# tier, main and nightly the full one.
 on:
   push:
-    branches: [main]
+    branches: ['**']
     tags: ['v*']
-  pull_request:
   workflow_dispatch:
   # The PANIX loop runs on main and nightly rather than on pull requests, and
   # nightly also because a distribution image can change under an unchanged
@@ -17,7 +19,7 @@ on:
 # Runs on main are never cancelled: each one may be a release.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' && github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
@@ -66,7 +68,7 @@ jobs:
       - run: cargo +nightly fuzz build -O --target x86_64-unknown-linux-gnu
       - name: every target
         run: |
-          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+          if [ "$GITHUB_REF_TYPE" = branch ] && [ "$GITHUB_REF" != refs/heads/main ]; then
             ci/fuzz-all.sh 10 5
           else
             ci/fuzz-all.sh 60 20
@@ -111,7 +113,7 @@ jobs:
     # runs on every push to main, on tags and nightly. It is too slow for a
     # pull request to wait on: nine to fourteen minutes an image.
     needs: static
-    if: github.event_name != 'pull_request'
+    if: github.ref_type != 'branch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -156,7 +158,7 @@ jobs:
     # module a container cannot host, and the loop names it as not run. The
     # same loop as above, so it runs where that does.
     needs: static
-    if: github.event_name != 'pull_request'
+    if: github.ref_type != 'branch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     strategy:
@@ -326,7 +328,7 @@ jobs:
     # only ever adds one to the patch: a minor or major bump is chosen by
     # editing the version in Cargo.toml, and CI then uses what it finds. A
     # hand-pushed vX.Y.Z tag releases exactly that version.
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     needs: [test, lint, fuzz, static, desktop, distros, persistence, persistence-mint]
     runs-on: ubuntu-latest
     permissions:
@@ -353,24 +355,16 @@ jobs:
             echo "skip=1" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          last=$(git tag -l 'v*' --sort=-v:refname | head -1)
-          if [ -n "$last" ] && ! git diff --name-only "$last"..HEAD \
-               | grep -qE '^(src/|Cargo\.toml$|Cargo\.lock$)'; then
-            echo "nothing under src/ since $last, so there is no new version"
+          # A release is a version Cargo.toml holds that has no tag yet. The
+          # version is bumped in a signed commit alongside the change that
+          # warrants it; this job commits nothing, so every commit on main
+          # is one its author signed.
+          if git rev-parse -q --verify "refs/tags/v$cur" >/dev/null; then
+            echo "v$cur is already released; bump the version in Cargo.toml to release again"
             echo "skip=1" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Cargo.toml holding a version that was never tagged means someone
-          # chose it; otherwise this is the next patch.
-          if git rev-parse -q --verify "refs/tags/v$cur" >/dev/null; then
-            cur=$(echo "$cur" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')
-          fi
           echo "version=$cur" >> "$GITHUB_OUTPUT"
-      - name: set the version the binaries will report
-        if: steps.v.outputs.skip != '1' && github.ref_type != 'tag'
-        run: |
-          sed -i "0,/^version = /s/^version = .*/version = \"${{ steps.v.outputs.version }}\"/" Cargo.toml
-          cargo metadata --no-deps --format-version 1 > /dev/null
       - name: build the binaries this release ships
         if: steps.v.outputs.skip != '1'
         # Not the artifacts from the static job: those were built before the
@@ -401,18 +395,10 @@ jobs:
             echo "main moved past $GITHUB_SHA during the build; the run for its tip releases"
             exit 0
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # The first release takes the version Cargo.toml already holds, so
-          # there is nothing to commit and an unconditional commit would fail.
-          if ! git diff --quiet; then
-            git commit -qam "Release v$v"
-          fi
-          git tag "v$v"
+          # The tag names the commit this run tested; nothing is committed.
           # Pushed with GITHUB_TOKEN, which by design starts no further run.
-          # Atomic: a rejected main must not leave the tag behind, pointing at
-          # a release commit main never got.
-          git push -q --atomic origin HEAD:main "v$v"
+          git tag "v$v"
+          git push -q origin "v$v"
           echo "pushed=1" >> "$GITHUB_OUTPUT"
       - name: publish the crate
         if: steps.v.outputs.skip != '1' && (github.ref_type == 'tag' || steps.tag.outputs.pushed == '1')
@@ -435,5 +421,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "v${{ steps.v.outputs.version }}" \
-            --generate-notes unbidden-* SHA256SUMS
+          v=${{ steps.v.outputs.version }}
+          # A rerun, or a tag moved to a commit whose code is the same, finds
+          # the release already posted.
+          if gh release view "v$v" > /dev/null 2>&1; then
+            echo "v$v is already posted"
+            exit 0
+          fi
+          gh release create "v$v" --generate-notes unbidden-* SHA256SUMS
