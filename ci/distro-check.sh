@@ -169,6 +169,10 @@ if [ -n "$referee" ] && command -v "$referee" >/dev/null 2>&1; then
     while IFS= read -r line; do
         src=$(echo "$line" | field source)
         [ -f "$src" ] && [ ! -L "$src" ] || continue
+        # An entry read from a kernel interface carries its target's verdict
+        # (a live binfmt handler, its interpreter's), not its source's: no
+        # package can own a file under /proc or /sys.
+        case "$src" in /proc/*|/sys/*) continue ;; esac
         case "$line" in
             *'"verdict":"packaged"'*)
                 pkg=$(echo "$line" | field package)

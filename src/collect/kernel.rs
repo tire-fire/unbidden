@@ -55,8 +55,211 @@ impl Collector for Kernel {
         if let Some(loaded) = &loaded {
             out.extend(loaded_entries(cx, loaded));
         }
+        out.extend(sysctl_callouts(cx));
+        out.extend(binfmt_handlers(cx));
+        out.extend(request_key(cx));
         out
     }
+}
+
+// ------------------------------------------------------ kernel callouts ----
+
+/// sysctl.d(5), in the order a same-named file replaces another. procps also
+/// reads /etc/sysctl.conf, after them.
+const SYSCTL_DIRS: [&str; 5] =
+    ["etc/sysctl.d", "run/sysctl.d", "usr/local/lib/sysctl.d", "usr/lib/sysctl.d", "lib/sysctl.d"];
+const SYSCTL_CONF: &str = "etc/sysctl.conf";
+const BINFMT_DIRS: [&str; 5] =
+    ["etc/binfmt.d", "run/binfmt.d", "usr/local/lib/binfmt.d", "usr/lib/binfmt.d", "lib/binfmt.d"];
+const BINFMT_LIVE: &str = "proc/sys/fs/binfmt_misc";
+const REQUEST_KEY: &str = "etc/request-key.conf";
+const REQUEST_KEY_D: &str = "etc/request-key.d";
+const CALLOUT_CAP: usize = 64 * 1024;
+
+/// The settings that name a program the kernel itself runs as root: on every
+/// crash, for every module it wants loaded, and for hotplug events on kernels
+/// that still have the helper.
+const CALLOUT_KEYS: [(&str, &str, Trigger); 3] = [
+    ("kernel.core_pattern", "core_pattern", Trigger::Always),
+    ("kernel.modprobe", "modprobe", Trigger::Always),
+    ("kernel.hotplug", "hotplug", Trigger::DeviceEvent),
+];
+
+/// The program a callout value runs, if it runs one: core_pattern only when
+/// it starts with `|`, the others whenever they are set.
+fn callout_command(which: &str, value: &str) -> Option<String> {
+    let value = value.trim();
+    let command = if which == "core_pattern" { value.strip_prefix('|')?.trim_start() } else { value };
+    (!command.is_empty()).then(|| command.to_string())
+}
+
+fn callout_entry(cx: &mut Ctx, rel: &Path, which: &str, trigger: Trigger, command: String) -> Entry {
+    let mut e = cx.entry(Kind::KernelCallout, rel, which.to_string());
+    e.trigger = trigger;
+    e.enabled = Enablement::Enabled;
+    e.principal = Some("root".into());
+    e.note("callout", which);
+    let program = command.split_whitespace().next().unwrap_or_default();
+    if program.starts_with('/') {
+        e.target_path = Some(PathBuf::from(program));
+    }
+    e.command = Some(command.into_bytes());
+    e
+}
+
+/// Every sysctl file line setting a callout, and on a live root the value
+/// the kernel holds now: one written straight into /proc runs until reboot
+/// whatever the files say.
+fn sysctl_callouts(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let mut files = super::replaceable(cx, &SYSCTL_DIRS, ".conf");
+    files.push((PathBuf::from(SYSCTL_CONF), None));
+    for (rel, shadowed_by) in files {
+        let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
+        let mut used: BTreeMap<String, usize> = BTreeMap::new();
+        for line in logical_lines(&bytes) {
+            let line = String::from_utf8_lossy(&line).into_owned();
+            let line = line.trim();
+            if line.is_empty() || line.starts_with(['#', ';']) {
+                continue;
+            }
+            // A leading `-` only says a failure to set it is not an error.
+            let Some((key, value)) = line.trim_start_matches('-').split_once('=') else { continue };
+            let key = key.trim().replace('/', ".");
+            let Some((_, which, trigger)) = CALLOUT_KEYS.iter().find(|(k, _, _)| *k == key) else { continue };
+            let Some(command) = callout_command(which, value) else { continue };
+            let mut e = callout_entry(cx, &rel, which, *trigger, command);
+            e.name = uniq(&mut used, e.name.clone());
+            e.rekey(&rel);
+            if let Some(by) = &shadowed_by {
+                e.enabled = Enablement::Disabled;
+                e.note("shadowed_by", path_note(cx, by));
+            }
+            out.push(e);
+        }
+    }
+    if cx.root.is_live() {
+        for (_, which, trigger) in CALLOUT_KEYS {
+            let rel = Path::new("proc/sys/kernel").join(which);
+            if !cx.root.exists(&rel) {
+                continue;
+            }
+            let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
+            if let Some(command) = callout_command(which, &String::from_utf8_lossy(&bytes)) {
+                let mut e = callout_entry(cx, &rel, which, trigger, command);
+                e.note("live", "true");
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
+/// binfmt_misc: the kernel runs a handler's interpreter for every file whose
+/// header or extension matches. From binfmt.d, one `:name:type:offset:
+/// magic:mask:interpreter:flags` line per handler, the first character being
+/// the delimiter; and on a live root, what is registered now. Flags C and O
+/// hand the interpreter the file's own credentials, which on a setuid file
+/// are root's.
+fn binfmt_handlers(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for (rel, shadowed_by) in super::replaceable(cx, &BINFMT_DIRS, ".conf") {
+        let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
+        let mut used: BTreeMap<String, usize> = BTreeMap::new();
+        for line in logical_lines(&bytes) {
+            let line = line.trim_ascii();
+            let Some(&delim) = line.first() else { continue };
+            if matches!(delim, b'#' | b';') {
+                continue;
+            }
+            let fields: Vec<&[u8]> = line[1..].split(|b| *b == delim).collect();
+            let [name, kind, _offset, _magic, _mask, interpreter, rest @ ..] = fields.as_slice() else { continue };
+            let mut e = binfmt_entry(cx, &rel, uniq(&mut used, lossy(name)), interpreter, rest.first().copied().unwrap_or_default());
+            e.note("match", if *kind == b"E" { "extension" } else { "magic" });
+            if let Some(by) = &shadowed_by {
+                e.enabled = Enablement::Disabled;
+                e.note("shadowed_by", path_note(cx, by));
+            }
+            out.push(e);
+        }
+    }
+    if cx.root.is_live() {
+        for ent in cx.dir(BINFMT_LIVE) {
+            if ent.is_dir || ent.name == "register" || ent.name == "status" {
+                continue;
+            }
+            let rel = Path::new(BINFMT_LIVE).join(&ent.name);
+            let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
+            let text = String::from_utf8_lossy(&bytes);
+            let field = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)).map(str::trim);
+            let Some(interpreter) = field("interpreter ") else { continue };
+            let flags = field("flags:").unwrap_or_default().to_string();
+            let mut e = binfmt_entry(cx, &rel, ent.name.to_string_lossy().into_owned(), interpreter.as_bytes(), flags.as_bytes());
+            if text.lines().next() == Some("disabled") {
+                e.enabled = Enablement::Disabled;
+            }
+            e.note("live", "true");
+            out.push(e);
+        }
+    }
+    out
+}
+
+fn binfmt_entry(cx: &mut Ctx, rel: &Path, name: String, interpreter: &[u8], flags: &[u8]) -> Entry {
+    let mut e = cx.entry(Kind::KernelCallout, rel, name);
+    e.trigger = Trigger::Always;
+    e.enabled = Enablement::Enabled;
+    e.note("callout", "binfmt_misc");
+    e.command = Some(interpreter.to_vec());
+    if interpreter.starts_with(b"/") {
+        e.target_path = Some(PathBuf::from(lossy(interpreter)));
+    }
+    let flags = lossy(flags).trim().to_string();
+    if !flags.is_empty() {
+        if flags.contains(['C', 'O']) {
+            e.note("credentials", "the matched file's (flag C or O)");
+        }
+        e.note("flags", flags);
+    }
+    e
+}
+
+/// request-key(8) runs the program a request-key.conf line names when the
+/// kernel needs a key it lacks: `op type description callout-info program
+/// args...`, first match wins. request-key.d/*.conf is read before the file.
+fn request_key(cx: &mut Ctx) -> Vec<Entry> {
+    let mut files: Vec<PathBuf> = cx
+        .dir(REQUEST_KEY_D)
+        .into_iter()
+        .filter(|e| !e.is_dir && e.name.as_bytes().ends_with(b".conf"))
+        .map(|e| Path::new(REQUEST_KEY_D).join(e.name))
+        .collect();
+    files.sort();
+    files.push(PathBuf::from(REQUEST_KEY));
+    let mut out = Vec::new();
+    for rel in files {
+        let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
+        let mut used: BTreeMap<String, usize> = BTreeMap::new();
+        for line in logical_lines(&bytes) {
+            if line.trim_ascii().first().is_none_or(|b| *b == b'#') {
+                continue;
+            }
+            let words: Vec<&[u8]> = line.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty()).collect();
+            let [op, key_type, description, _info, program, ..] = words.as_slice() else { continue };
+            let name = uniq(&mut used, format!("{} {} {}", lossy(op), lossy(key_type), lossy(description)));
+            let mut e = cx.entry(Kind::KernelCallout, &rel, name);
+            e.trigger = Trigger::Always;
+            e.enabled = Enablement::Enabled;
+            e.principal = Some("root".into());
+            e.note("callout", "request-key");
+            e.command = Some(words[4..].join(&b' '));
+            if program.starts_with(b"/") {
+                e.target_path = Some(PathBuf::from(lossy(program)));
+            }
+            out.push(e);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------- udev ----
@@ -972,6 +1175,53 @@ mod tests {
             "the truncated read must be recorded: {truncated:?}"
         );
         assert!(of_kind(&s, Kind::Udev).len() > 100, "the readable part of the flood still parsed");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn kernel_callouts_are_read_from_sysctl_binfmt_and_request_key_files() {
+        let dir = tree("callouts");
+        put(
+            &dir,
+            "etc/sysctl.d/60-evil.conf",
+            b"# comment\n; also a comment\n-kernel/core_pattern = |/opt/crash %p\nkernel.modprobe=/opt/modprobe\nkernel.hotplug =\nnet.ipv4.ip_forward = 1\n",
+        );
+        put(&dir, "etc/sysctl.conf", b"kernel.core_pattern = core.%e\n");
+        put(&dir, "etc/sysctl.d/50-coredump.conf", b"kernel.core_pattern=|/opt/admin-copy\n");
+        put(&dir, "usr/lib/sysctl.d/50-coredump.conf", b"kernel.core_pattern=|/usr/lib/systemd/systemd-coredump %P %u\n");
+        put(
+            &dir,
+            "etc/binfmt.d/evil.conf",
+            b"# comment\n:evil:M::\\x7fELF::/opt/interp:OC\n,ext,E,,xyz,,/opt/xyz,\n",
+        );
+        put(&dir, "etc/request-key.d/evil.conf", b"create user debug:* * /opt/rk %k %d\n");
+        let s = scan(&dir);
+        let callouts: Vec<&Entry> = s.entries.iter().filter(|e| e.kind == Kind::KernelCallout).collect();
+        let named = |source: &str, name: &str| {
+            callouts.iter().find(|e| e.source.ends_with(source) && e.name == name).unwrap_or_else(|| {
+                panic!("{source} {name}: {:?}", callouts.iter().map(|e| (&e.source, &e.name)).collect::<Vec<_>>())
+            })
+        };
+
+        let core = named("60-evil.conf", "core_pattern");
+        assert_eq!(core.command.as_deref(), Some(b"/opt/crash %p".as_slice()), "the `|` is the kernel's, not the program's");
+        assert_eq!(core.target_path, Some(PathBuf::from("/opt/crash")));
+        assert_eq!(core.principal.as_deref(), Some("root"));
+        assert_eq!(named("60-evil.conf", "modprobe").target_path, Some(PathBuf::from("/opt/modprobe")));
+        assert!(callouts.iter().all(|e| e.name != "hotplug"), "an empty helper runs nothing");
+        assert!(callouts.iter().all(|e| !e.source.ends_with("sysctl.conf")), "a core file, not a pipe");
+        let vendor = named("usr/lib/sysctl.d/50-coredump.conf", "core_pattern");
+        assert_eq!(vendor.enabled, Enablement::Disabled, "/etc replaces the same file name");
+
+        let evil = named("binfmt.d/evil.conf", "evil");
+        assert_eq!(evil.target_path, Some(PathBuf::from("/opt/interp")));
+        assert_eq!(evil.raw["flags"], "OC");
+        assert!(evil.raw.contains_key("credentials"));
+        assert_eq!(named("binfmt.d/evil.conf", "ext").raw["match"], "extension", "any first character delimits");
+
+        let rk = named("request-key.d/evil.conf", "create user debug:*");
+        assert_eq!(rk.command.as_deref(), Some(b"/opt/rk %k %d".as_slice()));
+        assert_eq!(rk.target_path, Some(PathBuf::from("/opt/rk")));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

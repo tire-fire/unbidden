@@ -81,6 +81,7 @@ str_enum!(Kind {
     PolkitAction => "polkit_action",
     InetdService => "inetd_service",
     LibraryDir => "library_dir",
+    KernelCallout => "kernel_callout",
     SystemdPreset => "systemd_preset",
     NssModule => "nss_module",
 });
