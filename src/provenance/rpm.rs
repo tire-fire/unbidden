@@ -43,6 +43,7 @@ const TAG_VERSION: u32 = 1001;
 const TAG_RELEASE: u32 = 1002;
 const TAG_EPOCH: u32 = 1003;
 const TAG_ARCH: u32 = 1022;
+const TAG_FILEMODES: u32 = 1030;
 const TAG_FILEDIGESTS: u32 = 1035;
 const TAG_FILELINKTOS: u32 = 1036;
 const TAG_FILEFLAGS: u32 = 1037;
@@ -262,6 +263,9 @@ struct Claim {
     /// symlink. rpm records no digest for one — there are no contents — but
     /// it does record the target, and `rpm -V` checks exactly that.
     link_to: Option<String>,
+    /// The file's st_mode as packaged. Only the setuid and setgid bits are
+    /// compared: those are what turn a shipped binary into a way to root.
+    mode: Option<u32>,
 }
 
 fn collect_claims(
@@ -278,6 +282,8 @@ fn collect_claims(
     let digests = header.string_array(TAG_FILEDIGESTS);
     let flags = header.int_array(TAG_FILEFLAGS);
     let links = header.string_array(TAG_FILELINKTOS);
+    // INT16, read signed; the mode is the low sixteen bits.
+    let modes = header.int_array(TAG_FILEMODES);
     let algo = header.int(TAG_FILEDIGESTALGO).unwrap_or(0);
 
     let name = header.string(TAG_NAME).unwrap_or_default();
@@ -301,6 +307,7 @@ fn collect_claims(
             config: file_flags & RPMFILE_CONFIG != 0,
             ghost: file_flags & RPMFILE_GHOST != 0,
             link_to: links.get(i).filter(|l| !l.is_empty()).cloned(),
+            mode: modes.get(i).map(|m| u32::from(*m as u16)),
         };
         for w in wanted {
             claims.entry(w.clone()).or_default().push(claim.clone());
@@ -488,7 +495,11 @@ fn verify(root: &Root, path: &Path, candidates: &[Claim]) -> Provenance {
             }
             (Some(_), Some(actual_digest)) if !claim.digest.is_empty() => {
                 if claim.digest.eq_ignore_ascii_case(actual_digest) {
-                    Integrity::Intact
+                    let privilege = |m: u32| m & 0o6000;
+                    match (claim.mode, root.stat(path)) {
+                        (Some(shipped), Ok(disk)) if privilege(shipped) != privilege(disk.mode) => Integrity::ModeModified,
+                        _ => Integrity::Intact,
+                    }
                 } else if claim.config {
                     Integrity::ConffileModified
                 } else {
@@ -534,7 +545,7 @@ fn rank(i: Integrity) -> u8 {
     match i {
         Integrity::Intact => 3,
         Integrity::ConffileModified => 2,
-        Integrity::Modified => 1,
+        Integrity::Modified | Integrity::ModeModified => 1,
         Integrity::Unknown => 0,
     }
 }
@@ -722,6 +733,16 @@ pub(crate) mod tests {
             self
         }
 
+        /// INT16, as rpm stores file modes.
+        pub(crate) fn int16s(&mut self, tag: u32, values: &[u16]) -> &mut Self {
+            let offset = self.store.len() as u32;
+            for v in values {
+                self.store.extend_from_slice(&v.to_be_bytes());
+            }
+            self.index.push((tag, TYPE_INT16, offset, values.len()));
+            self
+        }
+
         pub(crate) fn build(&self) -> Vec<u8> {
             let mut out = Vec::new();
             out.extend_from_slice(&(self.index.len() as u32).to_be_bytes());
@@ -823,6 +844,41 @@ pub(crate) mod tests {
 
         assert_eq!(claims.len(), 1, "the path after the empty basename must still resolve");
         assert_eq!(claims[&wanted][0].package, "filesystem");
+    }
+
+    #[test]
+    fn a_setuid_bit_the_package_did_not_ship_reads_as_mode_modified() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = Fixture::new("modes");
+        for name in ["find", "su", "ping"] {
+            f.write(&format!("usr/bin/{name}"), name.as_bytes());
+        }
+        // find gained setuid, su shipped with it, ping lost it.
+        for (name, mode) in [("find", 0o4755), ("su", 0o4755), ("ping", 0o755)] {
+            std::fs::set_permissions(f.0.join("usr/bin").join(name), std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let mut b = HeaderBuilder::default();
+        b.string(TAG_NAME, "tools")
+            .string(TAG_VERSION, "1")
+            .string(TAG_RELEASE, "1")
+            .string_array(TAG_DIRNAMES, &["/usr/bin/"])
+            .string_array(TAG_BASENAMES, &["find", "su", "ping"])
+            .ints(TAG_DIRINDEXES, &[0, 0, 0])
+            .string_array(TAG_FILEDIGESTS, &[&sha256_of(b"find"), &sha256_of(b"su"), &sha256_of(b"ping")])
+            .ints(TAG_FILEFLAGS, &[0, 0, 0])
+            // 0o104755 is above i16::MAX: the mode has to survive being read signed.
+            .int16s(TAG_FILEMODES, &[0o100755, 0o104755, 0o104755])
+            .ints(TAG_FILEDIGESTALGO, &[8]);
+        f.rpmdb(&[b.build()]);
+        let root = f.root();
+        let answers = ask(&root, &["usr/bin/find", "usr/bin/su", "usr/bin/ping"]);
+        let integrity = |p: &str| match &answers[Path::new(p)] {
+            Provenance::Packaged { integrity, .. } => *integrity,
+            other => panic!("{p}: {other:?}"),
+        };
+        assert_eq!(integrity("usr/bin/find"), Integrity::ModeModified, "contents match, the setuid bit does not");
+        assert_eq!(integrity("usr/bin/su"), Integrity::Intact);
+        assert_eq!(integrity("usr/bin/ping"), Integrity::ModeModified, "rpm -V reports a removed bit too");
     }
 
     #[test]

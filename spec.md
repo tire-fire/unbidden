@@ -338,7 +338,7 @@ Nothing in v1. Hashes are emitted; lookups are the operator's business (§2)
 The flag set
 Every flag must be mechanically derivable and defensible in one sentence. No flag may be a guess.
 • Unpackaged — no package owns the backing file
-• PackagedModified — package owns it, contents differ from the manifest digest
+• PackagedModified — package owns it, and its contents differ from the manifest digest, or (rpm, which records modes) its setuid or setgid bits differ from the packaged mode, the integrity then reading mode-modified
 • ConffileModified — package owns it as a configuration file, and it has been changed since install
 • TargetMissing — command resolves to a non-existent path
 • TargetUnresolvable — command could not be parsed into a path at all
@@ -512,7 +512,7 @@ Three rules:
 As built, the whole rule. An entry is hidden only when all three of these hold:
 • It carries no flag but DegradedEnablement. That flag is a caveat about how the answer was reached, set on every unit where systemd is not running, and letting it block suppression would hide nothing there.
 • What it runs is verified: its target is packaged and intact, or is a packaged directory, which has no digest to hold. Otherwise it would be the missing-md5sums case, one step removed.
-• Its own file is packaged and intact, or it is the package manager's own machinery: an rpm scriptlet read out of a package header, or a dpkg maintainer script. No package manager records a digest for its own metadata, so these can never be verified, and an ordinary Debian host carries hundreds. §7 already takes the database at its word about who owns every file, so hiding what the database itself holds adds no exposure. The exception is a maintainer script whose inode changed after its package was installed (§7): dpkg did not write that, and it is shown.
+• Its own file is packaged and intact, or it is the package manager's own machinery: an rpm scriptlet read out of a package header, or a dpkg maintainer script. No package manager records a digest for its own metadata, so these can never be verified, and an ordinary Debian host carries hundreds. §7 already takes the database at its word about who owns every file, so hiding what the database itself holds adds no exposure. The exception is a maintainer script whose inode changed after its package was installed (§7): dpkg did not write that, and it is shown. The same holds for any entry carrying changed_after_install, which includes a setuid or setgid file on a dpkg host, live, whose inode changed well after its package's .list was written and whose mode dpkg-statoverride does not record: dpkg records no modes, so chmod u+s on a packaged binary otherwise verifies clean.
 NSS modules have their own form of the third condition, because /etc/nsswitch.conf is unverifiable on every supported distribution: libnss-systemd's postinst edits the Debian template, and Fedora's authselect renders the file with no digest recorded. So the file is never packaged and intact — at best it is GeneratedBy libc-bin, a copy of its template (§7) — and a module is hidden when the library it loads is packaged and intact, or when it has none and glibc skips the name; never when it follows a #.
 A conffile that has been edited carries ConffileModified and so is shown. It is not a finding, but it is a local change, and the default view is where an administrator expects to see those.
 4. LD_PRELOAD correlation — add an enrichment phase
@@ -564,6 +564,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5: environment.d drop-ins were reported twice on merged-usr hosts.
 • §5: /usr/local/lib was not read for udev rules, modprobe.d, modules-load.d or environment.d, nor /run/modprobe.d, ~/.config/environment.d, /usr/lib/pam.d or the session autostart directories under /etc/xdg.
 • §5: environment generators, tmpfiles.d and systemd presets were not read.
+• §7: a setuid bit added to a packaged binary, chmod u+s /usr/bin/find, verified as intact and was hidden with --deep. rpm's recorded mode is now compared; on dpkg, which records none, the file's change time is.
 • §5: the SSH key files were fixed at ~/.ssh/authorized_keys and authorized_keys2, and AuthorizedKeysFile was never read, so keys in any other file it named went unseen; AuthorizedPrincipalsCommand and TrustedUserCAKeys were not read either.
 • §5: polkit was deferred with no reason given, and not read.
 • §5: the inetd family was not mentioned anywhere, and xinetd and inetd were not read.
