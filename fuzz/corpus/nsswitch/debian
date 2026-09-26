@@ -1,0 +1,4 @@
+passwd:         files systemd # xyzzy
+group:files [NOTFOUND=return] sss
+  hosts :: files mdns4_minimal [NOTFOUND=return] dns
+netgroup: nis

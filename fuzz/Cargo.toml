@@ -304,3 +304,10 @@ path = "fuzz_targets/systemd_preset.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "nsswitch"
+path = "fuzz_targets/nsswitch.rs"
+test = false
+doc = false
+bench = false

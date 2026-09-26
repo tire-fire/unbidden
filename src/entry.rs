@@ -77,6 +77,7 @@ str_enum!(Kind {
     GitHook => "git_hook",
     Tmpfiles => "tmpfiles",
     SystemdPreset => "systemd_preset",
+    NssModule => "nss_module",
 });
 
 str_enum!(Trigger {

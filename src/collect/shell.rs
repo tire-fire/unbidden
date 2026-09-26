@@ -346,27 +346,7 @@ fn preload(cx: &mut Ctx, out: &mut Vec<Entry>) {
 /// has. Recorded as a note on the preload entries, never as entries of their
 /// own — a configured directory is not itself something that runs.
 fn nonstandard_lib_dirs(cx: &mut Ctx) -> Vec<String> {
-    let mut files = vec![PathBuf::from("etc/ld.so.conf")];
-    for ent in cx.dir("etc/ld.so.conf.d") {
-        if !ent.is_dir {
-            files.push(Path::new("etc/ld.so.conf.d").join(&ent.name));
-        }
-    }
-    let mut dirs = Vec::new();
-    for f in files {
-        let Some(bytes) = cx.read_capped(&f, 64 * 1024) else { continue };
-        for raw in bytes.split(|b| *b == b'\n') {
-            let line = strip_cr(raw).trim_ascii();
-            if line.is_empty() || line.starts_with(b"#") || line.starts_with(b"include") {
-                continue;
-            }
-            let d = String::from_utf8_lossy(line).into_owned();
-            if !is_standard_lib_dir(&d) && !dirs.contains(&d) {
-                dirs.push(d);
-            }
-        }
-    }
-    dirs
+    super::ld_so_conf_dirs(cx).into_iter().filter(|d| !is_standard_lib_dir(d)).collect()
 }
 
 fn is_standard_lib_dir(d: &str) -> bool {
@@ -1019,7 +999,11 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.join("etc/ld.so.conf"), "include /etc/ld.so.conf.d/*.conf\n/usr/lib/x86_64-linux-gnu\n").unwrap();
-        fs::write(dir.join("etc/ld.so.conf.d/weird.conf"), "/opt/weird/lib\n").unwrap();
+        fs::write(dir.join("etc/ld.so.conf.d/weird.conf"), "/opt/weird/lib/ # trailing\ninclude nested/*.conf\n").unwrap();
+        // ldconfig reads only what an include names.
+        fs::write(dir.join("etc/ld.so.conf.d/skipped.txt"), "/opt/never\n").unwrap();
+        fs::create_dir_all(dir.join("etc/ld.so.conf.d/nested")).unwrap();
+        fs::write(dir.join("etc/ld.so.conf.d/nested/a.conf"), "/opt/nested/lib\n").unwrap();
 
         let scan = run(&dir);
         let pre: Vec<_> = scan.entries.iter().filter(|e| e.kind == Kind::LdPreload).collect();
@@ -1030,7 +1014,7 @@ mod tests {
         assert_eq!(evil.enabled, Enablement::Enabled);
         assert_eq!(evil.target_path.as_deref(), Some(Path::new("/tmp/evil.so")));
         assert_eq!(evil.command.as_deref(), Some(&b"/usr/lib/libnss.so\t/tmp/evil.so"[..]));
-        assert_eq!(evil.raw["ld_so_conf.nonstandard"], "/opt/weird/lib");
+        assert_eq!(evil.raw["ld_so_conf.nonstandard"], "/opt/weird/lib\n/opt/nested/lib");
         assert!(by_name(&scan, Kind::LdPreload, "/opt/weird/lib.so").command.is_some());
         fs::remove_dir_all(&dir).unwrap();
     }

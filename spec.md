@@ -87,7 +87,7 @@ String
 Stable synthetic identity. See below.
 kind
 enum
-Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset
+Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module
 source
 PathBuf
 The file or directory the entry was read from. Always a real path on disk.
@@ -160,6 +160,8 @@ rc.local and SysV
 /etc/rc.local, /etc/rc.d/rc.local, /etc/init.d/*, /etc/rc*.d/*
 PAM
 /etc/pam.d/*, and /usr/lib/pam.d/* for a service /etc/pam.d does not name — pam_exec lines and modules resolving outside standard module directories
+NSS modules
+/etc/nsswitch.conf, parsed as glibc 2.39 parses it: a database name, any run of whitespace and colons, then sources, each with an optional bracketed action list. There is no comment syntax after the database name, so passwd: files # nis loads libnss_#.so.2 and libnss_nis.so.2, and a source after a # is marked as such. One entry per module, with the databases that name it; files and dns are built into libc. The library is looked for in the ld.so.conf directories, standing in for the loader's cache, then the default directories with their glibc-hwcaps levels first; a name with no library is dormant, since glibc skips it
 udev
 /etc/udev/rules.d/*, /run/udev/rules.d/*, /usr/local/lib/udev/rules.d/*, /lib/udev/rules.d/* — rules carrying RUN+=
 ld.so preload
@@ -268,6 +270,7 @@ No package claims this file. Normal for admin-authored config, and exactly where
 Unknown
 No package database found, or the file is on a filesystem the database does not cover, or the database could not be read to the end (§3).
 The source's verdict is the entry's provenance. The target's is recorded as target_provenance, and an unpackaged or modified target flags the entry: a packaged unit whose ExecStart= names something no package shipped is the whole shape of a hijacked service.
+A file a package installs by copying a template it ships, from a maintainer script, is claimed by no database. /etc/nsswitch.conf is one: libc-bin's postinst copies /usr/share/libc-bin/nsswitch.conf. A copy byte for byte identical to its template, while the template is packaged and intact, is GeneratedBy that package, since the package owns the template and not what its script wrote; any difference leaves it Unpackaged.
 A command given as a bare name — ExecStart=systemctl, * * * * * root backdoor — is resolved against the mechanism's search path before any of this, so the file it names gets the same lookup as an absolute path would. The name is the first program the shell would run, as the grammar reads the text: in [ -f /run/x ] || backdoor that is backdoor, since a test is not a command.
 A target that is a symlink no package owns, or one the package database records no digest for, is judged by the file it finally resolves to, and says so. /usr/bin/editor -> /etc/alternatives/editor -> /usr/bin/vim.basic is vim; the same links pointed at /tmp end at an unpackaged file. This applies to what an entry runs, never to the entry's own source: an alias link in /etc/systemd/system is itself the evidence and keeps its own verdict.
 Implementation
@@ -474,7 +477,7 @@ Specific things to assert per distro, because they are the ones a generic test m
 RHEL, CentOS, Arch, openSUSE and Alpine are not tested. Community bug reports welcome; no release waits on them.
 Parser fuzzing
 Every parser gets a cargo-fuzz target. §3 establishes that parser input is adversarial; fuzzing is how that stops being an aspiration. Priority order: unit files, crontabs, .desktop files, udev rules, PAM configs.
-As built: 40 targets, one per parser. The five above get a minute each in CI, the rest twenty seconds; a smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
+As built: 41 targets, one per parser. The five above get a minute each in CI, the rest twenty seconds; a smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
 Golden files
 Collector output for a fixed synthetic filesystem tree, checked into the repository. Catches unintended changes to the Entry record, which is the schema contract of §10. Alongside it, a mutation pass takes the same tree apart 120 ways and requires every collector to survive each.
 Conventions
@@ -499,6 +502,7 @@ As built, the whole rule. An entry is hidden only when all three of these hold:
 • It carries no flag but DegradedEnablement. That flag is a caveat about how the answer was reached, set on every unit where systemd is not running, and letting it block suppression would hide nothing there.
 • What it runs is verified: its target is packaged and intact, or is a packaged directory, which has no digest to hold. Otherwise it would be the missing-md5sums case, one step removed.
 • Its own file is packaged and intact, or it is the package manager's own machinery: an rpm scriptlet read out of a package header, or a dpkg maintainer script. No package manager records a digest for its own metadata, so these can never be verified, and an ordinary Debian host carries hundreds. §7 already takes the database at its word about who owns every file, so hiding what the database itself holds adds no exposure. The exception is a maintainer script whose inode changed after its package was installed (§7): dpkg did not write that, and it is shown.
+NSS modules have their own form of the third condition, because /etc/nsswitch.conf is unverifiable on every supported distribution: libnss-systemd's postinst edits the Debian template, and Fedora's authselect renders the file with no digest recorded. So the file is never packaged and intact — at best it is GeneratedBy libc-bin, a copy of its template (§7) — and a module is hidden when the library it loads is packaged and intact, or when it has none and glibc skips the name; never when it follows a #.
 A conffile that has been edited carries ConffileModified and so is shown. It is not a finding, but it is a local change, and the default view is where an administrator expects to see those.
 4. LD_PRELOAD correlation — add an enrichment phase
 The question was framed as "how far to chase LD_PRELOAD", but the real issue is that some facts are inherently relational and the pipeline had nowhere to put them. ShadowsVendorUnit (§6) has the same problem and was already specified without a home.
@@ -549,6 +553,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5: environment.d drop-ins were reported twice on merged-usr hosts.
 • §5: /usr/local/lib was not read for udev rules, modprobe.d, modules-load.d or environment.d, nor /run/modprobe.d, ~/.config/environment.d, /usr/lib/pam.d or the session autostart directories under /etc/xdg.
 • §5: environment generators, tmpfiles.d and systemd presets were not read.
+• §5: nsswitch.conf was not read. ld.so.conf's include lines were skipped and every file in ld.so.conf.d read instead, so an included file elsewhere was missed and a file the include glob never matches was reported as read.
 • §6: D-Bus answers never matched a vendor unit on distributions whose systemd names /lib.
 • §6: one account could answer for another's units.
 • §7: the snap verdict could be claimed by naming a file, and ran before the package databases.

@@ -7,11 +7,11 @@
 //! replacement characters.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
-use std::os::unix::ffi::OsStringExt;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use super::glob_match;
+use super::{expand_glob, include_rel};
 use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, dedup_ids};
 use crate::scan::{Collector, Ctx};
 
@@ -25,6 +25,7 @@ impl Collector for Auth {
     fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
         let mut out = Vec::new();
         pam(cx, &mut out);
+        nss(cx, &mut out);
         ssh(cx, &mut out);
         sudoers(cx, &mut out);
         dedup_ids(&mut out);
@@ -216,6 +217,153 @@ fn is_pam_exec_opt(a: &[u8]) -> bool {
         "quiet_success",
     ];
     OPTS.iter().any(|o| eqi(a, o)) || a.starts_with(b"log=") || a.starts_with(b"type=")
+}
+
+/// The databases glibc reads from nsswitch.conf (nss/databases.def). A line
+/// naming any other, `sudoers:` or `automount:` among them, is read by some
+/// other program with its own backends and loads no libnss module.
+const NSS_DATABASES: [&[u8]; 17] = [
+    b"aliases",
+    b"ethers",
+    b"group",
+    b"group_compat",
+    b"gshadow",
+    b"hosts",
+    b"initgroups",
+    b"netgroup",
+    b"networks",
+    b"passwd",
+    b"passwd_compat",
+    b"protocols",
+    b"publickey",
+    b"rpc",
+    b"services",
+    b"shadow",
+    b"shadow_compat",
+];
+
+/// Where the loader finds a library named without a slash once its cache has
+/// no answer, by layout: Debian's multiarch directories, or Fedora's lib64.
+const LOADER_DIRS: [&[&str]; 3] = [
+    &["lib/x86_64-linux-gnu", "usr/lib/x86_64-linux-gnu", "lib", "usr/lib"],
+    &["lib/aarch64-linux-gnu", "usr/lib/aarch64-linux-gnu", "lib", "usr/lib"],
+    &["lib64", "usr/lib64"],
+];
+
+/// Tried before each directory itself; which ones apply depends on the CPU.
+const HWCAPS: [&str; 3] = ["glibc-hwcaps/x86-64-v4", "glibc-hwcaps/x86-64-v3", "glibc-hwcaps/x86-64-v2"];
+
+/// nsswitch.conf, parsed as glibc 2.39 parses it (nss_database.c,
+/// nss_action_parse.c): a database name ends at whitespace or `:`, any run
+/// of both follows it, and each source is the bytes up to whitespace or `[`,
+/// with an optional bracketed action list. There is no comment syntax after
+/// the database name: `passwd: files # nis` makes `#` and `nis` sources, and
+/// glibc loads libnss_#.so.2 and libnss_nis.so.2. A line only reads as a
+/// comment because `#...` is not a database.
+///
+/// Each module is loaded into whatever process does a lookup: sshd, sudo,
+/// login, cron. One entry per module, with the databases that name it.
+fn nss(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let rel = Path::new("etc/nsswitch.conf");
+    let Some(bytes) = cx.read_capped(rel, 64 * 1024) else { return };
+    let mut modules: Vec<(Vec<u8>, Vec<String>, bool)> = Vec::new();
+    for raw in bytes.split(|b| *b == b'\n') {
+        let line = raw.trim_ascii_start();
+        let end = line.iter().position(|b| b.is_ascii_whitespace() || *b == b':').unwrap_or(line.len());
+        let (db, mut rest) = line.split_at(end);
+        if db.is_empty() || rest.is_empty() || !NSS_DATABASES.contains(&db) {
+            continue;
+        }
+        let skip = rest.iter().position(|b| !b.is_ascii_whitespace() && *b != b':').unwrap_or(rest.len());
+        rest = &rest[skip..];
+        let mut after_hash = false;
+        loop {
+            rest = rest.trim_ascii_start();
+            if rest.is_empty() {
+                break;
+            }
+            let end = rest.iter().position(|b| b.is_ascii_whitespace() || *b == b'[').unwrap_or(rest.len());
+            let name = &rest[..end];
+            rest = rest[end..].trim_ascii_start();
+            if rest.first() == Some(&b'[') {
+                rest = &rest[rest.iter().position(|b| *b == b']').map_or(rest.len(), |i| i + 1)..];
+            }
+            if name.is_empty() {
+                continue;
+            }
+            after_hash |= name.starts_with(b"#");
+            // Built into libc since 2.34; no library is opened for them.
+            if name == b"files" || name == b"dns" {
+                continue;
+            }
+            let db = lossy(db);
+            match modules.iter_mut().find(|m| m.0 == name) {
+                Some(m) => {
+                    if !m.1.contains(&db) {
+                        m.1.push(db);
+                    }
+                    m.2 |= after_hash;
+                }
+                None => modules.push((name.to_vec(), vec![db], after_hash)),
+            }
+        }
+    }
+    if modules.is_empty() {
+        return;
+    }
+
+    let mut dirs = super::ld_so_conf_dirs(cx);
+    let layout = LOADER_DIRS.iter().find(|l| cx.root.exists(l[0])).copied().unwrap_or(&[]);
+    dirs.extend(layout.iter().map(|d| format!("/{d}")));
+    for (name, databases, after_hash) in modules {
+        let file = [b"libnss_".as_slice(), &name, b".so.2"].concat();
+        let file = Path::new(OsStr::from_bytes(&file));
+        // ponytail: the loader's cache is not read; ld.so.conf's directories
+        // stand in for it, ahead of the defaults, as the cache is consulted
+        // first.
+        // Merged /usr makes /lib/x and /usr/lib/x one directory, searched
+        // once under the first name.
+        let mut seen = BTreeSet::new();
+        let mut found: Vec<PathBuf> = Vec::new();
+        for d in &dirs {
+            let d = Path::new(d.trim_start_matches('/'));
+            for dir in HWCAPS.iter().map(|h| d.join(h)).chain(std::iter::once(d.to_path_buf())) {
+                let Ok(id) = cx.root.dir_identity(&dir) else { continue };
+                if seen.insert(id) && cx.root.exists(dir.join(file)) {
+                    found.push(dir.join(file));
+                }
+            }
+        }
+        let mut e = cx.entry(Kind::NssModule, rel, lossy(&name));
+        e.trigger = Trigger::Always;
+        e.note("databases", databases.join(", "));
+        e.note("library", file.to_string_lossy());
+        if after_hash {
+            // What reads as a comment to a person is a source to glibc.
+            e.note("after_hash", "true");
+        }
+        match found.first() {
+            Some(lib) => {
+                e.enabled = Enablement::Enabled;
+                e.target_path = Some(cx.root.abs(lib));
+                if found.len() > 1 {
+                    let all: Vec<String> = found.iter().map(|p| cx.root.abs(p).display().to_string()).collect();
+                    e.note("candidates", all.join(", "));
+                }
+            }
+            // glibc skips a source whose library is missing, silently. Stock
+            // Ubuntu names nis with no libnss_nis installed: dormant, and a
+            // library dropped under that name starts loading.
+            None => {
+                e.enabled = Enablement::Disabled;
+                e.note("library_missing", "true");
+            }
+        }
+        if std::str::from_utf8(&name).is_err() {
+            e.flag(Flag::EncodingAnomaly);
+        }
+        out.push(e);
+    }
 }
 
 /// libpam reads a service's stack from /etc/pam.d, and from the vendor
@@ -614,29 +762,6 @@ fn sshd_kv(line: &[u8]) -> Option<(&[u8], &[u8])> {
 
 /// An include path resolved root-relative: absolute means relative to the scan
 /// root, bare means relative to `base`.
-fn include_rel(base: &Path, spec: &[u8]) -> PathBuf {
-    let p = bpath(spec);
-    match p.strip_prefix("/") {
-        Ok(stripped) => stripped.to_path_buf(),
-        Err(_) => base.join(p),
-    }
-}
-
-fn expand_glob(cx: &mut Ctx, rel: &Path) -> Vec<PathBuf> {
-    let name = rel.file_name().map(|n| n.as_encoded_bytes().to_vec()).unwrap_or_default();
-    if !name.contains(&b'*') && !name.contains(&b'?') {
-        return vec![rel.to_path_buf()];
-    }
-    let dir = rel.parent().unwrap_or(Path::new("")).to_path_buf();
-    let mut out = Vec::new();
-    for ent in cx.dir(&dir) {
-        if !ent.is_dir && glob_match(&name, ent.name.as_encoded_bytes()) {
-            out.push(dir.join(&ent.name));
-        }
-    }
-    out
-}
-
 fn sshd_config_file(
     cx: &mut Ctx,
     out: &mut Vec<Entry>,
@@ -1310,16 +1435,6 @@ mod tests {
     }
 
     #[test]
-    fn glob_matching_is_not_a_prefix_check() {
-        assert!(glob_match(b"*.conf", b"10-evil.conf"));
-        assert!(!glob_match(b"*.conf", b"notes.txt"));
-        assert!(glob_match(b"sshd_config_?", b"sshd_config_1"));
-        assert!(glob_match(b"*", b"anything"));
-        assert!(!glob_match(b"a*b", b"ab_"));
-        assert!(glob_match(b"a*b*c", b"axxbxxc"));
-    }
-
-    #[test]
     fn module_paths_are_classified_root_relative() {
         assert!(module_is_standard(b"pam_unix.so"));
         assert!(module_is_standard(b"/lib/security/pam_unix.so"));
@@ -1347,6 +1462,60 @@ mod tests {
         assert_eq!(only.enabled, Enablement::Enabled, "a vendor stack with no /etc copy is the one used");
         assert_eq!(only.raw["service"], "polkit-1");
         assert!(!only.raw.contains_key("shadowed_by"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn nss_modules_are_read_the_way_glibc_reads_nsswitch() {
+        let d = tree("nss");
+        put(
+            &d,
+            "etc/nsswitch.conf",
+            "# a comment line names no database\n\
+             passwd:         files systemd # xyzzy\n\
+             group:files [NOTFOUND=return] sss\n\
+             \x20 hosts :: files mdns4_minimal [NOTFOUND=return] dns\n\
+             netgroup: nis\n\
+             sudoers: files plugh\n\
+             automount: files ldap\n",
+        );
+        put(&d, "lib/x86_64-linux-gnu/libnss_systemd.so.2", "");
+        put(&d, "lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/libnss_mdns4_minimal.so.2", "");
+        put(&d, "lib/x86_64-linux-gnu/libnss_mdns4_minimal.so.2", "");
+        put(&d, "etc/ld.so.conf", "include /etc/ld.so.conf.d/*.conf\n");
+        put(&d, "etc/ld.so.conf.d/sss.conf", "/opt/sss/lib\n");
+        put(&d, "opt/sss/lib/libnss_sss.so.2", "");
+        let s = scan(&d);
+
+        let mut names: Vec<&str> = s.entries.iter().filter(|e| e.kind == Kind::NssModule).map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["#", "mdns4_minimal", "nis", "sss", "systemd", "xyzzy"], "files and dns are libc; sudoers and automount load no module");
+
+        let systemd = named(&s, "systemd").pop().unwrap();
+        assert_eq!(systemd.target_path, Some(d.join("lib/x86_64-linux-gnu/libnss_systemd.so.2")));
+        assert_eq!(systemd.enabled, Enablement::Enabled);
+        assert_eq!(systemd.trigger, Trigger::Always);
+        assert!(!systemd.raw.contains_key("after_hash"));
+
+        let hidden = s.entries.iter().find(|e| e.name == "xyzzy").unwrap();
+        assert_eq!(hidden.raw["after_hash"], "true", "a person reads it as a comment; glibc loads it");
+        assert_eq!(hidden.raw["databases"], "passwd");
+        assert_eq!((hidden.enabled, hidden.target_path.clone()), (Enablement::Disabled, None));
+        assert_eq!(hidden.raw["library_missing"], "true");
+
+        let mdns = named(&s, "mdns4_minimal").pop().unwrap();
+        assert_eq!(mdns.raw["databases"], "hosts", "leading whitespace and a run of colons");
+        assert_eq!(
+            mdns.target_path,
+            Some(d.join("lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/libnss_mdns4_minimal.so.2")),
+            "a hwcaps copy is tried first"
+        );
+        assert!(mdns.raw.contains_key("candidates"));
+
+        let sss = named(&s, "sss").pop().unwrap();
+        assert_eq!(sss.raw["databases"], "group", "the action list is not a source");
+        assert_eq!(sss.target_path, Some(d.join("opt/sss/lib/libnss_sss.so.2")));
+        assert_eq!(named(&s, "nis").pop().unwrap().enabled, Enablement::Disabled);
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

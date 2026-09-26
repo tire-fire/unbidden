@@ -54,6 +54,19 @@ pub fn suppressed(e: &Entry) -> bool {
         .raw
         .get("target_provenance")
         .is_none_or(|v| v.ends_with("(intact)") || v.ends_with("(directory)"));
+    // nsswitch.conf is written at install time on every supported
+    // distribution, by libc-bin's postinst from a template and edited by
+    // libnss-systemd's, or rendered by authselect, and no package database
+    // records what it should hold, so the file is never packaged and intact:
+    // at best it is GeneratedBy libc-bin, a copy of its template. A module is
+    // judged by the library glibc loads for it instead: hidden when that is
+    // packaged and intact, or when there is none and glibc skips the name,
+    // and never when it follows a `#` a person reads as a comment. An
+    // unpackaged or modified library shows through target_provenance.
+    if e.kind == Kind::NssModule && !e.provenance.is_packaged_intact() {
+        let source_only = e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
+        return source_only && target_verified && !e.raw.contains_key("after_hash");
+    }
     quiet && target_verified && (e.provenance.is_packaged_intact() || from_package_database(e))
 }
 
@@ -348,6 +361,43 @@ mod tests {
             },
             entries,
         }
+    }
+
+    #[test]
+    fn an_nss_module_in_an_unverified_file_is_judged_by_its_library() {
+        let nss = |prov: Provenance, flags: &[Flag], target: Option<&str>, after_hash: bool| {
+            let mut e = Entry::new(Kind::NssModule, "/etc/nsswitch.conf", "x");
+            e.provenance = prov;
+            for f in flags {
+                e.flag(*f);
+            }
+            if let Some(t) = target {
+                e.note("target_provenance", t);
+            }
+            if after_hash {
+                e.note("after_hash", "true");
+            }
+            e
+        };
+        // Debian: libc-bin's copy of its own template.
+        let generated = Provenance::GeneratedBy { by: "libc-bin, identical to /usr/share/libc-bin/nsswitch.conf".into() };
+        assert!(suppressed(&nss(generated, &[], None, false)));
+        // Mint: the file is unowned, the library ships with systemd.
+        assert!(suppressed(&nss(Provenance::Unpackaged, &[Flag::Unpackaged], Some("libnss-systemd (intact)"), false)));
+        // Fedora: authselect's ghost file, which has no digest.
+        assert!(suppressed(&nss(packaged(Integrity::Unknown), &[], Some("systemd-libs (intact)"), false)));
+        // A name with no library behind it: glibc skips it.
+        assert!(suppressed(&nss(Provenance::Unpackaged, &[Flag::Unpackaged], None, false)));
+        assert!(!suppressed(&nss(Provenance::Unpackaged, &[Flag::Unpackaged], Some("unpackaged"), false)));
+        assert!(!suppressed(&nss(
+            Provenance::Unpackaged,
+            &[Flag::PackagedModified],
+            Some("libnss-systemd (modified)"),
+            false
+        )));
+        assert!(!suppressed(&nss(Provenance::Unpackaged, &[Flag::Unpackaged], None, true)), "after a `#`");
+        // Other kinds keep the ordinary rule.
+        assert!(!suppressed(&entry("x.service", packaged(Integrity::Unknown), &[])));
     }
 
     #[test]
