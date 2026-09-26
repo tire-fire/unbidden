@@ -47,9 +47,10 @@ type Backend = fn(&Root, &BTreeSet<PathBuf>) -> Option<Answers>;
 /// Files a package installs by copying a template it ships, from a
 /// maintainer script, rather than shipping the file itself: libc-bin's
 /// postinst puts /usr/share/libc-bin/nsswitch.conf in place as
-/// /etc/nsswitch.conf. No package database claims the copy. One that is
-/// byte for byte the template, while the template is packaged and intact,
-/// takes the template's verdict; any difference leaves it Unpackaged.
+/// /etc/nsswitch.conf. No package database claims the copy, and none may be
+/// said to: the package owns the template, not what its script wrote. A copy
+/// byte for byte the template, while the template is packaged and intact, is
+/// GeneratedBy that package; any difference leaves it Unpackaged.
 const TEMPLATES: [(&str, &str); 1] = [("etc/nsswitch.conf", "usr/share/libc-bin/nsswitch.conf")];
 
 /// Largest template compared; nsswitch.conf is a few hundred bytes.
@@ -91,13 +92,14 @@ fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Back
         if !wanted.contains(copy) || out.contains_key(copy) {
             continue;
         }
-        let Some(verdict @ Provenance::Packaged { integrity: Integrity::Intact, .. }) = out.get(template) else {
+        let Some(Provenance::Packaged { package, integrity: Integrity::Intact, .. }) = out.get(template) else {
             continue;
         };
+        let by = format!("{package}, identical to /{}", template.display());
         let read = |p: &Path| root.read_capped(p, TEMPLATE_CAP).ok().filter(|(_, truncated)| !truncated).map(|(b, _)| b);
         if let (Some(a), Some(b)) = (read(copy), read(template)) {
             if a == b {
-                out.insert(copy.to_path_buf(), verdict.clone());
+                out.insert(copy.to_path_buf(), Provenance::GeneratedBy { by });
             }
         }
     }
@@ -283,7 +285,7 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_of_an_intact_packaged_template_takes_its_verdict() {
+    fn a_copy_of_an_intact_packaged_template_is_generated_by_its_package() {
         fn ships_template(_: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
             let mut a = Answers::new();
             let t = PathBuf::from("usr/share/libc-bin/nsswitch.conf");
@@ -303,7 +305,11 @@ mod tests {
 
         std::fs::write(dir.join("etc/nsswitch.conf"), b"passwd: files\n").unwrap();
         let r = resolve_with(&root, &wanted, &[("dpkg", ships_template)]);
-        assert!(r.answers[Path::new("etc/nsswitch.conf")].is_packaged_intact());
+        assert_eq!(
+            r.answers[Path::new("etc/nsswitch.conf")],
+            Provenance::GeneratedBy { by: "libc-bin, identical to /usr/share/libc-bin/nsswitch.conf".into() },
+            "the package owns the template, not the copy its script wrote"
+        );
 
         std::fs::write(dir.join("etc/nsswitch.conf"), b"passwd: files evil\n").unwrap();
         let r = resolve_with(&root, &wanted, &[("dpkg", ships_template)]);
