@@ -196,6 +196,8 @@ MOTD
 /etc/update-motd.d/*
 NetworkManager
 /etc/NetworkManager/dispatcher.d/*
+DHCP client hooks
+The files a DHCP client's script sources, as root, on every lease event, reported as network_dispatcher entries naming the client. Read only where the client is installed, and by the rules of the host's own script. dhclient on Debian and Ubuntu: /etc/dhcp/dhclient-enter-hooks and -exit-hooks, then what run-parts --list selects in the matching .d directories, names of letters, digits, _ and - only, whatever their mode. dhclient on Fedora: the same two files, what find -executable ! -empty returns in the .d directories at any depth, dhclient-up-hooks when executable, and each executable dhclient.d/*.sh. dhcpcd: the files the for hook in list of its own dhcpcd-run-hooks names, so the hooks directory is wherever the distribution built it; a name ending in ~ is skipped, as is one a global nohook in dhcpcd.conf names, and a nohook inside an interface block is noted rather than applied
 D-Bus services
 The system and session services directories under /usr/share, /usr/local/share, /usr/lib, /run and /etc; the policy files in the system.d and session.d directories beside them are read to annotate the service each one names
 kernel modules
@@ -564,6 +566,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5: environment.d drop-ins were reported twice on merged-usr hosts.
 • §5: /usr/local/lib was not read for udev rules, modprobe.d, modules-load.d or environment.d, nor /run/modprobe.d, ~/.config/environment.d, /usr/lib/pam.d or the session autostart directories under /etc/xdg.
 • §5: environment generators, tmpfiles.d and systemd presets were not read.
+• §5: DHCP client hooks were not read; they are a way to wake a listener on every lease renewal.
 • §7: a setuid bit added to a packaged binary, chmod u+s /usr/bin/find, verified as intact and was hidden with --deep. rpm's recorded mode is now compared; on dpkg, which records none, the file's change time is.
 • §5: the SSH key files were fixed at ~/.ssh/authorized_keys and authorized_keys2, and AuthorizedKeysFile was never read, so keys in any other file it named went unseen; AuthorizedPrincipalsCommand and TrustedUserCAKeys were not read either.
 • §5: polkit was deferred with no reason given, and not read.
