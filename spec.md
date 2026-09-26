@@ -88,6 +88,9 @@ Stable synthetic identity. See below.
 kind
 enum
 Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module, sudo_plugin, polkit_rule, polkit_action, inetd_service, library_dir, kernel_callout
+collector
+Option<String>
+The collector that produced the entry, or, for an entry enrichment made from another, that entry's collector. A diff judges each entry's differences by what this collector saw in both scans (§9). Absent from records written before the field existed.
 source
 PathBuf
 The file or directory the entry was read from. Always a real path on disk.
@@ -361,12 +364,13 @@ Flags requiring cross-entry knowledge — ShadowsVendorUnit, and LD_PRELOAD assi
 Noise is the problem that kills tools in this category.
 Provenance filtering (§8) handles most of it; diffing handles the rest, and is what makes unbidden useful as a periodic control rather than only a one-shot.
 Model
-A scan with --save writes a snapshot. A scan with --against emits the same Entry stream annotated with a delta: Added, Removed, Changed with the names of the changed fields, or Unchanged.
+A scan with --save writes a snapshot. A scan with --against emits the same Entry stream annotated with a delta: Added, Removed, Changed with the names of the changed fields, Unchanged, or Uncertain (below).
 Entry identity (§4) is what makes Changed meaningful rather than a churn of add/remove pairs. A backdoor that rewrites its own ExecStart line shows up as one changed entry naming command and target_sha256.
 A change to mtime alone is Unchanged: systemd rewrites every generated unit on each daemon-reload, and a diff full of byte-identical rows is one nobody reads. The field stays in the record. Raw notes prefixed live. — a loaded module's reference count — describe the running machine rather than its configuration and are not compared.
 Snapshot format
 The snapshot is one JSON object, {header, entries}: the record stream of §10 with its header. The header records hostname, kernel version, distro (id, version, and the ID_LIKE base), scan time, unbidden version and schema version, whether the root was live and the scan deep, whether it ran as root, where enablement came from (systemd-dbus or inferred), which collectors ran and how each went — complete, partial with the paths it could not read, skipped with the reason, or failed with the error — and any enrichment stage that failed. Reads a collector deliberately limited (§3) are listed too, and do not make it partial.
-That matters. A baseline taken when the rpm collector errored is not comparable to one where it succeeded, and the diff must say so rather than reporting every RPM-owned entry as newly appeared. The diff refuses, naming why, when the two differ in any collector's status, in depth, in privilege, in where enablement came from, or when either carries an enrichment failure.
+That matters. A baseline taken when the rpm collector errored is not comparable to one where it succeeded, and the diff must say so rather than reporting every RPM-owned entry as newly appeared. Some differences make the whole comparison fiction, and the diff refuses, naming why: a difference in depth, in privilege, or in where enablement came from, or an enrichment failure in either scan.
+A difference in one collector's coverage makes only that collector's differences doubtful. Every entry names the collector that produced it, or whose entry it was made from, and coverage is compared collector by collector: complete sees everything, partial everything but the paths it lists, skipped or failed nothing. Where the baseline saw at least everything the current scan saw, an entry that is new is new; where the current scan saw at least everything the baseline saw, an entry that is gone is gone. A change to an entry both hold is believed only when both saw the same things, because an unreadable drop-in changes what a unit runs. Any other difference from that collector is reported as Uncertain, with the delta it would have had and the coverage change behind it. It is neither dropped, which would hide a real change behind someone else's unreadable file, nor asserted. The header of a diff lists each collector whose coverage moved. A baseline written before entries named their collector refuses when coverage differs, as every baseline used to.
 One consequence: a live scan and an offline scan of the same host are not comparable, even though their entry ids match (§4). Offline, the kernel collector is partial for want of /proc/modules and enablement is inferred. See §15.
 Expected workflow
 • Sysadmin: baseline a known-good machine of a given role, compare its fleet-mates by hand.
@@ -564,6 +568,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5: environment.d drop-ins were reported twice on merged-usr hosts.
 • §5: /usr/local/lib was not read for udev rules, modprobe.d, modules-load.d or environment.d, nor /run/modprobe.d, ~/.config/environment.d, /usr/lib/pam.d or the session autostart directories under /etc/xdg.
 • §5: environment generators, tmpfiles.d and systemd presets were not read.
+• §9: a diff refused outright when any collector's coverage differed, so a collector partial on one scan for an unrelated reason hid every other collector's findings; the PANIX loop missed dbus on LMDE and on Fedora 44 this way. Coverage is now compared per collector, and only the differences a coverage change could explain are marked uncertain.
 • §7: a setuid bit added to a packaged binary, chmod u+s /usr/bin/find, verified as intact and was hidden with --deep. rpm's recorded mode is now compared; on dpkg, which records none, the file's change time is.
 • §5: the SSH key files were fixed at ~/.ssh/authorized_keys and authorized_keys2, and AuthorizedKeysFile was never read, so keys in any other file it named went unseen; AuthorizedPrincipalsCommand and TrustedUserCAKeys were not read either.
 • §5: polkit was deferred with no reason given, and not read.
@@ -599,7 +604,6 @@ Open. Each is a known departure from this spec or a gap in it, with what is true
 • snapd's state.json, option 1 of §7, is not read; the snap verdict rests on the installed images and the unit's shape.
 • BerkeleyDB and ndb rpm databases are not read, so RHEL 7 and 8 report provenance Unknown (§7).
 • HiddenPath is not applied to the command's target, so ExecStart=/tmp/x is flagged Unpackaged and TargetMissing or not on its merits, but not HiddenPath (§8).
-• A live scan and an offline scan of the same host cannot be diffed against each other, because the kernel collector is partial offline and enablement is inferred (§9, §11). The Collector trait's requires_live declaration is unused.
+• A live scan and an offline scan of the same host cannot be diffed against each other, because enablement is inferred offline (§9, §11). The kernel collector's partial coverage offline no longer blocks it; it only makes the loaded-module differences uncertain. The Collector trait's requires_live declaration is unused.
 • Extended attributes on an offline root are read by path, relying on the deep walk never following a link to reach one (§11).
 • The security.capability parser has no fuzz target, since an unprivileged fuzzer cannot set the attribute (§13).
-• The PANIX loop compares each scan with its baseline, and the diff refuses when any collector's coverage differs between the two. A collector that is partial on one scan for an unrelated reason therefore hides a detection by another (§13); an LMDE run missed dbus this way.

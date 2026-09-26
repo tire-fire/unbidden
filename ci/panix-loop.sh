@@ -60,6 +60,21 @@ fi
 
 scan() { "$BIN" --deep --json --all "$@"; }
 
+# A diff against the baseline, one record per line after the header. A
+# collector that saw less, or more, than the baseline says so in the header,
+# and its differences come back as "uncertain" with the delta they would
+# have had. Both are printed: an unreadable path that appears only after a
+# plant is worth knowing about, and a detection must not hinge on one.
+compare() {
+    scan --against "$BASE" > /tmp/compare.ndjson
+    head -1 /tmp/compare.ndjson | python3 -c '
+import json, sys
+for why in json.load(sys.stdin).get("coverage_changes", {}).values():
+    print("     coverage moved: " + why)
+'
+    tail -n +2 /tmp/compare.ndjson | sed 's/"delta":"uncertain",\(.*\)"would_be":"\([a-z]*\)"/"delta":"\2",\1"would_be":"\2","uncertain":true/'
+}
+
 # What each module needs to plant. These genuinely differ — some take a
 # callback address, some a target binary, some a sub-mechanism — and guessing
 # a single shape silently turns "unbidden was never tested against this" into
@@ -155,7 +170,7 @@ for m in "${modules[@]}"; do
         continue
     fi
 
-    found=$(scan --against "$BASE" | tail -n +2 | grep -E '"delta":"(added|changed)"')
+    found=$(compare | grep -E '"delta":"(added|changed)"')
     kinds=$(echo "$found" | sed -n 's/.*"kind":"\([a-z_]*\)".*/\1/p' | sort -u | tr '\n' ' ')
 
     # One entry has to satisfy the row whole: the right kind, from the right
@@ -177,7 +192,7 @@ for m in "${modules[@]}"; do
             closest="$kind at $src, which does not carry the planted payload"
             continue
         fi
-        echo "   found as $kind at $src"
+        echo "   found as $kind at $src$(case "$line" in *'"uncertain":true'*) echo ", uncertain: its collector's coverage moved" ;; esac)"
         detected=yes
         break
     done <<< "$found"
@@ -197,7 +212,7 @@ for m in "${modules[@]}"; do
         continue
     fi
 
-    scan --against "$BASE" | tail -n +2 | grep -E '"delta":"(added|changed|removed)"' > /tmp/residue.ndjson
+    compare | grep -E '"delta":"(added|changed|removed)"' > /tmp/residue.ndjson
     residue=$(wc -l < /tmp/residue.ndjson)
     phantom=0
     if [ "$residue" -eq 0 ]; then

@@ -160,10 +160,11 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
         Some(path) => {
             let baseline = load(path)?;
             let diffs = diff::diff(&baseline, &scan)?;
+            let coverage = diff::coverage_changes(&baseline, &scan);
             if args.json {
-                render::diff_ndjson(&mut out, &scan, &diffs, &filters)
+                render::diff_ndjson(&mut out, &scan, &diffs, &coverage, &filters)
             } else {
-                render::diff_table(&mut out, &scan, &diffs, &filters, &opts)
+                render::diff_table(&mut out, &scan, &diffs, &coverage, &filters, &opts)
             }
         }
         None => {
