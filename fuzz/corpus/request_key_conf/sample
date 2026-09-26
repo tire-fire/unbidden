@@ -1,0 +1,2 @@
+create user debug:* * /usr/share/keyutils/request-key-debug.sh %k %d %c %S
+negate * * * /bin/keyctl negate %k 30 %S

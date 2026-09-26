@@ -1,0 +1,4 @@
+-kernel/core_pattern = |/opt/crash %p
+kernel.modprobe=/sbin/modprobe
+; comment
+net.ipv4.ip_forward = 1

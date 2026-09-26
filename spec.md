@@ -87,7 +87,7 @@ String
 Stable synthetic identity. See below.
 kind
 enum
-Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module, sudo_plugin, polkit_rule, polkit_action, inetd_service, library_dir
+Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module, sudo_plugin, polkit_rule, polkit_action, inetd_service, library_dir, kernel_callout
 source
 PathBuf
 The file or directory the entry was read from. Always a real path on disk.
@@ -172,6 +172,8 @@ udev
 /etc/udev/rules.d/*, /run/udev/rules.d/*, /usr/local/lib/udev/rules.d/*, /lib/udev/rules.d/* — rules carrying RUN+=
 ld.so preload
 /etc/ld.so.preload, and LD_PRELOAD assignments found in the shell-profile and systemd collectors
+kernel callouts
+Programs the kernel itself runs as root. kernel.core_pattern when it pipes (|), kernel.modprobe and kernel.hotplug, from the sysctl.d directories systemd-sysctl reads (/etc, /run, /usr/local/lib, /usr/lib, a same-named file in an earlier one replacing the later) and /etc/sysctl.conf, and on a live root the values the kernel holds now, since one written into /proc runs until reboot whatever the files say. binfmt_misc handlers from the same four binfmt.d directories and, live, from /proc/sys/fs/binfmt_misc, noting flags C and O, which hand the interpreter a setuid file's credentials. request-key.conf and request-key.d, whose program runs when the kernel needs a key. A live value's entry is about the program it names and takes that program's verdict, as a loaded module takes its .ko's
 library search directories
 Each directory /etc/ld.so.conf adds outside the standard set, read as ldconfig reads the file (includes followed, a file the include does not match never read), as an entry whose source is the file that names it. Every dynamically linked program searches it, so a library placed there under a common soname replaces the real one
 SSH
@@ -486,7 +488,7 @@ Specific things to assert per distro, because they are the ones a generic test m
 RHEL, CentOS, Arch, openSUSE and Alpine are not tested. Community bug reports welcome; no release waits on them.
 Parser fuzzing
 Every parser gets a cargo-fuzz target. §3 establishes that parser input is adversarial; fuzzing is how that stops being an aspiration. Priority order: unit files, crontabs, .desktop files, udev rules, PAM configs.
-As built: 48 targets, one per parser. On main and nightly the five above get a minute each, the rest twenty seconds; a pull request gets ten and five. The targets run one per CPU at a time. A smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
+As built: 51 targets, one per parser. On main and nightly the five above get a minute each, the rest twenty seconds; a pull request gets ten and five. The targets run one per CPU at a time. A smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
 Golden files
 Collector output for a fixed synthetic filesystem tree, checked into the repository. Catches unintended changes to the Entry record, which is the schema contract of §10. Alongside it, a mutation pass takes the same tree apart 120 ways and requires every collector to survive each.
 Conventions
@@ -564,6 +566,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5: environment generators, tmpfiles.d and systemd presets were not read.
 • §5: polkit was deferred with no reason given, and not read.
 • §5: the inetd family was not mentioned anywhere, and xinetd and inetd were not read.
+• §5: core_pattern pipes, the modprobe and hotplug helpers, binfmt_misc handlers and request-key programs were not read.
 • §5 and §8: a library search directory outside the standard set was only a note on ld_preload entries, and a PATH was recorded but never checked, so a world-writable or relative directory in either went unflagged.
 • §5: /etc/sudo.conf was not read.
 • §5: nsswitch.conf was not read. ld.so.conf's include lines were skipped and every file in ld.so.conf.d read instead, so an included file elsewhere was missed and a file the include glob never matches was reported as read.

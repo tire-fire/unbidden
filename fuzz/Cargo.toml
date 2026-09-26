@@ -360,3 +360,24 @@ path = "fuzz_targets/ld_so_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sysctl_conf"
+path = "fuzz_targets/sysctl_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "binfmt_conf"
+path = "fuzz_targets/binfmt_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "request_key_conf"
+path = "fuzz_targets/request_key_conf.rs"
+test = false
+doc = false
+bench = false
