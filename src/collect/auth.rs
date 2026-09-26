@@ -11,7 +11,7 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
-use super::{expand_glob, include_rel};
+use super::{expand_glob, glob_match, include_rel};
 use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, dedup_ids};
 use crate::scan::{Collector, Ctx};
 
@@ -626,15 +626,29 @@ fn fingerprint(blob: &[u8]) -> (String, bool) {
     }
 }
 
+/// sshd's default when no AuthorizedKeysFile is given.
+const DEFAULT_KEY_FILES: &str = ".ssh/authorized_keys .ssh/authorized_keys2";
+
+/// Where sshd looks for a user's keys, gathered while its configuration is
+/// read. sshd takes the first value it obtains for a keyword; a Match block's
+/// value applies only to what the block matches, so each is kept with its
+/// criteria.
+#[derive(Default)]
+struct KeyFiles {
+    global: Option<String>,
+    scoped: Vec<(String, String)>,
+}
+
 fn ssh(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-    sshd_config_file(cx, out, Path::new("etc/ssh/sshd_config"), None, 1, &mut seen);
+    let mut keys = KeyFiles::default();
+    sshd_config_file(cx, out, Path::new("etc/ssh/sshd_config"), None, 1, &mut seen, &mut keys);
     for ent in cx.dir("etc/ssh/sshd_config.d") {
         if ent.is_dir {
             continue;
         }
         let rel = Path::new("etc/ssh/sshd_config.d").join(&ent.name);
-        sshd_config_file(cx, out, &rel, None, 0, &mut seen);
+        sshd_config_file(cx, out, &rel, None, 0, &mut seen, &mut keys);
     }
 
     login_script(cx, out, Path::new("etc/ssh/sshrc"), "sshrc", None);
@@ -645,15 +659,89 @@ fn ssh(cx: &mut Ctx, out: &mut Vec<Entry>) {
         if !homes.insert(u.home.clone()) {
             continue;
         }
+        // The files AuthorizedKeysFile names for this account. The default
+        // files are reported even where it names others, since a key left
+        // in one is evidence, but as not read.
+        let global = keys.global.clone().unwrap_or_else(|| DEFAULT_KEY_FILES.to_string());
+        let mut files: Vec<(PathBuf, Option<String>)> =
+            key_file_paths(&global, u).into_iter().map(|p| (p, None)).collect();
+        for (criteria, value) in &keys.scoped {
+            if match_may_apply(criteria, &u.name) {
+                files.extend(key_file_paths(value, u).into_iter().map(|p| (p, Some(criteria.clone()))));
+            }
+        }
+        for (rel, scope) in &files {
+            authorized_keys(cx, out, rel, &u.name, Enablement::Enabled, scope.as_deref());
+        }
         for f in [".ssh/authorized_keys", ".ssh/authorized_keys2"] {
-            authorized_keys(cx, out, &u.in_home(f), &u.name);
+            let rel = u.in_home(f);
+            if !files.iter().any(|(p, _)| *p == rel) {
+                authorized_keys(cx, out, &rel, &u.name, Enablement::Disabled, None);
+            }
         }
         login_script(cx, out, &u.in_home(".ssh/rc"), "ssh-rc", Some(&u.name));
         user_environment(cx, out, &u.in_home(".ssh/environment"), &u.name);
     }
 }
 
-fn authorized_keys(cx: &mut Ctx, out: &mut Vec<Entry>, rel: &Path, user: &str) {
+/// The root-relative files an AuthorizedKeysFile value names for one
+/// account: whitespace-separated, `%%`, `%h`, `%u` and `%U` expanded, a
+/// relative path taken from the home, `none` naming nothing.
+fn key_file_paths(value: &str, u: &crate::users::User) -> Vec<PathBuf> {
+    let home = format!("/{}", u.home.display());
+    let uid = u.uid.map(|n| n.to_string()).unwrap_or_default();
+    value
+        .split_whitespace()
+        .filter(|t| !t.eq_ignore_ascii_case("none"))
+        .map(|t| {
+            let mut expanded = String::new();
+            let mut chars = t.chars();
+            while let Some(c) = chars.next() {
+                match (c, chars.clone().next()) {
+                    ('%', Some(k @ ('%' | 'h' | 'u' | 'U'))) => {
+                        chars.next();
+                        expanded.push_str(match k {
+                            '%' => "%",
+                            'h' => &home,
+                            'u' => &u.name,
+                            _ => &uid,
+                        });
+                    }
+                    _ => expanded.push(c),
+                }
+            }
+            match expanded.strip_prefix('/') {
+                Some(abs) => PathBuf::from(abs.trim_start_matches('/')),
+                None => u.in_home(&expanded),
+            }
+        })
+        .collect()
+}
+
+/// Whether a Match block could apply to this account. `User` lists are
+/// matched as sshd matches them, `!` negating; any other criterion (Group,
+/// Host, Address) depends on the connection, so it may.
+fn match_may_apply(criteria: &str, user: &str) -> bool {
+    let w: Vec<&str> = criteria.split_whitespace().collect();
+    match w.as_slice() {
+        [kw, list] if kw.eq_ignore_ascii_case("user") => {
+            let pats: Vec<&str> = list.split(',').collect();
+            let hit = |p: &str| glob_match(p.as_bytes(), user.as_bytes());
+            !pats.iter().any(|p| p.strip_prefix('!').is_some_and(hit))
+                && pats.iter().any(|p| !p.starts_with('!') && hit(p))
+        }
+        _ => true,
+    }
+}
+
+fn authorized_keys(
+    cx: &mut Ctx,
+    out: &mut Vec<Entry>,
+    rel: &Path,
+    user: &str,
+    enabled: Enablement,
+    scope: Option<&str>,
+) {
     let Some(bytes) = cx.read(rel) else { return };
     for line in bytes.split(|b| *b == b'\n') {
         let line = trim(line);
@@ -665,9 +753,15 @@ fn authorized_keys(cx: &mut Ctx, out: &mut Vec<Entry>, rel: &Path, user: &str) {
 
         let mut e = cx.entry(Kind::SshAuthorizedKey, rel, fp);
         e.trigger = Trigger::Login;
-        e.enabled = Enablement::Enabled;
+        e.enabled = enabled;
         e.principal = Some(user.to_string());
         e.note("ssh_mechanism", "authorized-key");
+        if enabled == Enablement::Disabled {
+            e.note("not_read", "AuthorizedKeysFile names other files");
+        }
+        if let Some(m) = scope {
+            e.note("match", m);
+        }
         e.note("key_type", lossy(k.keytype));
         if !k.comment.is_empty() {
             e.note("comment", lossy(k.comment));
@@ -770,6 +864,7 @@ fn sshd_config_file(
     outer_match: Option<&str>,
     depth: u32,
     seen: &mut BTreeSet<PathBuf>,
+    keys: &mut KeyFiles,
 ) {
     if !seen.insert(rel.to_path_buf()) {
         return;
@@ -787,6 +882,9 @@ fn sshd_config_file(
             }
             "forcecommand" => "ForceCommand",
             "authorizedkeyscommand" => "AuthorizedKeysCommand",
+            "authorizedprincipalscommand" => "AuthorizedPrincipalsCommand",
+            "authorizedkeysfile" => "AuthorizedKeysFile",
+            "trustedusercakeys" => "TrustedUserCAKeys",
             "permituserenvironment" => "PermitUserEnvironment",
             "include" => "Include",
             "setenv" => "SetEnv",
@@ -814,9 +912,23 @@ fn sshd_config_file(
             }
         }
         match canonical {
-            "ForceCommand" | "AuthorizedKeysCommand" => {
+            "ForceCommand" | "AuthorizedKeysCommand" | "AuthorizedPrincipalsCommand" => {
                 e.target_path = first_path(value);
                 e.command = Some(value.to_vec());
+            }
+            // Where keys are read from. Moving it is the persistence step:
+            // keys in a file nobody audits log in like any other.
+            "AuthorizedKeysFile" => {
+                let v = lossy(value);
+                e.note("value", v.clone());
+                match &current {
+                    Some(m) => keys.scoped.push((m.clone(), v)),
+                    None if keys.global.is_none() => keys.global = Some(v),
+                    None => {
+                        e.enabled = Enablement::Disabled;
+                        e.note("superseded", "sshd takes the first value it obtains");
+                    }
+                }
             }
             "PermitUserEnvironment" => {
                 e.note("value", lossy(value));
@@ -844,7 +956,7 @@ fn sshd_config_file(
             for spec in words(value) {
                 let rel = include_rel(Path::new("etc/ssh"), spec);
                 for target in expand_glob(cx, &rel) {
-                    sshd_config_file(cx, out, &target, here.as_deref(), depth - 1, seen);
+                    sshd_config_file(cx, out, &target, here.as_deref(), depth - 1, seen, keys);
                 }
             }
         }
@@ -1649,6 +1761,52 @@ mod tests {
         let s = scan(&d);
         let default = named(&s, "default policy sudoers.so").pop().unwrap();
         assert_eq!(default.target_path, Some(PathBuf::from("/opt/plugins/sudoers.so")));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn sshd_reads_the_key_files_authorized_keys_file_names() {
+        let d = tree("keyfiles");
+        put(&d, "etc/passwd", "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\nbob:x:1001:1001::/home/bob:/bin/sh\n");
+        std::fs::create_dir_all(d.join("home/bob")).unwrap();
+        put(
+            &d,
+            "etc/ssh/sshd_config",
+            "AuthorizedKeysFile /etc/ssh/keys/%u .ssh/authorized_keys\n\
+             AuthorizedKeysFile /ignored/%u\n\
+             TrustedUserCAKeys /etc/ssh/user_ca.pub\n\
+             AuthorizedPrincipalsCommand /usr/local/bin/principals %u\n\
+             Match User bob\n\
+             \tAuthorizedKeysFile /var/tmp/.k/%U\n",
+        );
+        let key = |c: &str| format!("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl {c}\n");
+        put(&d, "etc/ssh/keys/alice", key("central"));
+        put(&d, "home/alice/.ssh/authorized_keys", key("home"));
+        put(&d, "home/alice/.ssh/authorized_keys2", key("stale"));
+        put(&d, "var/tmp/.k/1001", key("hidden"));
+        put(&d, "var/tmp/.k/1000", key("not-alices"));
+        put(&d, "ignored/alice", key("second-value"));
+        let s = scan(&d);
+        let by_comment = |c: &str| s.entries.iter().filter(|e| e.raw.get("comment").map(String::as_str) == Some(c)).collect::<Vec<_>>();
+
+        let central = by_comment("central");
+        assert_eq!((central.len(), central[0].enabled), (1, Enablement::Enabled), "%u expanded, absolute path read");
+        assert_eq!(central[0].principal.as_deref(), Some("alice"));
+        assert_eq!(by_comment("home")[0].enabled, Enablement::Enabled, "a relative path is taken from the home");
+        let stale = by_comment("stale");
+        assert_eq!(stale[0].enabled, Enablement::Disabled, "a default file the configuration no longer names");
+        assert_eq!(stale[0].raw["not_read"], "AuthorizedKeysFile names other files");
+        let hidden = by_comment("hidden");
+        assert_eq!((hidden.len(), hidden[0].principal.as_deref()), (1, Some("bob")), "%U and the Match block");
+        assert_eq!(hidden[0].raw["match"], "User bob");
+        assert!(by_comment("not-alices").is_empty(), "the Match block is bob's alone");
+        assert!(by_comment("second-value").is_empty(), "sshd takes the first value");
+        assert_eq!(named(&s, "AuthorizedKeysFile").iter().filter(|e| e.enabled == Enablement::Disabled).count(), 1);
+
+        let ca = named(&s, "TrustedUserCAKeys").pop().unwrap();
+        assert_eq!(ca.target_path, Some(PathBuf::from("/etc/ssh/user_ca.pub")));
+        let apc = named(&s, "AuthorizedPrincipalsCommand").pop().unwrap();
+        assert_eq!(apc.command.as_deref(), Some(b"/usr/local/bin/principals %u".as_slice()));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
