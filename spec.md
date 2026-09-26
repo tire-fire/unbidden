@@ -177,7 +177,7 @@ Programs the kernel itself runs as root. kernel.core_pattern when it pipes (|), 
 library search directories
 Each directory /etc/ld.so.conf adds outside the standard set, read as ldconfig reads the file (includes followed, a file the include does not match never read), as an entry whose source is the file that names it. Every dynamically linked program searches it, so a library placed there under a common soname replaces the real one
 SSH
-every user's ~/.ssh/authorized_keys with command= directives, /etc/ssh/sshrc, /etc/ssh/sshd_config ForceCommand
+every user's ~/.ssh/authorized_keys with command= directives, /etc/ssh/sshrc, /etc/ssh/sshd_config ForceCommand. The key files are the ones AuthorizedKeysFile names, as sshd reads it: the first value it obtains, a Match User block's value for that user alone, %%, %h, %u and %U expanded, a relative path taken from the home; the default files are still reported where it names others, marked as not read. AuthorizedKeysFile, AuthorizedPrincipalsCommand and TrustedUserCAKeys are entries themselves: moving the key files, or trusting a CA whose certificates log in as any user whose name is among the certificate's principals, is the persistence step
 Tier two — v1, fixed-path collectors
 The original split was "if time allows", which is not a criterion. The real divide is cost class: a collector that reads a bounded set of known paths finishes in milliseconds, while one that must traverse the entire filesystem takes minutes and saturates the disk. Those are different products, not different priorities.
 Everything below reads fixed paths and ships in v1. Three collectors from the first draft do not, and move to the --deep section that follows.
@@ -564,6 +564,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5: environment.d drop-ins were reported twice on merged-usr hosts.
 • §5: /usr/local/lib was not read for udev rules, modprobe.d, modules-load.d or environment.d, nor /run/modprobe.d, ~/.config/environment.d, /usr/lib/pam.d or the session autostart directories under /etc/xdg.
 • §5: environment generators, tmpfiles.d and systemd presets were not read.
+• §5: the SSH key files were fixed at ~/.ssh/authorized_keys and authorized_keys2, and AuthorizedKeysFile was never read, so keys in any other file it named went unseen; AuthorizedPrincipalsCommand and TrustedUserCAKeys were not read either.
 • §5: polkit was deferred with no reason given, and not read.
 • §5: the inetd family was not mentioned anywhere, and xinetd and inetd were not read.
 • §5: core_pattern pipes, the modprobe and hotplug helpers, binfmt_misc handlers and request-key programs were not read.
