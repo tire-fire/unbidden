@@ -295,7 +295,7 @@ const MAINTAINER_SCRIPTS: &[&str] = &["preinst", "postinst", "prerm", "postrm"];
 /// control files in the same unpack, moments apart; a restore or an image
 /// layer extracted in bulk spreads them by seconds. A script whose inode
 /// changed later than this was changed after its package was installed.
-const INSTALL_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+pub(crate) const INSTALL_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// No digest exists for a maintainer script, so its contents cannot be
 /// checked — but when it changed can be. dpkg writes `<pkg>.list` and the
@@ -319,7 +319,7 @@ fn note_changed_after_install(cx: &Ctx, e: &mut Entry, rel: &Path, stem: &[u8]) 
     }
 }
 
-fn changed_after_install(script: std::time::SystemTime, list: std::time::SystemTime) -> Option<std::time::Duration> {
+pub(crate) fn changed_after_install(script: std::time::SystemTime, list: std::time::SystemTime) -> Option<std::time::Duration> {
     script.duration_since(list).ok().filter(|after| *after > INSTALL_WINDOW)
 }
 

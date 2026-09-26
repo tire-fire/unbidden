@@ -67,7 +67,10 @@ pub fn suppressed(e: &Entry) -> bool {
         let source_only = e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
         return source_only && target_verified && !e.raw.contains_key("after_hash");
     }
-    quiet && target_verified && (e.provenance.is_packaged_intact() || from_package_database(e))
+    // A file whose inode changed after its package installed it was touched
+    // by something other than the package manager, however it verifies.
+    let untouched = !e.raw.contains_key("changed_after_install");
+    quiet && target_verified && untouched && (e.provenance.is_packaged_intact() || from_package_database(e))
 }
 
 /// An entry that is the package manager's own machinery: an rpm scriptlet or

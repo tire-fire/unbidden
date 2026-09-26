@@ -125,6 +125,8 @@ str_enum!(Flag {
 str_enum!(Integrity {
     Intact => "intact",
     Modified => "modified",
+    // The contents match; the setuid or setgid bits do not (rpm -V's "M").
+    ModeModified => "mode-modified",
     ConffileModified => "conffile-modified",
     Unknown => "unknown",
 });
