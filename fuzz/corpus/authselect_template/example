@@ -1,0 +1,6 @@
+auth  required  pam_a.so
+auth  sufficient  pam_b.so   {include if "with-b"}
+auth  required  pam_c.so {if not "without-x":x|y} {exclude if "with-c" or ("with-d" and not "with-e")}
+{imply "with-f" if "with-b"}
+{continue if "with-g"}
+auth  required  pam_d.so

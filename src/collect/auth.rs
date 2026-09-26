@@ -145,18 +145,25 @@ fn flag_non_utf8(e: &mut Entry, bytes: &[u8]) {
 
 // ------------------------------------------------------------------- part A
 
-/// Where a bare `pam_unix.so` resolves. Compared root-relative, never opened:
-/// the module directory of an offline image is not the analyst's own.
+/// Where a bare `pam_unix.so` resolves. libpam looks in one directory, the
+/// one it was built with; the multiarch and lib64 ones come first so that a
+/// copy planted in an unused /lib/security is not taken for the real module.
 const PAM_STD_DIRS: &[&str] = &[
-    "lib/security",
-    "lib64/security",
-    "usr/lib/security",
-    "usr/lib64/security",
     "lib/x86_64-linux-gnu/security",
     "usr/lib/x86_64-linux-gnu/security",
     "lib/aarch64-linux-gnu/security",
     "usr/lib/aarch64-linux-gnu/security",
+    "lib64/security",
+    "usr/lib64/security",
+    "lib/security",
+    "usr/lib/security",
 ];
+
+/// libpam's module directory on this root: the first standard one holding
+/// pam_permit.so, which every PAM installation ships.
+fn pam_module_dir(cx: &Ctx) -> Option<&'static str> {
+    PAM_STD_DIRS.iter().copied().find(|d| cx.root.exists(Path::new(d).join("pam_permit.so")))
+}
 
 fn pam_type(t: &[u8]) -> Option<&'static str> {
     // A leading '-' means "skip silently if the module is missing".
@@ -372,6 +379,7 @@ fn nss(cx: &mut Ctx, out: &mut Vec<Entry>) {
 const PAM_DIRS: [&str; 2] = ["etc/pam.d", "usr/lib/pam.d"];
 
 fn pam(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let module_dir = pam_module_dir(cx);
     let mut files = vec![(PathBuf::from("etc/pam.conf"), None)];
     // Each service's files, the one libpam uses first.
     let mut copies: BTreeMap<OsString, Vec<PathBuf>> = BTreeMap::new();
@@ -425,9 +433,6 @@ fn pam(cx: &mut Ctx, out: &mut Vec<Entry>) {
                 None
             };
             let nonstandard = !module_is_standard(module);
-            if prog.is_none() && !nonstandard {
-                continue;
-            }
 
             let name = match prog {
                 Some(i) => format!("{service}:{mtype}:{}:{}", lossy(module), lossy(args[i])),
@@ -452,6 +457,21 @@ fn pam(cx: &mut Ctx, out: &mut Vec<Entry>) {
             if nonstandard {
                 e.flag(Flag::NonStandardLocation);
                 e.target_path = Some(bpath(module));
+            } else {
+                // Every module a stack loads is checked against its package:
+                // a replaced pam_unix.so sits in the standard directory and
+                // is otherwise indistinguishable from the real one.
+                let rel = match (module.contains(&b'/'), module_dir) {
+                    (true, _) => Some(bpath(module).strip_prefix("/").map(Path::to_path_buf).unwrap_or_else(|_| bpath(module))),
+                    (false, Some(dir)) => Some(Path::new(dir).join(bpath(module))),
+                    (false, None) => None,
+                };
+                match rel {
+                    Some(rel) if cx.root.exists(&rel) => e.target_path = Some(cx.root.abs(&rel)),
+                    // libpam fails the line, or skips it under a leading `-`;
+                    // a module that is not there runs nothing.
+                    _ => e.note("module_missing", "true"),
+                }
             }
             if let Some(i) = prog {
                 // pam_exec execs argv directly, so rejoining the argument
@@ -1299,10 +1319,20 @@ mod tests {
              -session   optional     pam_systemd.so\n\
              account    sufficient   /usr/lib/x86_64-linux-gnu/security/pam_permit.so\n",
         );
+        put(&d, "usr/lib/x86_64-linux-gnu/security/pam_permit.so", "");
+        put(&d, "usr/lib/x86_64-linux-gnu/security/pam_unix.so", "");
+        // A copy in a directory this libpam does not use is not what runs.
+        put(&d, "lib/security/pam_unix.so", "planted");
         let s = scan(&d);
 
-        // pam_unix.so and the standard-path pam_permit.so are not findings.
-        assert_eq!(s.entries.len(), 2, "got {:?}", s.entries.iter().map(|e| &e.name).collect::<Vec<_>>());
+        // Every line is an entry, so every module's package is checked.
+        assert_eq!(s.entries.len(), 5, "got {:?}", s.entries.iter().map(|e| &e.name).collect::<Vec<_>>());
+        let unix = named(&s, "sshd:auth:pam_unix.so").pop().unwrap();
+        assert_eq!(unix.target_path, Some(d.join("usr/lib/x86_64-linux-gnu/security/pam_unix.so")));
+        assert!(unix.flags.is_empty(), "an ordinary line is a finding only through its module's provenance");
+        let missing = named(&s, "pam_systemd.so").pop().unwrap();
+        assert_eq!((missing.target_path.clone(), missing.raw["module_missing"].as_str()), (None, "true"));
+        assert!(missing.flags.is_empty(), "an absent module runs nothing");
 
         let exec = named(&s, "pam_exec.so").pop().unwrap();
         assert_eq!(exec.kind, Kind::Pam);
@@ -1339,9 +1369,11 @@ mod tests {
              login auth required pam_unix.so\n",
         );
         let s = scan(&d);
-        assert_eq!(s.entries.len(), 1);
-        assert_eq!(s.entries[0].raw["service"], "other");
-        assert_eq!(s.entries[0].raw["module"], "/opt/x/pam_backdoor.so");
+        assert_eq!(s.entries.len(), 2);
+        let backdoor = named(&s, "pam_backdoor.so").pop().unwrap();
+        assert_eq!(backdoor.raw["service"], "other");
+        assert_eq!(backdoor.raw["module"], "/opt/x/pam_backdoor.so");
+        assert_eq!(named(&s, "login:auth:pam_unix.so").pop().unwrap().raw["service"], "login");
         std::fs::remove_dir_all(&d).unwrap();
     }
 
