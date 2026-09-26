@@ -1,0 +1,4 @@
+[Allow]
+Identity=unix-user:bob;unix-group:staff
+Action=org.freedesktop.*
+ResultActive=yes
