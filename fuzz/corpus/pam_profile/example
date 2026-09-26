@@ -1,0 +1,13 @@
+Name: Example authentication
+Default: yes
+Priority: 128
+Conflicts: other, another
+Auth-Type: Primary
+Auth:
+	[success=end default=ignore]	pam_example.so try_first_pass
+Auth-Initial:
+	[success=end default=ignore]	pam_example.so
+Session-Interactive-Only: yes
+Session-Type: Additional
+Session:
+	optional	pam_example.so

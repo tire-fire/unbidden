@@ -544,6 +544,35 @@
       "trigger": "login"
     },
     {
+      "command": null,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "ed7a2bacede9b3d1a06a0ba95ab6eb57052cf83938fc6c5c007c5cc2f960e365",
+      "kind": "pam",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "sshd:auth:pam_unix.so",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "control": "required",
+        "module": "pam_unix.so",
+        "module_missing": "true",
+        "module_type": "auth",
+        "service": "sshd"
+      },
+      "source": "<ROOT>/etc/pam.d/sshd",
+      "source_utf8": true,
+      "target_path": null,
+      "target_sha256": "ae918b0bfe03f098070f42deaf75e9a9964e1be634bd2e2f99b8becf42196fd1",
+      "trigger": "auth"
+    },
+    {
       "command": "/usr/local/sbin/notify",
       "command_utf8": true,
       "enabled": "enabled",
@@ -565,6 +594,7 @@
         "control": "optional",
         "module": "pam_exec.so",
         "module_args": "seteuid /usr/local/sbin/notify",
+        "module_missing": "true",
         "module_type": "session",
         "pam_exec.seteuid": "true",
         "service": "sshd",
@@ -1214,7 +1244,7 @@
   "header": {
     "collectors": [
       {
-        "entries": 5,
+        "entries": 6,
         "name": "auth",
         "status": "complete"
       },
