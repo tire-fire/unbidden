@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "unbidden"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "blake3",
  "clap",
