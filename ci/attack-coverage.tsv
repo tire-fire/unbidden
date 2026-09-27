@@ -35,9 +35,9 @@ T1505.001	SQL Stored Procedures	persistence	Linux	out-of-scope	inside a database
 T1505.002	Transport Agent	persistence	Linux	out-of-scope	Exchange; no Linux mechanism
 T1505.003	Web Shell	persistence	Linux	out-of-scope	web shells are deferred by the spec
 T1525	Implant Internal Image	persistence	Containers	out-of-scope	containers
-T1542	Pre-OS Boot	persistence,stealth	Linux	out-of-scope	pre-OS is deferred by the spec
+T1542	Pre-OS Boot	persistence,stealth	Linux	kinds: initramfs_hook, kernel_module	what builds the initramfs and goes into it (initramfs-tools hooks and scripts, dracut modules and conf, DKMS) is read; the built image, GRUB and firmware are not parsed (spec §5)
 T1542.002	Component Firmware	persistence,stealth	Linux	out-of-scope	firmware
-T1542.003	Bootkit	persistence,stealth	Linux	out-of-scope	pre-OS
+T1542.003	Bootkit	persistence,stealth	Linux	kinds: initramfs_hook	a hook or module planted for the initramfs is read at its source; a modified bootloader or image is not parsed (spec §5)
 T1543	Create or Modify System Process	persistence,privilege-escalation	Containers,Linux	kinds: systemd_unit, sysv_init, inetd_service, dbus_service	
 T1543.002	Systemd Service	persistence,privilege-escalation	Linux	kinds: systemd_unit	
 T1543.005	Container Service	persistence,privilege-escalation	Containers	out-of-scope	containers
