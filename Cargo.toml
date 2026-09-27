@@ -29,6 +29,9 @@ tree-sitter-bash = "0.25.1"
 # YAML, for cloud-init: a safe-Rust port of libyaml, the parser PyYAML
 # wraps, so it reads what cloud-init reads. No dependencies of its own.
 libyaml-safer = "0.3.0"
+# Perl-style patterns some configurations filter with (munin-node's
+# ignore_file); already built for tree-sitter.
+regex = "1.13"
 
 [profile.release]
 lto = true

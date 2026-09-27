@@ -535,3 +535,45 @@ path = "fuzz_targets/dpkg_diversions.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "munin_plugin_conf"
+path = "fuzz_targets/munin_plugin_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "incron_table"
+path = "fuzz_targets/incron_table.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "collectd_conf"
+path = "fuzz_targets/collectd_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "monitrc"
+path = "fuzz_targets/monitrc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "audit_plugin"
+path = "fuzz_targets/audit_plugin.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "facter_conf"
+path = "fuzz_targets/facter_conf.rs"
+test = false
+doc = false
+bench = false

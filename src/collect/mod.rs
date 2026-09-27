@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::scan::{Collector, Ctx};
 
+pub mod agents;
 pub mod auth;
 pub mod cloudinit;
 pub mod cron;
@@ -231,6 +232,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(kernel::Kernel),
         Box::new(logrotate::Logrotate),
         Box::new(events::Events),
+        Box::new(agents::Agents),
         Box::new(pkg::PkgHooks),
         Box::new(sources::Sources),
         Box::new(cloudinit::CloudInit),

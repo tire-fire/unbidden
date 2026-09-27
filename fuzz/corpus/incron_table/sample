@@ -1,0 +1,2 @@
+/var/www IN_CLOSE_WRITE,IN_CREATE /usr/local/bin/sync $@/$#
+/etc/a\ b IN_MODIFY,recursive=false echo $% $&

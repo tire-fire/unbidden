@@ -98,6 +98,10 @@ str_enum!(Kind {
     PkgSource => "pkg_source",
     Alternative => "alternative",
     DpkgDiversion => "dpkg_diversion",
+    AuditPlugin => "audit_plugin",
+    MonitorPlugin => "monitor_plugin",
+    Incron => "incron",
+    ExternalFact => "external_fact",
 });
 
 str_enum!(Trigger {
@@ -109,6 +113,7 @@ str_enum!(Trigger {
     NetworkEvent => "network-event",
     PackageOp => "package-op",
     PowerEvent => "power-event",
+    FileEvent => "file-event",
     Always => "always",
 });
 

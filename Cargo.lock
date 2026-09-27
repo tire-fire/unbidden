@@ -1093,6 +1093,7 @@ dependencies = [
  "gvdb",
  "libyaml-safer",
  "md-5",
+ "regex",
  "rusqlite",
  "rustix",
  "serde",

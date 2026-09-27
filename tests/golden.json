@@ -1404,6 +1404,11 @@
   "header": {
     "collectors": [
       {
+        "entries": 0,
+        "name": "agents",
+        "status": "complete"
+      },
+      {
         "entries": 6,
         "name": "auth",
         "status": "complete"

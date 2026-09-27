@@ -1,0 +1,5 @@
+global : {
+  external-dir : [ "/opt/facts", "/etc/more" ]
+  no-external-facts : false
+}
+cli : { debug : false }
