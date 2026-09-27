@@ -91,6 +91,7 @@ str_enum!(Kind {
     PythonStartup => "python_startup",
     TcpWrapper => "tcp_wrapper",
     Crypttab => "crypttab",
+    DisplayManager => "display_manager",
 });
 
 str_enum!(Trigger {

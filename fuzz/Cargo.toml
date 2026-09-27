@@ -444,3 +444,10 @@ path = "fuzz_targets/crypttab.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "lightdm_conf"
+path = "fuzz_targets/lightdm_conf.rs"
+test = false
+doc = false
+bench = false

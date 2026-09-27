@@ -1,0 +1,14 @@
+[LightDM]
+minimum-display-number=0
+
+[Seat:*]
+# comment
+greeter-session=slick-greeter
+session-setup-script = /usr/local/sbin/session-setup
+display-setup-script=/usr/bin/xrandr --auto
+
+[SeatDefaults]
+session-wrapper=/etc/X11/Xsession
+
+[Seat:seat1]
+greeter-setup-script=/opt/seat1/setup

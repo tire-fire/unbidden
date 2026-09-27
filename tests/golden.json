@@ -1431,6 +1431,11 @@
       },
       {
         "entries": 0,
+        "name": "display_manager",
+        "status": "complete"
+      },
+      {
+        "entries": 0,
         "name": "git_config",
         "status": "complete"
       },

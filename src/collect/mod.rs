@@ -16,6 +16,7 @@ pub mod cloudinit;
 pub mod cron;
 pub mod deep;
 pub mod desktop;
+pub mod dm;
 pub mod inetd;
 pub mod initscripts;
 pub mod kernel;
@@ -218,6 +219,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(systemd::Systemd),
         Box::new(cron::Cron),
         Box::new(desktop::Desktop),
+        Box::new(dm::DisplayManager),
         Box::new(shell::Shell),
         Box::new(initscripts::InitScripts),
         Box::new(auth::Auth),
