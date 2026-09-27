@@ -1,0 +1,229 @@
+=== etc/pam.d/common-account 597
+# test template for common-account, variant 2
+# here are the per-package modules (the "Primary" block)
+account	optional	pam_e.so use_authtok nullok
+account	optional	pam_a.so 
+account	[success=4 new_authtok_reqd=done default=ignore]	pam_d.so 
+account	[success=3 new_authtok_reqd=done default=ignore]	pam_b.so 
+account	optional	pam_a.so try_first_pass
+account	sufficient	pam_b.so 
+# here's the fallback if no module succeeds
+# and here are more per-package modules (the "Additional" block)
+account	required	pam_d.so use_authtok nullok
+account	required	pam_d.so quiet
+# end of pam-auth-update config
+
+=== etc/pam.d/common-auth 370
+# test template for common-auth, variant 2
+# here are the per-package modules (the "Primary" block)
+auth	[default=1]			pam_permit.so
+# here's the fallback if no module succeeds
+# and here are more per-package modules (the "Additional" block)
+auth	requisite	pam_a.so use_authtok nullok
+auth	optional	pam_c.so quiet
+auth	required	pam_c.so 
+# end of pam-auth-update config
+
+=== etc/pam.d/common-password 744
+# test template for common-password, variant 2
+# here are the per-package modules (the "Primary" block)
+password	[success=ok new_authtok_reqd=ok ignore=ignore user_unknown=bad default=die]	pam_e.so try_first_pass
+password	[success=ok new_authtok_reqd=ok ignore=ignore user_unknown=bad default=die]	pam_a.so use_authtok nullok
+password	requisite	pam_b.so 
+# here's the fallback if no module succeeds
+# and here are more per-package modules (the "Additional" block)
+password	[success=ok new_authtok_reqd=ok ignore=ignore user_unknown=bad default=die]	pam_a.so 
+password	[default=die]	pam_d.so try_first_pass
+password	[success=1 default=ignore]	pam_b.so try_first_pass
+password	[success=1 default=ignore]	pam_d.so 
+# end of pam-auth-update config
+
+=== etc/pam.d/common-session 509
+# test template for common-session, variant 2
+# here are the per-package modules (the "Primary" block)
+session	sufficient	pam_e.so try_first_pass
+session	[success=1 default=ignore]	pam_d.so try_first_pass
+session	[success=1 default=ignore]	pam_d.so use_authtok nullok
+# here's the fallback if no module succeeds
+# and here are more per-package modules (the "Additional" block)
+session	[success=1 new_authtok_reqd=done default=ignore]	pam_c.so 
+session	requisite	pam_a.so quiet
+# end of pam-auth-update config
+
+=== etc/pam.d/common-session-noninteractive 481
+# test template for common-session-noninteractive, variant 2
+# here are the per-package modules (the "Primary" block)
+session	[success=1 default=ignore]	pam_d.so try_first_pass
+session	[success=1 default=ignore]	pam_d.so use_authtok nullok
+# here's the fallback if no module succeeds
+# and here are more per-package modules (the "Additional" block)
+session	[success=1 new_authtok_reqd=done default=ignore]	pam_c.so 
+session	requisite	pam_a.so quiet
+# end of pam-auth-update config
+
+=== usr/share/pam-configs/prof0 288
+Name: prof0 profile
+Default: no
+Priority: 512
+Account-Type: Additional
+Account:
+	required	pam_d.so use_authtok nullok
+Password-Type: Additional
+Password:
+	[success=1 default=ignore]	pam_d.so
+Session-Type: Primary
+Session:
+	sufficient	pam_e.so try_first_pass
+Session-Interactive-Only: yes
+
+=== usr/share/pam-configs/prof1 442
+Name: prof1 profile
+Default: yes
+Priority: 1024
+Account-Type: Primary
+Account:
+	optional	pam_e.so use_authtok nullok
+	optional	pam_a.so
+	[success=end new_authtok_reqd=done default=ignore]	pam_d.so
+Password-Type: Additional
+Password:
+	[success=ok new_authtok_reqd=ok ignore=ignore user_unknown=bad default=die]	pam_a.so
+	[default=die]	pam_d.so try_first_pass
+	[success=end default=ignore]	pam_b.so try_first_pass
+Session-Interactive-Only: yes
+
+=== usr/share/pam-configs/prof2 742
+Name: prof2 profile
+Default: yes
+Priority: 257
+Auth-Type: Additional
+Auth:
+	requisite	pam_a.so use_authtok nullok
+	optional	pam_c.so quiet
+	required	pam_c.so
+Account-Type: Primary
+Account:
+	[success=end new_authtok_reqd=done default=ignore]	pam_b.so
+	optional	pam_a.so try_first_pass
+	sufficient	pam_b.so
+Password-Type: Primary
+Password:
+	requisite	pam_b.so use_authtok nullok
+Password-Initial:
+	[success=ok new_authtok_reqd=ok ignore=ignore user_unknown=bad default=die]	pam_e.so try_first_pass
+	[success=ok new_authtok_reqd=ok ignore=ignore user_unknown=bad default=die]	pam_a.so use_authtok nullok
+	requisite	pam_b.so
+Session-Type: Additional
+Session:
+	[success=end new_authtok_reqd=done default=ignore]	pam_c.so
+	requisite	pam_a.so quiet
+
+=== usr/share/pam-configs/prof3 245
+Name: prof3 profile
+Default: yes
+Priority: 128
+Account-Type: Additional
+Account:
+	required	pam_d.so quiet
+Session-Type: Primary
+Session:
+	[success=1 default=ignore]	pam_d.so try_first_pass
+	[success=1 default=ignore]	pam_d.so use_authtok nullok
+
+=== usr/share/pam/common-account 281
+# test template for common-account, variant 2
+# here are the per-package modules (the "Primary" block)
+$account_primary
+# here's the fallback if no module succeeds
+# and here are more per-package modules (the "Additional" block)
+$account_additional
+# end of pam-auth-update config
+
+=== usr/share/pam/common-auth 272
+# test template for common-auth, variant 2
+# here are the per-package modules (the "Primary" block)
+$auth_primary
+# here's the fallback if no module succeeds
+# and here are more per-package modules (the "Additional" block)
+$auth_additional
+# end of pam-auth-update config
+
+=== usr/share/pam/common-password 284
+# test template for common-password, variant 2
+# here are the per-package modules (the "Primary" block)
+$password_primary
+# here's the fallback if no module succeeds
+# and here are more per-package modules (the "Additional" block)
+$password_additional
+# end of pam-auth-update config
+
+=== usr/share/pam/common-session 281
+# test template for common-session, variant 2
+# here are the per-package modules (the "Primary" block)
+$session_primary
+# here's the fallback if no module succeeds
+# and here are more per-package modules (the "Additional" block)
+$session_additional
+# end of pam-auth-update config
+
+=== usr/share/pam/common-session-noninteractive 326
+# test template for common-session-noninteractive, variant 2
+# here are the per-package modules (the "Primary" block)
+$session_noninteractive_primary
+# here's the fallback if no module succeeds
+# and here are more per-package modules (the "Additional" block)
+$session_noninteractive_additional
+# end of pam-auth-update config
+
+=== var/lib/pam/account 345
+Module: prof1
+optional	pam_e.so use_authtok nullok
+optional	pam_a.so
+[success=end new_authtok_reqd=done default=ignore]	pam_d.so
+Module: prof2
+[success=end new_authtok_reqd=done default=ignore]	pam_b.so
+optional	pam_a.so try_first_pass
+sufficient	pam_b.so
+Module: prof0
+required	pam_d.so use_authtok nullok
+Module: prof3
+required	pam_d.so quiet
+
+=== var/lib/pam/auth 135
+Module: null
+[default=1]			pam_permit.so
+Module: prof2
+requisite	pam_a.so use_authtok nullok
+optional	pam_c.so quiet
+required	pam_c.so
+
+=== var/lib/pam/password 477
+Module: prof2
+[success=ok new_authtok_reqd=ok ignore=ignore user_unknown=bad default=die]	pam_e.so try_first_pass
+[success=ok new_authtok_reqd=ok ignore=ignore user_unknown=bad default=die]	pam_a.so use_authtok nullok
+requisite	pam_b.so
+Module: prof1
+[success=ok new_authtok_reqd=ok ignore=ignore user_unknown=bad default=die]	pam_a.so
+[default=die]	pam_d.so try_first_pass
+[success=end default=ignore]	pam_b.so try_first_pass
+Module: prof0
+[success=1 default=ignore]	pam_d.so
+
+=== var/lib/pam/session 268
+Module: prof0
+sufficient	pam_e.so try_first_pass
+Module: prof3
+[success=1 default=ignore]	pam_d.so try_first_pass
+[success=1 default=ignore]	pam_d.so use_authtok nullok
+Module: prof2
+[success=end new_authtok_reqd=done default=ignore]	pam_c.so
+requisite	pam_a.so quiet
+
+=== var/lib/pam/session-noninteractive 219
+Module: prof3
+[success=1 default=ignore]	pam_d.so try_first_pass
+[success=1 default=ignore]	pam_d.so use_authtok nullok
+Module: prof2
+[success=end new_authtok_reqd=done default=ignore]	pam_c.so
+requisite	pam_a.so quiet
+

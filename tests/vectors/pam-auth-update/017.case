@@ -1,0 +1,162 @@
+=== etc/pam.d/common-account 535
+# test template for common-account, variant 1
+account	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+account	[default=1]			pam_permit.so
+# here's the fallback if no module succeeds
+account	requisite			pam_deny.so
+account	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+account	sufficient	pam_c.so try_first_pass
+account	optional	pam_d.so try_first_pass
+account	requisite	pam_a.so quiet
+# end of pam-auth-update config
+account	optional	pam_local_after.so
+
+=== etc/pam.d/common-auth 400
+# test template for common-auth, variant 1
+auth	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+auth	[default=1]			pam_permit.so
+# here's the fallback if no module succeeds
+auth	requisite			pam_deny.so
+auth	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+# end of pam-auth-update config
+auth	optional	pam_local_after.so
+
+=== etc/pam.d/common-password 424
+# test template for common-password, variant 1
+password	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+password	[default=1]			pam_permit.so
+# here's the fallback if no module succeeds
+password	requisite			pam_deny.so
+password	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+# end of pam-auth-update config
+password	optional	pam_local_after.so
+
+=== etc/pam.d/common-session 418
+# test template for common-session, variant 1
+session	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+session	[default=1]			pam_permit.so
+# here's the fallback if no module succeeds
+session	requisite			pam_deny.so
+session	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+# end of pam-auth-update config
+session	optional	pam_local_after.so
+
+=== etc/pam.d/common-session-noninteractive 433
+# test template for common-session-noninteractive, variant 1
+session	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+session	[default=1]			pam_permit.so
+# here's the fallback if no module succeeds
+session	requisite			pam_deny.so
+session	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+# end of pam-auth-update config
+session	optional	pam_local_after.so
+
+=== usr/share/pam-configs/prof0 176
+Name: prof0 profile
+Default: no
+Priority: 128
+Account-Type: Additional
+Account:
+	sufficient	pam_c.so try_first_pass
+	optional	pam_d.so try_first_pass
+	requisite	pam_a.so quiet
+
+=== usr/share/pam/common-account 419
+# test template for common-account, variant 1
+account	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+$account_primary
+# here's the fallback if no module succeeds
+account	requisite			pam_deny.so
+account	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+$account_additional
+# end of pam-auth-update config
+account	optional	pam_local_after.so
+
+=== usr/share/pam/common-auth 398
+# test template for common-auth, variant 1
+auth	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+$auth_primary
+# here's the fallback if no module succeeds
+auth	requisite			pam_deny.so
+auth	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+$auth_additional
+# end of pam-auth-update config
+auth	optional	pam_local_after.so
+
+=== usr/share/pam/common-password 426
+# test template for common-password, variant 1
+password	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+$password_primary
+# here's the fallback if no module succeeds
+password	requisite			pam_deny.so
+password	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+$password_additional
+# end of pam-auth-update config
+password	optional	pam_local_after.so
+
+=== usr/share/pam/common-session 419
+# test template for common-session, variant 1
+session	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+$session_primary
+# here's the fallback if no module succeeds
+session	requisite			pam_deny.so
+session	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+$session_additional
+# end of pam-auth-update config
+session	optional	pam_local_after.so
+
+=== usr/share/pam/common-session-noninteractive 464
+# test template for common-session-noninteractive, variant 1
+session	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+$session_noninteractive_primary
+# here's the fallback if no module succeeds
+session	requisite			pam_deny.so
+session	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+$session_noninteractive_additional
+# end of pam-auth-update config
+session	optional	pam_local_after.so
+
+=== var/lib/pam/account 148
+Module: null
+[default=1]			pam_permit.so
+Module: prof0
+sufficient	pam_c.so try_first_pass
+optional	pam_d.so try_first_pass
+requisite	pam_a.so quiet
+
+=== var/lib/pam/auth 41
+Module: null
+[default=1]			pam_permit.so
+
+=== var/lib/pam/password 41
+Module: null
+[default=1]			pam_permit.so
+
+=== var/lib/pam/session 41
+Module: null
+[default=1]			pam_permit.so
+
+=== var/lib/pam/session-noninteractive 41
+Module: null
+[default=1]			pam_permit.so
+

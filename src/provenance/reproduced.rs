@@ -10,8 +10,15 @@
 //! generator's inputs, and compared byte for byte. It is Reproduced only when
 //! every input is itself packaged and intact. Any other byte, an added
 //! `auth sufficient pam_permit.so` included, leaves it Unpackaged.
+//!
+//! The two generators are implemented from their documentation and from what
+//! the real tools were seen to do, not from their source: pam-auth-update
+//! (libpam-runtime 1.5.2) and authselect 1.7.1 were run on generated inputs,
+//! and what they wrote is recorded in tests/vectors, which the tests below
+//! require this module to reproduce byte for byte. tests/vectors/README.md
+//! says how to regenerate them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::entry::{Integrity, Provenance};
@@ -116,172 +123,225 @@ fn pam_type(path: &Path) -> Option<&'static str> {
     PAM_TYPES.iter().copied().find(|t| *t == name)
 }
 
-/// The profiles pam-auth-update last used for one stack, in its order, from
-/// the state it saves beside it. `null` is its placeholder for an empty
-/// Primary block, not a profile.
+/// What pam-auth-update saves in place of an empty Primary block, and writes
+/// into the stack there; it names no profile.
+const PAM_EMPTY_PRIMARY: &str = "[default=1]\t\t\tpam_permit.so";
+
+/// The comment lines pam-auth-update finds its blocks by, in order: after the
+/// first comes the Primary block, the second ends it, after the third comes
+/// the Additional block, the fourth ends it. A line counts when it starts
+/// with the text.
+const PAM_MARKERS: [&str; 4] = [
+    "# here are the per-package modules (the \"Primary\" block)",
+    "# here's the fallback if no module succeeds",
+    "# and here are more per-package modules (the \"Additional\" block)",
+    "# end of pam-auth-update config",
+];
+
+/// Perl's `\s` on bytes, which is what pam-auth-update splits on.
+fn pam_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+}
+
+fn pam_trim(mut s: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = s {
+        if !pam_space(*first) {
+            break;
+        }
+        s = rest;
+    }
+    while let [rest @ .., last] = s {
+        if !pam_space(*last) {
+            break;
+        }
+        s = rest;
+    }
+    s
+}
+
+/// The profiles pam-auth-update last used for one stack, in its order, read
+/// from the state it saves in /var/lib/pam/`ty`.
 fn saved_modules(root: &Root, ty: &str) -> Vec<String> {
     let Some(bytes) = read(root, &Path::new(PAM_SAVED).join(ty)) else { return Vec::new() };
-    String::from_utf8_lossy(&bytes)
-        .lines()
-        .filter_map(|l| l.strip_prefix("Module: "))
-        .map(str::trim)
-        .filter(|m| *m != "null" && !m.is_empty() && !m.contains('/') && *m != "." && *m != "..")
-        .map(String::from)
-        .collect()
-}
-
-/// A pam-configs profile, parsed as pam-auth-update's parse_pam_profile does.
-fn profile(root: &Root, name: &str) -> Option<BTreeMap<String, String>> {
-    let bytes = read(root, &Path::new(PAM_PROFILES).join(name))?;
-    let text = String::from_utf8_lossy(&bytes);
-    let mut p: BTreeMap<String, String> = BTreeMap::new();
-    let mut field = String::new();
-    for line in text.split_inclusive('\n') {
-        // ^(\S+):\s+(.*)\s*$ — the whitespace after the colon may be the
-        // newline itself, which leaves the value empty.
-        let head = line.split(|c: char| c.is_whitespace()).next().unwrap_or_default();
-        let after = &line[head.len()..];
-        if let (Some(name), true) = (head.strip_suffix(':'), after.starts_with(char::is_whitespace) && !head.is_empty()) {
-            field = name.strip_suffix("-Final").unwrap_or(name).to_string();
-            let value = after.trim_start_matches(char::is_whitespace);
-            let value = value.strip_suffix('\n').unwrap_or(value);
-            if field != "Conflicts" {
-                p.insert(field.clone(), value.to_string());
-            }
-        } else {
-            let t = line.trim();
-            let v = p.entry(field.clone()).or_default();
-            if !t.is_empty() {
-                v.push('\n');
-                v.push_str(t);
-            }
-            let stripped = v.trim_start_matches(|c: char| c == '\n' || c.is_whitespace()).to_string();
-            *v = stripped;
-            // pam-auth-update drops a profile naming a module it no longer
-            // supports.
-            if v.contains("pam_tally") {
-                return None;
+    // Each profile is `Module: <name>` followed by the lines it gave.
+    let mut entries: Vec<(&[u8], Vec<&[u8]>)> = Vec::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        match line.strip_prefix(b"Module: ") {
+            Some(name) => entries.push((name, Vec::new())),
+            None => {
+                if let Some((_, lines)) = entries.last_mut() {
+                    lines.push(line);
+                }
             }
         }
     }
-    if p.get("Session-Interactive-Only").map(String::as_str) != Some("yes") {
-        for suffix in ["-Type", "", "-Initial"] {
-            if let Some(v) = p.get(&format!("Session{suffix}")).cloned() {
-                p.insert(format!("Session-noninteractive{suffix}"), v);
-            }
-        }
-    }
-    Some(p)
-}
-
-/// /etc/pam.d/common-`ty` as pam-auth-update's create_from_template writes it
-/// from the packaged template, with no local edits merged in.
-fn pam_auth_update(root: &Root, ty: &str, template: &Path, modules: &[String]) -> Option<Vec<u8>> {
-    let template = read(root, template)?;
-    let template = String::from_utf8(template).ok()?;
-    let mut profiles = Vec::new();
-    for m in modules {
-        profiles.push((m.clone(), profile(root, m)?));
-    }
-    let uctype = {
-        let mut c = ty.chars();
-        c.next().map(|f| f.to_ascii_uppercase().to_string() + c.as_str()).unwrap_or_default()
-    };
-    let printed = ty.strip_suffix("-noninteractive").unwrap_or(ty);
-
-    let block = |val: &str, out: &mut String| -> Option<()> {
-        let chosen: Vec<&BTreeMap<String, String>> = profiles
-            .iter()
-            .map(|(_, p)| p)
-            .filter(|p| p.get(&format!("{uctype}-Type")).is_some_and(|t| !t.is_empty() && t == val))
-            .collect();
-        let lines_for = |p: &BTreeMap<String, String>, pos: usize| -> String {
-            let initial = p.get(&format!("{uctype}-Initial")).filter(|v| !v.is_empty() && *v != "0");
-            match (pos, initial) {
-                (0, Some(v)) => v.clone(),
-                _ => p.get(&uctype).cloned().unwrap_or_default(),
-            }
-        };
-        let mut count: i64 =
-            chosen.iter().enumerate().map(|(i, p)| lines_for(p, i).split('\n').filter(|l| !l.is_empty()).count() as i64).sum();
-        if val == "Additional" {
-            count -= 1;
-        }
-        if val == "Primary" && count == 0 {
-            out.push_str(&format!("{printed}\t[default=1]\t\t\tpam_permit.so\n"));
-        }
-        for (i, p) in chosen.iter().enumerate() {
-            let output = lines_for(p, i);
-            let lines: Vec<&str> = output.split('\n').collect();
-            // perl's split drops trailing empty fields.
-            let keep = lines.iter().rposition(|l| !l.is_empty()).map_or(0, |n| n + 1);
-            for line in &lines[..keep] {
-                out.push_str(printed);
-                out.push('\t');
-                out.push_str(&merge_one_line(line, count)?);
-                count -= 1;
-            }
-        }
-        Some(())
-    };
-
-    let mut out = String::new();
-    let mut state = 0;
-    for line in template.split_inclusive('\n') {
-        if state == 1 {
-            if line.starts_with("# here's the fallback if no module succeeds") {
-                out.push_str(line);
-                state = 2;
-            }
+    let mut out = Vec::new();
+    for (i, (name, lines)) in entries.iter().enumerate() {
+        // The empty-Primary stand-in is saved first, as `null`. A profile
+        // really called null gives its own lines instead.
+        let lines: Vec<&[u8]> = lines.iter().copied().filter(|l| !l.is_empty()).collect();
+        if i == 0 && *name == b"null" && lines == [PAM_EMPTY_PRIMARY.as_bytes()] {
             continue;
         }
-        if state == 3 {
-            if line.starts_with("# end of pam-auth-update config") {
-                out.push_str(line);
-                state = 4;
-            }
+        // Profiles are files in one directory: anything else is not a name
+        // the tool saved.
+        let Ok(name) = std::str::from_utf8(name) else { continue };
+        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
             continue;
         }
-        out.push_str(line);
-        if state == 0 && line.starts_with("# here are the per-package modules (the \"Primary\" block)") {
-            block("Primary", &mut out)?;
-            state = 1;
-        } else if state == 2 && line.starts_with("# and here are more per-package modules (the \"Additional\" block)") {
-            block("Additional", &mut out)?;
-            state = 3;
-        }
+        out.push(name.to_string());
     }
-    (state == 4).then(|| out.into_bytes())
+    out
 }
 
-/// pam-auth-update's merge_one_line with no local edits: the control and
-/// module as the profile spells them, every `end` in them replaced by the
-/// jump count, then one space and the options joined by single spaces — so
-/// a line with no options ends in a space.
-fn merge_one_line(line: &str, count: i64) -> Option<String> {
-    // ^((\[[^]]+\]|\w+)\s+\S+)\s*(.*)
-    let control_end = if line.starts_with('[') {
-        line.find(']')? + 1
+/// A profile's fields as pam-auth-update reads them: `Name: value` starts a
+/// field when the name has no whitespace and the colon ends the first word;
+/// every other line belongs to the field above it, trimmed, and blank ones
+/// are dropped. A field given twice keeps the later one. The value on the
+/// name's own line keeps any trailing whitespace, so `Auth-Type: Primary `
+/// is not Primary.
+fn pam_profile(text: &[u8]) -> BTreeMap<&[u8], Vec<&[u8]>> {
+    let mut fields: BTreeMap<&[u8], Vec<&[u8]>> = BTreeMap::new();
+    let mut current: Option<&[u8]> = None;
+    for line in text.split(|b| *b == b'\n') {
+        let word = &line[..line.iter().position(|b| pam_space(*b)).unwrap_or(line.len())];
+        if let Some(name) = word.strip_suffix(b":").filter(|n| !n.is_empty()) {
+            let rest = &line[word.len()..];
+            let value = &rest[rest.iter().position(|b| !pam_space(*b)).unwrap_or(rest.len())..];
+            fields.insert(name, if value.is_empty() { Vec::new() } else { vec![value] });
+            current = Some(name);
+        } else if let Some(name) = current {
+            let line = pam_trim(line);
+            if !line.is_empty() {
+                fields.entry(name).or_default().push(line);
+            }
+        }
+    }
+    fields
+}
+
+/// Where the four markers are, as line indices, in order; `None` when the
+/// template lacks one, and pam-auth-update refuses it.
+fn pam_markers(lines: &[&[u8]]) -> Option<[usize; 4]> {
+    let mut at = [0; 4];
+    let mut from = 0;
+    for (i, marker) in PAM_MARKERS.iter().enumerate() {
+        at[i] = from + lines[from..].iter().position(|l| l.starts_with(marker.as_bytes()))?;
+        from = at[i] + 1;
+    }
+    Some(at)
+}
+
+/// One profile line as pam-auth-update writes it into a stack: the type, a
+/// tab, the control (a bracketed list or one word) with every `end` in it
+/// replaced by `jump`, the whitespace that followed it, the module, a space
+/// and the arguments re-joined with single spaces. A line that is not
+/// control, whitespace, module is written as the type, a tab and a space.
+fn pam_stack_line(out: &mut Vec<u8>, word: &str, line: &[u8], jump: usize) {
+    let control = match line.first() {
+        Some(b'[') => line.iter().position(|b| *b == b']').map_or(0, |i| i + 1),
+        _ => line.iter().position(|b| !(b.is_ascii_alphanumeric() || *b == b'_')).unwrap_or(line.len()),
+    };
+    let sep = line[control..].iter().position(|b| !pam_space(*b)).map_or(line.len(), |i| control + i);
+    let module = line[sep..].iter().position(|b| pam_space(*b)).map_or(line.len(), |i| sep + i);
+    out.extend_from_slice(word.as_bytes());
+    out.push(b'\t');
+    if control > 0 && sep > control && module > sep {
+        let jump = jump.to_string();
+        let mut rest = &line[..control];
+        while let Some(i) = rest.windows(3).position(|w| w == b"end") {
+            out.extend_from_slice(&rest[..i]);
+            out.extend_from_slice(jump.as_bytes());
+            rest = &rest[i + 3..];
+        }
+        out.extend_from_slice(rest);
+        out.extend_from_slice(&line[control..module]);
+        out.push(b' ');
+        let args: Vec<&[u8]> = line[module..].split(|b| pam_space(*b)).filter(|a| !a.is_empty()).collect();
+        out.extend_from_slice(&args.join(&b' '));
     } else {
-        let n = line.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(line.len());
-        if n == 0 {
+        out.push(b' ');
+    }
+    out.push(b'\n');
+}
+
+/// /etc/pam.d/common-`ty` as pam-auth-update writes it from `template` and
+/// the profiles `modules` names, in that order. `None` where it would not
+/// write the file.
+fn pam_auth_update(root: &Root, ty: &str, template: &Path, modules: &[String]) -> Option<Vec<u8>> {
+    if !PAM_TYPES.contains(&ty) {
+        return None;
+    }
+    // The tool writes the stacks in PAM_TYPES order and stops at the first
+    // template without its markers, so an earlier one keeps this one from
+    // being written too.
+    for earlier in PAM_TYPES.iter().take_while(|t| **t != ty) {
+        let text = read(root, &Path::new(PAM_TEMPLATES).join(format!("common-{earlier}")))?;
+        pam_markers(&text.split_inclusive(|b| *b == b'\n').collect::<Vec<_>>())?;
+    }
+    let text = read(root, template)?;
+    let lines: Vec<&[u8]> = text.split_inclusive(|b| *b == b'\n').collect();
+    let [primary_at, fallback_at, additional_at, end_at] = pam_markers(&lines)?;
+
+    // session-noninteractive is built from the Session fields.
+    let word = ty.split('-').next().unwrap_or(ty);
+    let field = format!("{}{}", word[..1].to_ascii_uppercase(), &word[1..]);
+    let (main, initial, kind) = (field.as_bytes(), format!("{field}-Initial"), format!("{field}-Type"));
+
+    // The tool lists a profile whose -Type is neither Primary nor Additional
+    // twice. It gives no lines, so a repeat is skipped, not read again.
+    let mut seen = BTreeSet::new();
+    let mut texts = Vec::new();
+    for name in modules {
+        if seen.insert(name.as_str()) {
+            texts.push(read(root, &Path::new(PAM_PROFILES).join(name))?);
+        }
+    }
+    // Primary, then Additional: the lines, and whether a profile of that
+    // type has come yet. The first of each type gives its -Initial lines,
+    // when it has any.
+    let mut blocks: [(Vec<&[u8]>, bool); 2] = Default::default();
+    for text in &texts {
+        let fields = pam_profile(text);
+        if ty == "session-noninteractive" && fields.contains_key(&b"Session-Interactive-Only"[..]) {
+            continue;
+        }
+        let block = match fields.get(kind.as_bytes()).map(Vec::as_slice) {
+            Some([b"Primary"]) => &mut blocks[0],
+            Some([b"Additional"]) => &mut blocks[1],
+            _ => continue,
+        };
+        let first_initial = fields.get(initial.as_bytes()).filter(|l| !block.1 && !l.is_empty());
+        block.1 = true;
+        block.0.extend(first_initial.or(fields.get(main)).into_iter().flatten());
+    }
+
+    let mut out = Vec::new();
+    lines[..=primary_at].iter().for_each(|l| out.extend_from_slice(l));
+    let primary = &blocks[0].0;
+    if primary.is_empty() {
+        out.extend_from_slice(format!("{word}\t{PAM_EMPTY_PRIMARY}\n").as_bytes());
+    }
+    // `end` becomes the number of block lines after it, and one more in
+    // Primary, whatever the template has after the block.
+    for (i, line) in primary.iter().enumerate() {
+        pam_stack_line(&mut out, word, line, primary.len() - i);
+        // What cannot fit in a file this module reads is never a match.
+        if out.len() > CAP {
             return None;
         }
-        n
-    };
-    let rest = &line[control_end..];
-    let ws = rest.len() - rest.trim_start().len();
-    if ws == 0 {
-        return None;
     }
-    let after_ws = &rest[ws..];
-    let module_len = after_ws.find(char::is_whitespace).unwrap_or(after_ws.len());
-    if module_len == 0 {
-        return None;
+    lines[fallback_at..=additional_at].iter().for_each(|l| out.extend_from_slice(l));
+    let additional = &blocks[1].0;
+    for (i, line) in additional.iter().enumerate() {
+        pam_stack_line(&mut out, word, line, additional.len() - i - 1);
+        // What cannot fit in a file this module reads is never a match.
+        if out.len() > CAP {
+            return None;
+        }
     }
-    let modline = &line[..control_end + ws + module_len];
-    let opts: Vec<&str> = after_ws[module_len..].split_whitespace().collect();
-    Some(format!("{} {}\n", modline.replace("end", &count.to_string()), opts.join(" ")))
+    lines[end_at..].iter().for_each(|l| out.extend_from_slice(l));
+    Some(out)
 }
 
 fn authselect_name(path: &Path) -> Option<&'static str> {
@@ -311,323 +371,341 @@ fn authselect_config(root: &Root) -> Option<(PathBuf, Vec<String>)> {
     Some((dir, lines.map(String::from).collect()))
 }
 
-/// authselect's template_generate (util/template.c, 1.7.1): each operator is
-/// found left to right and applied in place, removed bytes become NUL, then
-/// the NULs are shaken out and every line is trimmed on the right the way
-/// string_trim_right does it.
-fn authselect_render(template: &[u8], features: &[String]) -> Option<Vec<u8>> {
-    let mut buf = template.to_vec();
-    if buf.contains(&0) {
-        return None;
-    }
-    let len = buf.len();
-    let mut features = features.to_vec();
-    let mut at = 0;
-    while let Some(op) = find_operator(&buf, at) {
-        let enabled = evaluate(&op.expression, &features)?;
-        match op.kind {
-            OpKind::Continue if enabled => remove_line(&mut buf, op.start),
-            OpKind::Continue => buf[op.start..].iter_mut().take_while(|b| **b != 0).for_each(|b| *b = 0),
-            OpKind::Stop if !enabled => remove_line(&mut buf, op.start),
-            OpKind::Stop => buf[op.start..].iter_mut().take_while(|b| **b != 0).for_each(|b| *b = 0),
-            OpKind::Include if enabled => buf[op.start..op.end].fill(0),
-            OpKind::Include => remove_line(&mut buf, op.start),
-            OpKind::Exclude if !enabled => buf[op.start..op.end].fill(0),
-            OpKind::Exclude => remove_line(&mut buf, op.start),
-            OpKind::Imply => {
-                if enabled && !features.contains(&op.value) {
-                    features.push(op.value.clone());
-                }
-                remove_line(&mut buf, op.start);
-            }
-            OpKind::If => {
-                let with = if enabled { op.if_true.as_bytes() } else { op.if_false.as_bytes() };
-                if with.len() <= op.end - op.start {
-                    buf[op.start..op.start + with.len()].copy_from_slice(with);
-                    buf[op.start + with.len()..op.end].fill(0);
-                }
-            }
+/// Parentheses nested deeper than this are not rendered: authselect was seen
+/// to render them 50 000 deep and to crash, writing nothing, 80 000 deep.
+const AUTHSELECT_DEPTH: usize = 50_000;
+
+/// A conditional operator in an authselect template, as it is found between
+/// braces.
+enum Op<'a> {
+    Continue(&'a [u8]),
+    Stop(&'a [u8]),
+    Include(&'a [u8]),
+    Exclude(&'a [u8]),
+    Imply(&'a [u8], &'a [u8]),
+    If(&'a [u8], &'a [u8], Option<&'a [u8]>),
+}
+
+/// Why an expression was not evaluated.
+enum Fail {
+    /// Malformed: authselect writes the file empty.
+    Syntax,
+    /// Parentheses nested deeper than AUTHSELECT_DEPTH.
+    Depth,
+}
+
+/// The operator whose `{` is at `line[at]`, and where it ends. authselect
+/// takes the keywords only in lower case, one space apart, and an operator
+/// only when its pieces avoid braces and, per piece: no `:` or `|` in an
+/// expression, no `|` in an `if` value, no `|` or `"` in an implied name.
+/// Anything else is left as text.
+fn authselect_op(line: &[u8], at: usize) -> Option<(usize, Op<'_>)> {
+    let span = |from: usize, stop: &[u8]| -> usize {
+        line[from..].iter().position(|b| b"{}".contains(b) || stop.contains(b)).map_or(line.len(), |i| from + i)
+    };
+    // An expression running to `}` from `from`: (its end, past the brace).
+    let expr = |from: usize| -> Option<(&[u8], usize)> {
+        let end = span(from, b":|");
+        (end > from && line.get(end) == Some(&b'}')).then(|| (&line[from..end], end + 1))
+    };
+    let body = &line[at + 1..];
+    let found = |kw: &[u8]| body.starts_with(kw).then_some(at + 1 + kw.len());
+    if let Some(from) = found(b"continue if ") {
+        expr(from).map(|(e, end)| (end, Op::Continue(e)))
+    } else if let Some(from) = found(b"stop if ") {
+        expr(from).map(|(e, end)| (end, Op::Stop(e)))
+    } else if let Some(from) = found(b"include if ") {
+        expr(from).map(|(e, end)| (end, Op::Include(e)))
+    } else if let Some(from) = found(b"exclude if ") {
+        expr(from).map(|(e, end)| (end, Op::Exclude(e)))
+    } else if let Some(from) = found(b"imply \"") {
+        let name_end = span(from, b"|\"");
+        let cond = name_end + b"\" if ".len();
+        if name_end == from || line.get(name_end..cond) != Some(b"\" if ") {
+            return None;
         }
-        at = op.end;
-        while at < len && buf[at] == 0 {
-            at += 1;
+        expr(cond).map(|(e, end)| (end, Op::Imply(&line[from..name_end], e)))
+    } else if let Some(from) = found(b"if ") {
+        let colon = span(from, b":|");
+        if colon == from || line.get(colon) != Some(&b':') {
+            return None;
         }
-    }
-    let shaken: Vec<u8> = buf.into_iter().filter(|b| *b != 0).collect();
-    if shaken.is_empty() {
-        return Some(Vec::new());
-    }
-    let lines: Vec<&[u8]> = shaken.split(|b| *b == b'\n').collect();
-    let trimmed: Vec<&[u8]> = lines
-        .iter()
-        .map(|l| {
-            if l.is_empty() {
-                return *l;
+        let yes_end = span(colon + 1, b"|");
+        let yes = &line[colon + 1..yes_end];
+        match line.get(yes_end) {
+            Some(b'}') => Some((yes_end + 1, Op::If(&line[from..colon], yes, None))),
+            Some(b'|') => {
+                let no_end = span(yes_end + 1, b"|");
+                (line.get(no_end) == Some(&b'}'))
+                    .then(|| (no_end + 1, Op::If(&line[from..colon], yes, Some(&line[yes_end + 1..no_end]))))
             }
-            let mut end = l.len() - 1;
-            while end > 0 && l[end].is_ascii_whitespace() || end > 0 && l[end] == 0x0b {
-                end -= 1;
-            }
-            &l[..=end]
-        })
-        .collect();
-    Some(trimmed.join(&b'\n'))
-}
-
-/// string_remove_line: from the start of the line holding `at` through its
-/// newline, or to the next NUL.
-fn remove_line(buf: &mut [u8], at: usize) {
-    let mut left = at;
-    while left > 0 && buf[left - 1] != b'\n' {
-        left -= 1;
-    }
-    let mut i = left;
-    while i < buf.len() && (i < at || buf[i] != 0) {
-        let newline = buf[i] == b'\n';
-        buf[i] = 0;
-        i += 1;
-        if newline {
-            break;
+            _ => None,
         }
+    } else {
+        None
     }
 }
 
-enum OpKind {
-    Continue,
-    Stop,
-    Include,
-    Exclude,
-    Imply,
-    If,
-}
-
-struct Op {
-    kind: OpKind,
-    start: usize,
-    end: usize,
-    expression: String,
-    if_true: String,
-    if_false: String,
-    value: String,
-}
-
-/// The next `{...}` operator at or after `from`, as authselect's regular
-/// expression finds them: within one line, braces never nested, an
-/// expression free of `{}|:`, values free of `{}|`, a feature free of
-/// `{}"|`. Scanning stops at the first NUL, where C's string ends.
-fn find_operator(buf: &[u8], from: usize) -> Option<Op> {
-    let end_of_string = buf[from..].iter().position(|b| *b == 0).map_or(buf.len(), |p| from + p);
-    let text = &buf[from..end_of_string];
-    let mut i = 0;
-    while let Some(open) = text[i..].iter().position(|b| *b == b'{').map(|p| i + p) {
-        i = open + 1;
-        let Some(close) = text[open + 1..].iter().position(|b| matches!(b, b'{' | b'}' | b'\n')).map(|p| open + 1 + p) else {
-            break;
-        };
-        if text[close] != b'}' {
-            continue;
-        }
-        let Ok(inner) = std::str::from_utf8(&text[open + 1..close]) else { continue };
-        let expr_ok = |e: &str| !e.is_empty() && !e.contains(['|', ':']);
-        let mut op = Op {
-            kind: OpKind::If,
-            start: from + open,
-            end: from + close + 1,
-            expression: String::new(),
-            if_true: String::new(),
-            if_false: String::new(),
-            value: String::new(),
-        };
-        let line_op = [
-            ("continue if ", OpKind::Continue),
-            ("stop if ", OpKind::Stop),
-            ("include if ", OpKind::Include),
-            ("exclude if ", OpKind::Exclude),
-        ]
-        .into_iter()
-        .find_map(|(p, k)| inner.strip_prefix(p).map(|e| (k, e)));
-        if let Some((kind, e)) = line_op {
-            if expr_ok(e) {
-                op.kind = kind;
-                op.expression = e.to_string();
-                return Some(op);
-            }
-        } else if let Some(rest) = inner.strip_prefix("if ") {
-            let Some((e, values)) = rest.split_once(':') else { continue };
-            let (t, f) = values.split_once('|').unwrap_or((values, ""));
-            if expr_ok(e) && !f.contains('|') {
-                op.expression = e.to_string();
-                op.if_true = t.to_string();
-                op.if_false = f.to_string();
-                return Some(op);
-            }
-        } else if let Some(rest) = inner.strip_prefix("imply \"") {
-            let Some((feature, e)) = rest.split_once("\" if ") else { continue };
-            if !feature.is_empty() && !feature.contains(['"', '|']) && expr_ok(e) {
-                op.kind = OpKind::Imply;
-                op.expression = e.to_string();
-                op.value = feature.to_string();
-                return Some(op);
-            }
-        }
-    }
-    None
-}
-
-/// authselect's evaluator (util/evaluator.c): left to right, no precedence,
-/// `not` toggling the next operand, parentheses nesting. None where
-/// authselect reports an error and writes nothing.
-fn evaluate(expression: &str, features: &[String]) -> Option<bool> {
-    let mut cursor = expression.as_bytes();
-    machine(&mut cursor, 0, features)
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum State {
-    Begin,
-    Str,
+enum Token<'a> {
+    Open,
+    Close,
+    Name(&'a [u8]),
+    And,
+    Or,
     Not,
-    Sub,
-    Operator,
     End,
 }
 
-fn next_token<'a>(cursor: &mut &'a [u8]) -> Option<&'a [u8]> {
-    while cursor.first().is_some_and(|c| *c == b' ' || *c == b'\t') {
-        *cursor = &cursor[1..];
-    }
-    let token = match cursor.first() {
-        None => &cursor[..0],
-        Some(b'(' | b')') => &cursor[..1],
+/// The next token of an expression and the text after it. Tokens need no
+/// whitespace between them; the keywords are taken in any case. The first
+/// byte that starts no token (anything but space, tab, a parenthesis, a
+/// quote or a letter) ends the expression, and the rest is ignored.
+fn authselect_token(text: &[u8]) -> Result<(Token<'_>, &[u8]), Fail> {
+    let text = &text[text.iter().position(|b| !matches!(b, b' ' | b'\t')).unwrap_or(text.len())..];
+    let (token, len) = match text.first() {
+        Some(b'(') => (Token::Open, 1),
+        Some(b')') => (Token::Close, 1),
         Some(b'"') => {
-            let close = cursor[1..].iter().position(|c| *c == b'"')? + 1;
-            &cursor[..=close]
+            let close = text[1..].iter().position(|b| *b == b'"').ok_or(Fail::Syntax)?;
+            (Token::Name(&text[1..1 + close]), close + 2)
         }
-        Some(_) => {
-            let n = cursor.iter().position(|c| !c.is_ascii_alphabetic()).unwrap_or(cursor.len());
-            &cursor[..n]
+        Some(b) if b.is_ascii_alphabetic() => {
+            let len = text.iter().position(|b| !b.is_ascii_alphabetic()).unwrap_or(text.len());
+            let token = match text[..len].to_ascii_lowercase().as_slice() {
+                b"and" => Token::And,
+                b"or" => Token::Or,
+                b"not" => Token::Not,
+                _ => return Err(Fail::Syntax),
+            };
+            (token, len)
         }
+        _ => (Token::End, text.len()),
     };
-    *cursor = &cursor[token.len()..];
-    Some(token)
+    Ok((token, &text[len..]))
 }
 
-fn machine(cursor: &mut &[u8], depth: usize, features: &[String]) -> Option<bool> {
-    let (mut state, mut result, mut negation, mut operator) = (State::Begin, false, false, None::<bool>);
+/// An authselect expression, evaluated as authselect evaluates it: `and`
+/// and `or` have equal precedence and group from the left, and `not` takes
+/// the one operand after it.
+fn authselect_eval(mut text: &[u8], features: &BTreeSet<&[u8]>) -> Result<bool, Fail> {
+    // One entry per open parenthesis, and one for the whole: the value so
+    // far, the operator waiting for the next operand, and whether that
+    // operand is negated. Kept on the heap, so depth costs no stack.
+    struct Group {
+        value: Option<bool>,
+        and: Option<bool>,
+        negate: bool,
+    }
+    let mut groups = vec![Group { value: None, and: None, negate: false }];
     loop {
-        let token = next_token(cursor)?;
-        if token.is_empty() {
-            break;
-        }
-        let next = match token[0] {
-            b'"' => State::Str,
-            b'(' => State::Sub,
-            b')' => State::End,
-            _ => match token.to_ascii_lowercase().as_slice() {
-                b"not" => State::Not,
-                b"and" | b"or" => State::Operator,
-                _ => return None,
-            },
-        };
-        let feature = || features.iter().any(|f| f.as_bytes() == &token[1..token.len() - 1]);
-        // operator: None, Some(true) for and, Some(false) for or.
-        let combine = |result: bool, operator: Option<bool>, value: bool| match operator {
-            None => value,
-            Some(true) => result && value,
-            Some(false) => result || value,
-        };
-        match state {
-            State::Begin | State::Not | State::Operator => match next {
-                State::Str => {
-                    let v = feature() != negation;
-                    result = combine(result, if state == State::Begin { None } else { operator }, v);
-                    negation = false;
-                }
-                State::Not => negation = !negation,
-                State::Sub => {
-                    let v = machine(cursor, depth + 1, features)? != negation;
-                    result = combine(result, if state == State::Begin { None } else { operator }, v);
-                    negation = false;
-                }
-                State::End if state != State::Begin && depth > 0 => {}
-                _ => return None,
-            },
-            State::Str | State::Sub => match next {
-                State::Operator => operator = Some(token.eq_ignore_ascii_case(b"and")),
-                State::End if depth > 0 => return Some(result),
-                _ => return None,
-            },
-            State::End => {
-                if depth == 0 {
-                    return None;
-                }
+        let (token, rest) = authselect_token(text)?;
+        text = rest;
+        let nested = groups.len() > 1;
+        let Some(group) = groups.last_mut() else { return Err(Fail::Syntax) };
+        let wants_operand = group.value.is_none() || group.and.is_some();
+        let operand = match token {
+            Token::Not if wants_operand => {
+                group.negate = !group.negate;
+                continue;
             }
+            Token::Open if wants_operand => {
+                if groups.len() > AUTHSELECT_DEPTH {
+                    return Err(Fail::Depth);
+                }
+                groups.push(Group { value: None, and: None, negate: false });
+                continue;
+            }
+            Token::And | Token::Or if !wants_operand => {
+                group.and = Some(matches!(token, Token::And));
+                continue;
+            }
+            Token::Name(name) if wants_operand => features.contains(name),
+            Token::Close if !wants_operand && nested => {
+                let inner = group.value.unwrap_or_default();
+                groups.pop();
+                inner
+            }
+            Token::End if !wants_operand && !nested => return Ok(group.value.unwrap_or_default()),
+            _ => return Err(Fail::Syntax),
+        };
+        let Some(group) = groups.last_mut() else { return Err(Fail::Syntax) };
+        let operand = operand != group.negate;
+        group.value = Some(match (group.value, group.and) {
+            (Some(value), Some(true)) => value && operand,
+            (Some(value), Some(false)) => value || operand,
+            _ => operand,
+        });
+        (group.and, group.negate) = (None, false);
+    }
+}
+
+/// A profile's template rendered as authselect renders it with `features`
+/// selected, without the preamble authselect puts above it. `None` where
+/// authselect would not write the file.
+///
+/// Operators are applied line by line, left to right, each seeing the
+/// features implied above it. One that removes its line (`include`/`exclude`
+/// deciding against it, `continue if` true, `stop if` false, `imply`) takes
+/// the whole line and its newline, and later operators on that line are
+/// never looked at; so is anything after a stop. An expression that does not
+/// parse empties the whole file, but only once it is reached.
+fn authselect_render(template: &[u8], features: &[String]) -> Option<Vec<u8>> {
+    let mut features: BTreeSet<&[u8]> = features.iter().map(|f| f.as_bytes()).collect();
+    let mut out = Vec::new();
+    let mut lines = template.split(|b| *b == b'\n').peekable();
+    'lines: while let Some(line) = lines.next() {
+        let start = out.len();
+        let (mut copied, mut from) = (0, 0);
+        while let Some(brace) = line[from..].iter().position(|b| *b == b'{').map(|i| from + i) {
+            let Some((end, op)) = authselect_op(line, brace) else {
+                from = brace + 1;
+                continue;
+            };
+            out.extend_from_slice(&line[copied..brace]);
+            let (Op::Continue(e) | Op::Stop(e) | Op::Include(e) | Op::Exclude(e) | Op::Imply(_, e) | Op::If(e, ..)) =
+                op;
+            let holds = match authselect_eval(e, &features) {
+                Ok(holds) => holds,
+                Err(Fail::Syntax) => return Some(Vec::new()),
+                Err(Fail::Depth) => return None,
+            };
+            let keep_line = match op {
+                Op::Continue(_) | Op::Stop(_) if holds == matches!(op, Op::Stop(_)) => {
+                    return Some(authselect_trim(&out));
+                }
+                Op::Include(_) | Op::Exclude(_) => holds == matches!(op, Op::Include(_)),
+                Op::If(_, yes, no) => {
+                    out.extend_from_slice(if holds { yes } else { no.unwrap_or_default() });
+                    true
+                }
+                Op::Imply(name, _) => {
+                    if holds {
+                        features.insert(name);
+                    }
+                    false
+                }
+                Op::Continue(_) | Op::Stop(_) => false,
+            };
+            if !keep_line {
+                out.truncate(start);
+                continue 'lines;
+            }
+            (copied, from) = (end, end);
         }
-        state = next;
+        out.extend_from_slice(&line[copied..]);
+        if lines.peek().is_some() {
+            out.push(b'\n');
+        }
     }
-    if depth != 0 || matches!(state, State::Operator | State::Not | State::Begin) {
-        return None;
-    }
-    Some(result)
+    Some(authselect_trim(&out))
+}
+
+/// authselect writes every line without its trailing whitespace, except
+/// that a line of nothing but whitespace keeps its first byte.
+fn authselect_trim(text: &[u8]) -> Vec<u8> {
+    let space = |b: &u8| matches!(b, b' ' | b'\t' | b'\r' | 0x0b | 0x0c);
+    let lines: Vec<&[u8]> = text
+        .split(|b| *b == b'\n')
+        .map(|line| match line.iter().rposition(|b| !space(b)) {
+            Some(last) => &line[..=last],
+            None => &line[..line.len().min(1)],
+        })
+        .collect();
+    lines.join(&b'\n')
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_line_is_merged_the_way_pam_auth_update_merges_it() {
-        assert_eq!(
-            merge_one_line("[success=end default=ignore]\tpam_unix.so nullok", 1).unwrap(),
-            "[success=1 default=ignore]\tpam_unix.so nullok\n"
-        );
-        assert_eq!(merge_one_line("required\tpam_unix.so", 0).unwrap(), "required\tpam_unix.so \n", "no options: a trailing space");
-        assert_eq!(merge_one_line("optional  pam_x.so  a   b", 3).unwrap(), "optional  pam_x.so a b\n");
-        assert!(merge_one_line("\tpam_unix.so", 0).is_none());
+    /// A test vector: the files a case's generator read and wrote, recorded
+    /// from the real tool. Each is `=== <path> <length>`, exactly that many
+    /// bytes, then a newline.
+    fn case(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+        let mut out = BTreeMap::new();
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let nl = rest.iter().position(|b| *b == b'\n').expect("header line");
+            let header = std::str::from_utf8(&rest[..nl]).unwrap();
+            let (path, len) = header.strip_prefix("=== ").unwrap().rsplit_once(' ').unwrap();
+            let len: usize = len.parse().unwrap();
+            let body = &rest[nl + 1..nl + 1 + len];
+            assert_eq!(rest[nl + 1 + len], b'\n');
+            out.insert(path.to_string(), body.to_vec());
+            rest = &rest[nl + 2 + len..];
+        }
+        out
+    }
+
+    /// Every case of one generator, each laid out as a scan root.
+    fn vectors(kind: &str) -> Vec<(String, PathBuf, BTreeMap<String, Vec<u8>>)> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors").join(kind);
+        let mut names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+        names.sort();
+        assert!(names.len() > 100, "the {kind} vectors are missing");
+        names
+            .into_iter()
+            .map(|p| {
+                let files = case(&std::fs::read(&p).unwrap());
+                let root = std::env::temp_dir().join(format!(
+                    "unbidden-vector-{kind}-{}-{}",
+                    p.file_stem().unwrap().to_string_lossy(),
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_dir_all(&root);
+                for (rel, body) in &files {
+                    let f = root.join(rel);
+                    std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+                    std::fs::write(f, body).unwrap();
+                }
+                (p.file_name().unwrap().to_string_lossy().into_owned(), root, files)
+            })
+            .collect()
     }
 
     #[test]
-    fn authselect_expressions_evaluate_left_to_right() {
-        let f = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        let on = f(&["a", "b"]);
-        assert_eq!(evaluate("\"a\"", &on), Some(true));
-        assert_eq!(evaluate("\"c\"", &on), Some(false));
-        assert_eq!(evaluate("not \"c\"", &on), Some(true));
-        assert_eq!(evaluate("\"a\" and not \"b\"", &on), Some(false));
-        // No precedence: (c or a) and b, left to right.
-        assert_eq!(evaluate("\"c\" or \"a\" and \"b\"", &on), Some(true));
-        assert_eq!(evaluate("\"a\" and (\"c\" or \"b\")", &on), Some(true));
-        assert_eq!(evaluate("NOT \"a\"", &on), Some(false), "operators match without regard to case");
-        assert_eq!(evaluate("\"a\" and", &on), None, "an expression may not end on an operator");
-        assert_eq!(evaluate("\"a\")", &on), None);
-        assert_eq!(evaluate("(\"a\"", &on), None);
-        assert_eq!(evaluate("\"a", &on), None);
+    fn every_stack_pam_auth_update_wrote_is_reproduced() {
+        let mut checked = 0;
+        for (name, dir, files) in vectors("pam-auth-update") {
+            let root = Root::at(&dir).unwrap();
+            for ty in PAM_TYPES {
+                let Some(want) = files.get(&format!("etc/pam.d/common-{ty}")) else { continue };
+                let template = Path::new(PAM_TEMPLATES).join(format!("common-{ty}"));
+                let got = pam_auth_update(&root, ty, &template, &saved_modules(&root, ty));
+                assert_eq!(
+                    got.as_deref().map(String::from_utf8_lossy),
+                    Some(String::from_utf8_lossy(want)),
+                    "{name} common-{ty}"
+                );
+                checked += 1;
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        assert!(checked > 500);
     }
 
     #[test]
-    fn an_authselect_template_renders_the_way_authselect_renders_it() {
-        let f = vec!["with-x".to_string(), "with-ctx".to_string()];
-        let t = b"auth  required  pam_env.so\n\
-                  auth  sufficient  pam_x.so     {include if \"with-x\"}\n\
-                  auth  sufficient  pam_y.so     {include if \"with-y\"}\n\
-                  auth  sufficient  pam_unix.so {if not \"without-nullok\":nullok}\n\
-                  auth  required  pam_z.so {if \"with-y\":yes|no}   \n\
-                  {imply \"with-y\" if \"with-ctx\"}\n\
-                  auth  optional  pam_later.so {include if \"with-y\"}\n\
-                  \x20\x20\x20\n\
-                  auth  required  pam_deny.so\n";
-        let out = String::from_utf8(authselect_render(t, &f).unwrap()).unwrap();
-        assert_eq!(
-            out,
-            "auth  required  pam_env.so\n\
-             auth  sufficient  pam_x.so\n\
-             auth  sufficient  pam_unix.so nullok\n\
-             auth  required  pam_z.so no\n\
-             auth  optional  pam_later.so\n\
-             \x20\n\
-             auth  required  pam_deny.so\n",
-            "a dropped line leaves nothing, padding is trimmed, an implied feature counts from its line on, \
-             and a whitespace-only line keeps its first character"
-        );
+    fn every_file_authselect_wrote_is_reproduced() {
+        let mut checked = 0;
+        for (name, dir, files) in vectors("authselect") {
+            let root = Root::at(&dir).unwrap();
+            let (profile, features) = authselect_config(&root).expect("authselect.conf names a profile");
+            for file in AUTHSELECT_PAM.iter().chain(["nsswitch.conf"].iter()) {
+                let Some(want) = files.get(&format!("etc/authselect/{file}")) else { continue };
+                let rendered = match files.get(&format!("{}/{file}", profile.display())) {
+                    Some(t) => authselect_render(t, &features),
+                    None => Some(Vec::new()),
+                };
+                let got = rendered.map(|r| [AUTHSELECT_PREAMBLE.as_bytes(), &r].concat());
+                assert_eq!(
+                    got.as_deref().map(String::from_utf8_lossy),
+                    Some(String::from_utf8_lossy(want)),
+                    "{name} {file} with {features:?}"
+                );
+                checked += 1;
+            }
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        assert!(checked > 500);
     }
 }

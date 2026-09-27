@@ -1,0 +1,197 @@
+=== etc/pam.d/common-account 562
+# test template for common-account, variant 1
+account	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+account	[default=1]			pam_permit.so
+# here's the fallback if no module succeeds
+account	requisite			pam_deny.so
+account	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+account	[success=2 new_authtok_reqd=done default=ignore]	pam_d.so use_authtok nullok
+account	required	pam_d.so 
+account	[default=die]	pam_e.so 
+# end of pam-auth-update config
+account	optional	pam_local_after.so
+
+=== etc/pam.d/common-auth 392
+# test template for common-auth, variant 1
+auth	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+auth	requisite	pam_a.so 
+# here's the fallback if no module succeeds
+auth	requisite			pam_deny.so
+auth	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+# end of pam-auth-update config
+auth	optional	pam_local_after.so
+
+=== etc/pam.d/common-password 424
+# test template for common-password, variant 1
+password	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+password	[default=1]			pam_permit.so
+# here's the fallback if no module succeeds
+password	requisite			pam_deny.so
+password	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+# end of pam-auth-update config
+password	optional	pam_local_after.so
+
+=== etc/pam.d/common-session 615
+# test template for common-session, variant 1
+session	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+session	requisite	pam_e.so use_authtok nullok
+session	sufficient	pam_d.so 
+session	[success=1 new_authtok_reqd=done default=ignore]	pam_b.so use_authtok nullok
+# here's the fallback if no module succeeds
+session	requisite			pam_deny.so
+session	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+session	requisite	pam_b.so 
+session	optional	pam_c.so use_authtok nullok
+# end of pam-auth-update config
+session	optional	pam_local_after.so
+
+=== etc/pam.d/common-session-noninteractive 630
+# test template for common-session-noninteractive, variant 1
+session	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+session	requisite	pam_e.so use_authtok nullok
+session	sufficient	pam_d.so 
+session	[success=1 new_authtok_reqd=done default=ignore]	pam_b.so use_authtok nullok
+# here's the fallback if no module succeeds
+session	requisite			pam_deny.so
+session	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+session	requisite	pam_b.so 
+session	optional	pam_c.so use_authtok nullok
+# end of pam-auth-update config
+session	optional	pam_local_after.so
+
+=== usr/share/pam-configs/prof0 184
+Name: prof0 profile
+Default: yes
+Priority: 512
+Auth-Type: Primary
+Auth:
+	requisite	pam_a.so
+Session-Type: Additional
+Session:
+	requisite	pam_b.so
+	optional	pam_c.so use_authtok nullok
+
+=== usr/share/pam-configs/prof1 372
+Name: prof1 profile
+Default: no
+Priority: 0
+Account-Type: Additional
+Account:
+	[success=end new_authtok_reqd=done default=ignore]	pam_d.so use_authtok nullok
+	required	pam_d.so
+	[default=die]	pam_e.so
+Session-Type: Primary
+Session:
+	requisite	pam_e.so use_authtok nullok
+	sufficient	pam_d.so
+	[success=end new_authtok_reqd=done default=ignore]	pam_b.so use_authtok nullok
+
+=== usr/share/pam/common-account 419
+# test template for common-account, variant 1
+account	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+$account_primary
+# here's the fallback if no module succeeds
+account	requisite			pam_deny.so
+account	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+$account_additional
+# end of pam-auth-update config
+account	optional	pam_local_after.so
+
+=== usr/share/pam/common-auth 398
+# test template for common-auth, variant 1
+auth	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+$auth_primary
+# here's the fallback if no module succeeds
+auth	requisite			pam_deny.so
+auth	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+$auth_additional
+# end of pam-auth-update config
+auth	optional	pam_local_after.so
+
+=== usr/share/pam/common-password 426
+# test template for common-password, variant 1
+password	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+$password_primary
+# here's the fallback if no module succeeds
+password	requisite			pam_deny.so
+password	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+$password_additional
+# end of pam-auth-update config
+password	optional	pam_local_after.so
+
+=== usr/share/pam/common-session 419
+# test template for common-session, variant 1
+session	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+$session_primary
+# here's the fallback if no module succeeds
+session	requisite			pam_deny.so
+session	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+$session_additional
+# end of pam-auth-update config
+session	optional	pam_local_after.so
+
+=== usr/share/pam/common-session-noninteractive 464
+# test template for common-session-noninteractive, variant 1
+session	optional	pam_local_before.so
+# here are the per-package modules (the "Primary" block)
+$session_noninteractive_primary
+# here's the fallback if no module succeeds
+session	requisite			pam_deny.so
+session	required			pam_permit.so
+# and here are more per-package modules (the "Additional" block)
+$session_noninteractive_additional
+# end of pam-auth-update config
+session	optional	pam_local_after.so
+
+=== var/lib/pam/account 175
+Module: null
+[default=1]			pam_permit.so
+Module: prof1
+[success=end new_authtok_reqd=done default=ignore]	pam_d.so use_authtok nullok
+required	pam_d.so
+[default=die]	pam_e.so
+
+=== var/lib/pam/auth 33
+Module: prof0
+requisite	pam_a.so
+
+=== var/lib/pam/password 41
+Module: null
+[default=1]			pam_permit.so
+
+=== var/lib/pam/session 221
+Module: prof1
+requisite	pam_e.so use_authtok nullok
+sufficient	pam_d.so
+[success=end new_authtok_reqd=done default=ignore]	pam_b.so use_authtok nullok
+Module: prof0
+requisite	pam_b.so
+optional	pam_c.so use_authtok nullok
+
+=== var/lib/pam/session-noninteractive 221
+Module: prof1
+requisite	pam_e.so use_authtok nullok
+sufficient	pam_d.so
+[success=end new_authtok_reqd=done default=ignore]	pam_b.so use_authtok nullok
+Module: prof0
+requisite	pam_b.so
+optional	pam_c.so use_authtok nullok
+
