@@ -1582,21 +1582,31 @@ fn groups(cx: &mut Ctx, out: &mut Vec<Entry>) {
             }
         }
     }
+    // Each local account's shell: one that cannot log in (nologin, false,
+    // and the setup package's halt, shutdown and sync, whose primary group
+    // is root on Fedora) holds no right anyone can use. A member with no
+    // local account may come from a directory and is kept.
+    let mut shells: BTreeMap<String, String> = BTreeMap::new();
     if let Some(passwd) = cx.read("etc/passwd") {
         for row in colon_rows(&passwd) {
-            if let (Some(user), Some(gid)) = (row.first(), row.get(3))
-                && let Some(g) = gids.get(gid)
-            {
+            let Some(user) = row.first() else { continue };
+            shells.insert(user.clone(), row.get(6).cloned().unwrap_or_default());
+            if let Some(g) = row.get(3).and_then(|gid| gids.get(gid)) {
                 members.entry(g.clone()).or_default().insert(user.clone());
             }
         }
     }
+    let no_login = |user: &str| {
+        shells.get(user).is_some_and(|sh| {
+            matches!(sh.rsplit('/').next().unwrap_or(sh), "nologin" | "false" | "halt" | "shutdown" | "sync" | "reboot" | "poweroff")
+        })
+    };
     for (g, why) in RIGHTS_GROUPS {
         let Some(set) = members.get(g) else { continue };
         for user in set {
             // root in root's group, and a system group's own service
             // account, are how the groups are made.
-            if user == "root" || user == g {
+            if user == "root" || user == g || no_login(user) {
                 continue;
             }
             let mut e = cx.entry(Kind::GroupMember, rel, format!("{g}:{user}"));
@@ -1606,6 +1616,9 @@ fn groups(cx: &mut Ctx, out: &mut Vec<Entry>) {
             e.note("group", g);
             e.note("grants", why);
             e.note("target_unverifiable", "a right, not a program");
+            if !shells.contains_key(user.as_str()) {
+                e.note("account", "no local account; a directory's, or none");
+            }
             out.push(e);
         }
     }
@@ -3261,15 +3274,17 @@ PKCS11Provider /opt/a.so extra
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         };
-        put("etc/group", b"root:x:0:\nsudo:x:27:alice,bob\ndocker:x:999:\naudio:x:29:alice\nstaff:x:50:\n");
+        put("etc/group", b"root:x:0:\nsudo:x:27:alice,bob,svc\ndocker:x:999:\naudio:x:29:alice\nstaff:x:50:\n");
         put("etc/gshadow", b"docker:!::carol\n");
-        put("etc/passwd", b"root:x:0:0::/root:/bin/sh\ndave:x:1003:50::/home/dave:/bin/sh\n");
+        put("etc/passwd", b"root:x:0:0::/root:/bin/sh\ndave:x:1003:50::/home/dave:/bin/sh\nhalt:x:7:0::/sbin:/sbin/halt\nsvc:x:900:900::/:/usr/sbin/nologin\nalice:x:1000:1000::/home/alice:/bin/bash\n");
         let root = Root::at(&d).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Auth)];
         let s = crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors);
         let mut got: Vec<&str> = s.entries.iter().filter(|e| e.kind == Kind::GroupMember).map(|e| e.name.as_str()).collect();
         got.sort();
-        assert_eq!(got, ["docker:carol", "staff:dave", "sudo:alice", "sudo:bob"], "gshadow members and a primary group count; audio does not");
+        assert_eq!(got, ["docker:carol", "staff:dave", "sudo:alice", "sudo:bob"], "gshadow members and a primary group count; audio does not; halt and a nologin service account cannot use the right; bob, with no local account, may be a directory's");
+        let bob = s.entries.iter().find(|e| e.name == "sudo:bob").unwrap();
+        assert!(bob.raw.contains_key("account"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
