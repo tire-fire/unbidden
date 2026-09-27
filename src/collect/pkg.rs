@@ -35,6 +35,8 @@ impl Collector for PkgHooks {
         out.extend(dnf_plugins(cx));
         out.extend(rpm(cx));
         out.extend(kernel_hooks(cx));
+        out.extend(dpkg_cfg(cx));
+        out.extend(hook_dirs(cx));
         out.extend(dbus(cx));
         out
     }
@@ -89,6 +91,127 @@ fn kernel_hooks(cx: &mut Ctx) -> Vec<Entry> {
             e.note("not_run", "not executable");
         }
         out.push(e);
+    }
+    out
+}
+
+/// dpkg's own configuration (lib/dpkg/options.c, 1.22): every file in
+/// /etc/dpkg/dpkg.cfg.d whose name is letters, digits, `_` and `-` only, in
+/// order, then /etc/dpkg/dpkg.cfg, then the invoking user's ~/.dpkg.cfg,
+/// root's here. A line is an option, then `=` or whitespace, then its value,
+/// quotes stripped; `#` lines are comments. `pre-invoke`, `post-invoke` and
+/// `status-logger` name shell commands dpkg runs as root on every run that
+/// changes a package.
+fn dpkg_cfg(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let installed = ["usr/bin/dpkg", "bin/dpkg"].iter().any(|p| cx.root.exists(p));
+    let dir = Path::new("etc/dpkg/dpkg.cfg.d");
+    let mut names: Vec<_> = cx
+        .dir(dir)
+        .into_iter()
+        .filter(|e| {
+            let n = e.name.as_encoded_bytes();
+            !n.is_empty() && n[0] != b'.' && n.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+        })
+        .map(|e| e.name)
+        .collect();
+    names.sort();
+    let mut files: Vec<PathBuf> = names.into_iter().map(|n| dir.join(n)).collect();
+    files.push(PathBuf::from("etc/dpkg/dpkg.cfg"));
+    files.push(PathBuf::from("root/.dpkg.cfg"));
+    for rel in files {
+        let Some(bytes) = cx.read_capped(&rel, 256 * 1024) else { continue };
+        for line in bytes.split(|b| *b == b'\n') {
+            let line = line.trim_ascii_end();
+            if line.is_empty() || line[0] == b'#' {
+                continue;
+            }
+            let name_end = line.iter().position(|b| !(b.is_ascii_alphanumeric() || *b == b'-')).unwrap_or(line.len());
+            let option = String::from_utf8_lossy(&line[..name_end]).into_owned();
+            if !matches!(option.as_str(), "pre-invoke" | "post-invoke" | "status-logger") || name_end == line.len() {
+                continue;
+            }
+            let mut value = &line[name_end + 1..];
+            if value.first() == Some(&b'=') {
+                value = &value[1..];
+            }
+            let value = value.trim_ascii_start();
+            let value = match value {
+                [q @ (b'"' | b'\''), inner @ .., last] if last == q => inner,
+                v => v,
+            };
+            let mut e = cx.entry(Kind::PkgHook, &rel, format!("dpkg:{option}:{}", hex(&blake3::hash(value).as_bytes()[..6])));
+            e.trigger = Trigger::PackageOp;
+            e.principal = Some("root".into());
+            e.enabled = if installed { Enablement::Enabled } else { Enablement::Disabled };
+            e.note("hook", option);
+            e.command = Some(value.to_vec());
+            out.push(e);
+        }
+    }
+    out
+}
+
+/// Directories of programs run as root around package operations, each by
+/// its tool's own selection rule. needrestart (3.6, after apt): every
+/// executable in hook.d, and in notify.d less `~` and `.dpkg-*` names; a
+/// restart.d file named after a unit replaces restarting it. etckeeper
+/// (around apt, and daily): the executables in /etc/etckeeper/*.d whose
+/// names are letters, digits and `-` only.
+fn hook_dirs(cx: &mut Ctx) -> Vec<Entry> {
+    // Which names each directory's tool runs.
+    enum Rule {
+        All,
+        NotBackup,
+        Etckeeper,
+    }
+    let selects = |rule: &Rule, n: &[u8]| match rule {
+        Rule::All => true,
+        Rule::NotBackup => !(n.ends_with(b"~") || n.windows(6).any(|w| w == b".dpkg-")),
+        Rule::Etckeeper => !n.is_empty() && n.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'-'),
+    };
+    let mut out = Vec::new();
+    let mut dirs: Vec<(PathBuf, &str, Rule)> = vec![
+        (PathBuf::from("etc/needrestart/hook.d"), "needrestart", Rule::All),
+        (PathBuf::from("etc/needrestart/notify.d"), "needrestart", Rule::NotBackup),
+        (PathBuf::from("etc/needrestart/restart.d"), "needrestart", Rule::All),
+    ];
+    for e in cx.dir("etc/etckeeper") {
+        if e.is_dir && e.name.as_encoded_bytes().ends_with(b".d") {
+            dirs.push((Path::new("etc/etckeeper").join(e.name), "etckeeper", Rule::Etckeeper));
+        }
+    }
+    for (dir, tool, rule) in dirs {
+        let installed = match tool {
+            "needrestart" => cx.root.exists("usr/sbin/needrestart"),
+            _ => cx.root.exists("usr/bin/etckeeper") || cx.root.exists("usr/sbin/etckeeper"),
+        };
+        let mut ents = cx.dir(&dir);
+        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        for ent in ents {
+            let rel = dir.join(&ent.name);
+            if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
+                continue;
+            }
+            let hook = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let mut e = cx.entry(Kind::PkgHook, &rel, format!("{tool}:{hook}/{}", ent.name.to_string_lossy()));
+            e.trigger = Trigger::PackageOp;
+            e.principal = Some("root".into());
+            e.target_path = Some(cx.root.abs(&rel));
+            e.note("hook", format!("{tool} {hook}"));
+            e.enabled = Enablement::Enabled;
+            if !selects(&rule, ent.name.as_encoded_bytes()) {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", format!("{tool} passes over this name"));
+            } else if e.mode & 0o111 == 0 {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "not executable");
+            } else if !installed {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", format!("{tool} is not installed"));
+            }
+            out.push(e);
+        }
     }
     out
 }
@@ -1924,6 +2047,37 @@ mod tests {
         put(&d, "usr/bin/run-parts", b"#!/bin/bash\n");
         let s = scan(&d);
         assert_eq!(state(&s, "etc/kernel/postinst.d/update.sh").0, Enablement::Enabled);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn dpkg_needrestart_and_etckeeper_hooks_are_read_their_way() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tree("pkgextras");
+        let exe = |d: &Path, rel: &str, mode: u32| {
+            put(d, rel, b"#!/bin/sh\n");
+            std::fs::set_permissions(d.join(rel), std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        put(&d, "usr/bin/dpkg", b"");
+        put(&d, "etc/dpkg/dpkg.cfg.d/local", b"# a comment\npost-invoke=\"/opt/after --all\"\nforce-confold\n");
+        put(&d, "etc/dpkg/dpkg.cfg.d/ignored.cfg", b"pre-invoke /never\n");
+        put(&d, "etc/dpkg/dpkg.cfg", b"pre-invoke /usr/local/sbin/snap-before\n");
+        put(&d, "usr/sbin/needrestart", b"");
+        exe(&d, "etc/needrestart/notify.d/200-mail", 0o755);
+        exe(&d, "etc/needrestart/notify.d/200-mail.dpkg-old", 0o755);
+        put(&d, "usr/bin/etckeeper", b"");
+        exe(&d, "etc/etckeeper/pre-install.d/50-hook", 0o755);
+        exe(&d, "etc/etckeeper/pre-install.d/60_under", 0o755);
+        let s = scan(&d);
+        let cmd = |c: &str| s.entries.iter().find(|e| e.command.as_deref() == Some(c.as_bytes()));
+        assert_eq!(cmd("/opt/after --all").unwrap().raw["hook"], "post-invoke", "quotes are stripped");
+        assert!(cmd("/usr/local/sbin/snap-before").is_some());
+        assert!(cmd("/never").is_none(), "dpkg reads no dotted name in dpkg.cfg.d");
+        let state = |name: &str| s.entries.iter().find(|e| e.name == name).map(|e| e.enabled).unwrap_or_else(|| panic!("no {name}"));
+        assert_eq!(state("needrestart:notify.d/200-mail"), Enablement::Enabled);
+        assert_eq!(state("needrestart:notify.d/200-mail.dpkg-old"), Enablement::Disabled);
+        assert_eq!(state("etckeeper:pre-install.d/50-hook"), Enablement::Enabled);
+        assert_eq!(state("etckeeper:pre-install.d/60_under"), Enablement::Disabled, "etckeeper runs no underscore");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

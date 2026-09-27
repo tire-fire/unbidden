@@ -1,0 +1,7 @@
+# dpkg configuration file
+#
+no-debsig
+log /var/log/dpkg.log
+pre-invoke=/usr/local/sbin/snapshot-before
+post-invoke = "/usr/local/sbin/snapshot-after --tag dpkg"
+status-logger /usr/bin/logger -t dpkg
