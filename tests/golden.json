@@ -1279,6 +1279,97 @@
       "target_path_utf8": true,
       "target_sha256": "620cb062d372a50d356675452323e4eb6832fadf9e51d88ac8ea29e434ec7532",
       "trigger": "login"
+    },
+    {
+      "collector": "polkit",
+      "command": "/usr/local/bin/audit-hook",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "920955e2f81429881daee9991fdb559cc33b50dbbb9c5a2c405dffd4459fa5ea",
+      "kind": "polkit_rule",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "49-admin.rules",
+      "owner_uid": "<normalised>",
+      "principal": "polkitd",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "groups": "wheel",
+        "returns_yes": "true",
+        "target_provenance": "unpackaged"
+      },
+      "source": "<ROOT>/etc/polkit-1/rules.d/49-admin.rules",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/local/bin/audit-hook",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "auth"
+    },
+    {
+      "collector": "polkit",
+      "command": null,
+      "enabled": "disabled",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "c74ba54209727737d98b805c38097f5496538f82c499559d5a97dcb218739dad",
+      "kind": "polkit_rule",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "49-admin.rules",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "shadowed_by": "<ROOT>/etc/polkit-1/rules.d/49-admin.rules"
+      },
+      "source": "<ROOT>/usr/share/polkit-1/rules.d/49-admin.rules",
+      "source_utf8": true,
+      "target_path": null,
+      "target_sha256": "f8ed17f4bfaf7ee3dc9e521c104ea4afa8929e0db36126af95ba9229da363600",
+      "trigger": "auth"
+    },
+    {
+      "collector": "inetd",
+      "command": "/usr/sbin/tcpd /usr/sbin/in.telnetd",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged",
+        "target-missing"
+      ],
+      "id": "dcd3478317d36a1ef2a905fff64dbd2d8a82eead22643880d9821c0846be38ff",
+      "kind": "inetd_service",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "telnet",
+      "owner_uid": "<normalised>",
+      "principal": "root",
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "daemon": "xinetd",
+        "daemon_state": "no unit or init script for xinetd found",
+        "server_args": "/usr/sbin/in.telnetd",
+        "socket_type": "stream",
+        "target_provenance": "unpackaged",
+        "target_wrapped_by": "tcpd"
+      },
+      "source": "<ROOT>/etc/xinetd.d/telnet",
+      "source_utf8": true,
+      "target_path": "<ROOT>/usr/sbin/in.telnetd",
+      "target_path_utf8": true,
+      "target_sha256": null,
+      "trigger": "network-event"
     }
   ],
   "header": {
@@ -1315,7 +1406,7 @@
         "status": "complete"
       },
       {
-        "entries": 0,
+        "entries": 1,
         "name": "inetd",
         "status": "complete"
       },
@@ -1338,7 +1429,7 @@
         "status": "complete"
       },
       {
-        "entries": 0,
+        "entries": 2,
         "name": "polkit",
         "status": "complete"
       },

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::dbus;
-use crate::entry::{Entry, Flag, Integrity, Kind, Provenance};
+use crate::entry::{Enablement, Entry, Flag, Integrity, Kind, Provenance};
 use crate::provenance;
 use crate::root::{Root, is_hidden_path};
 use crate::scan::Scan;
@@ -69,6 +69,7 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
     stage(&mut failed, "shadowing", || {
         apply_shadowing(&mut scan.entries);
         cross_reference_suid(&mut scan.entries);
+        gate_on_super_server(&mut scan.entries);
     });
 
     if let Some(preloads) = stage(&mut failed, "preloads", || preload_entries(root, &scan.entries)) {
@@ -1005,6 +1006,58 @@ fn apply_encoding(entry: &mut Entry) {
     entry.note("encoded_run", format!("{alphabet}, {len} chars at offset {offset}"));
 }
 
+/// The unit names and init scripts each super-server daemon is started by.
+const SUPER_SERVERS: [(&str, &[&str], &[&str]); 2] = [
+    ("xinetd", &["xinetd.service"], &["xinetd"]),
+    (
+        "inetd",
+        &["inetd.service", "openbsd-inetd.service", "inetutils-inetd.service"],
+        &["inetd", "openbsd-inetd", "inetutils-inetd"],
+    ),
+];
+
+/// A service xinetd or inetd would start runs only while that daemon does.
+/// Its systemd unit decides, where there is one: a native unit replaces an
+/// init script of the same name. Otherwise the init script's rc links do.
+/// Where neither is found the service keeps its own setting, noted.
+fn gate_on_super_server(entries: &mut [Entry]) {
+    for (daemon, units, scripts) in SUPER_SERVERS {
+        let state = |kind: Kind, names: &[&str]| -> Option<Enablement> {
+            let found: Vec<Enablement> =
+                entries.iter().filter(|e| e.kind == kind && names.contains(&e.name.as_str())).map(|e| e.enabled).collect();
+            if found.is_empty() {
+                return None;
+            }
+            Some(if found.iter().any(|s| matches!(s, Enablement::Enabled | Enablement::Static)) {
+                Enablement::Enabled
+            } else if found.contains(&Enablement::Unknown) {
+                Enablement::Unknown
+            } else {
+                Enablement::Disabled
+            })
+        };
+        let (daemon_state, by) = match (state(Kind::SystemdUnit, units), state(Kind::SysvInit, scripts)) {
+            (Some(s), _) => (Some(s), "systemd unit"),
+            (None, Some(s)) => (Some(s), "init script"),
+            (None, None) => (None, ""),
+        };
+        for e in entries.iter_mut() {
+            if e.kind != Kind::InetdService || e.raw.get("daemon").map(String::as_str) != Some(daemon) {
+                continue;
+            }
+            match daemon_state {
+                None => e.note("daemon_state", format!("no unit or init script for {daemon} found")),
+                Some(s) => {
+                    e.note("daemon_state", format!("{daemon} {by} {s}"));
+                    if e.enabled == Enablement::Enabled && s != Enablement::Enabled {
+                        e.enabled = s;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Collectors record which file shadows which; deciding that the relationship
 /// is worth a flag needs the whole set, so it happens here.
 fn apply_shadowing(entries: &mut [Entry]) {
@@ -1637,6 +1690,63 @@ mod tests {
         let editor = by_command("editor");
         assert_eq!(editor.raw["target_provenance"], "vim (intact)");
         assert_eq!(editor.raw["target_resolves_to"], dir.join("usr/bin/vim.basic").to_string_lossy());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_super_server_service_runs_only_while_its_daemon_does() {
+        let service = |daemon: &str| {
+            let mut e = Entry::new(Kind::InetdService, "/etc/xinetd.d/telnet", format!("telnet-{daemon}"));
+            e.note("daemon", daemon);
+            e.enabled = Enablement::Enabled;
+            e
+        };
+        let daemon = |kind: Kind, name: &str, state: Enablement| {
+            let mut e = Entry::new(kind, format!("/x/{name}"), name);
+            e.enabled = state;
+            e
+        };
+        let run = |mut entries: Vec<Entry>| {
+            gate_on_super_server(&mut entries);
+            entries.into_iter().filter(|e| e.kind == Kind::InetdService).map(|e| (e.enabled, e.raw["daemon_state"].clone())).collect::<Vec<_>>()
+        };
+
+        // The unit decides over the init script it replaces.
+        let got = run(vec![
+            service("xinetd"),
+            daemon(Kind::SystemdUnit, "xinetd.service", Enablement::Disabled),
+            daemon(Kind::SysvInit, "xinetd", Enablement::Enabled),
+        ]);
+        assert_eq!(got, [(Enablement::Disabled, "xinetd systemd unit disabled".to_string())]);
+        // A vendor unit disabled and an /etc copy enabled: it runs.
+        let got = run(vec![
+            service("xinetd"),
+            daemon(Kind::SystemdUnit, "xinetd.service", Enablement::Disabled),
+            daemon(Kind::SystemdUnit, "xinetd.service", Enablement::Enabled),
+        ]);
+        assert_eq!(got[0].0, Enablement::Enabled);
+        // Only an init script, as Debian's openbsd-inetd ships.
+        let got = run(vec![service("inetd"), daemon(Kind::SysvInit, "openbsd-inetd", Enablement::Disabled)]);
+        assert_eq!(got, [(Enablement::Disabled, "inetd init script disabled".to_string())]);
+        // Nothing found: the service keeps its own setting, and says so.
+        let got = run(vec![service("xinetd")]);
+        assert_eq!(got, [(Enablement::Enabled, "no unit or init script for xinetd found".to_string())]);
+    }
+
+    #[test]
+    fn tcpd_is_looked_through_to_the_server_it_wraps() {
+        let dir = std::env::temp_dir().join(format!("unbidden-tcpd-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("usr/sbin")).unwrap();
+        for f in ["usr/sbin/tcpd", "usr/sbin/in.telnetd"] {
+            std::fs::write(dir.join(f), b"").unwrap();
+        }
+        let root = Root::at(&dir).unwrap();
+        let mut e = Entry::new(Kind::InetdService, dir.join("etc/xinetd.d/telnet"), "telnet");
+        e.command = Some(b"/usr/sbin/tcpd /usr/sbin/in.telnetd".to_vec());
+        e.target_path = Some(dir.join("usr/sbin/tcpd"));
+        look_through_wrappers(&root, std::slice::from_mut(&mut e));
+        assert_eq!(e.target_path, Some(dir.join("usr/sbin/in.telnetd")));
+        assert_eq!(e.raw["target_wrapped_by"], "tcpd");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -147,11 +147,11 @@ KEY="$INSTANCE/key"
 case "$FAMILY" in
     # gcc because two PANIX modules compile their payload before planting it;
     # libcap's tools for cap, rpm-build for malicious-package on Fedora.
-    debian) PKGS='[cron, at, sudo, git, network-manager, dbus, openssh-server, python3, gcc, build-essential, udev, libcap2-bin]' ;;
+    debian) PKGS='[cron, at, sudo, git, network-manager, dbus, openssh-server, python3, gcc, build-essential, udev, libcap2-bin, bc]' ;;
     # Fedora's bus is dbus-broker, which reads the same activation and policy
     # directories as dbus-daemon. PANIX will not plant without the daemon's
     # binary on PATH, so it is installed; the running bus stays the broker.
-    fedora) PKGS='[cronie, at, sudo, git, NetworkManager, dbus, dbus-daemon, openssh-server, python3, gcc, make, rpm-build, libcap]' ;;
+    fedora) PKGS='[cronie, at, sudo, git, NetworkManager, dbus, dbus-daemon, openssh-server, python3, gcc, make, rpm-build, libcap, bc, polkit]' ;;
 esac
 # lkm builds its module against the kernel that is running, whose version is
 # only known inside the guest — so this line runs there. The single quotes
@@ -159,6 +159,9 @@ esac
 # of a variable a second time.
 # shellcheck disable=SC2016
 HEADERS='[ sh, -c, "apt-get install -y linux-headers-$(uname -r) || dnf install -y kernel-devel-$(uname -r)" ]'
+# polkit's package is polkitd from Debian 12 and Ubuntu 24.04, policykit-1
+# before; one missing name in the package list would fail the whole install.
+POLKIT='[ sh, -c, "command -v pkaction || apt-get install -y polkitd || apt-get install -y policykit-1 || true" ]'
 
 cat > "$INSTANCE/user-data" <<EOF
 #cloud-config
@@ -173,6 +176,7 @@ package_update: true
 packages: $PKGS
 runcmd:
   - $HEADERS
+  - $POLKIT
   - [ systemctl, enable, --now, sshd ]
   - [ systemctl, enable, --now, ssh ]
   - [ touch, /root/.harness-ready ]

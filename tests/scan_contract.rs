@@ -105,6 +105,19 @@ fn build_tree(dir: &Path) {
     w("etc/ssh/sshd_config", b"PermitRootLogin no\nForceCommand /usr/local/bin/shell-wrap\n");
     w("etc/sudoers", b"root ALL=(ALL:ALL) ALL\nalice ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n");
 
+    // polkit: a JavaScript engine (the daemon names its rules runner), a
+    // rule granting a group and spawning a helper, and one it replaces.
+    w("usr/lib/polkit-1/polkitd", b"\x7fELF polkit._runRules polkit.spawn");
+    w("etc/polkit-1/rules.d/49-admin.rules", b"polkit.addRule(function(action, subject) {\n  if (subject.isInGroup(\"wheel\")) {\n    polkit.spawn([\"/usr/local/bin/audit-hook\", action.id]);\n    return polkit.Result.YES;\n  }\n});\n");
+    w("usr/share/polkit-1/rules.d/49-admin.rules", b"// vendor copy, replaced by /etc\n");
+
+    // xinetd: a stock-looking config, a live service behind tcpd, and a
+    // backup copy xinetd never loads.
+    w("usr/sbin/xinetd", b"");
+    w("etc/xinetd.conf", b"defaults\n{\n    instances = 60\n}\nincludedir /etc/xinetd.d\n");
+    w("etc/xinetd.d/telnet", b"service telnet\n{\n    disable = no\n    socket_type = stream\n    wait = no\n    user = root\n    server = /usr/sbin/tcpd\n    server_args = /usr/sbin/in.telnetd\n}\n");
+    w("etc/xinetd.d/telnet.bak", b"service telnet\n{\n    server = /tmp/old\n}\n");
+
     w("etc/rc.local", b"#!/bin/sh\n/opt/boot-hook.sh\nexit 0\n");
     exec("etc/rc.local");
     w("etc/init.d/legacy", b"#!/bin/sh\n### BEGIN INIT INFO\n# Provides: legacy\n# Default-Start: 2 3 4 5\n### END INIT INFO\nexec /usr/sbin/legacyd\n");

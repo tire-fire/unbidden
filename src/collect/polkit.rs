@@ -118,6 +118,8 @@ fn rules(cx: &mut Ctx, out: &mut Vec<Entry>) {
             e.note("users", users.join(", "));
         }
         if let Some(argv) = spawn_argv(&bytes) {
+            // polkitd runs what a rule spawns as its own unprivileged user.
+            e.principal = Some("polkitd".into());
             e.target_path = argv.first().filter(|p| p.starts_with('/')).map(Into::into);
             e.command = Some(argv.join(" ").into_bytes());
         }

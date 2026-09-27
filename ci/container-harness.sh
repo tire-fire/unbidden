@@ -85,7 +85,9 @@ if [ "$INSTALL" -eq 1 ]; then
     # kernel headers lkm alone would use.
     in_box apt-get -qq install -y --no-install-recommends \
         cron at sudo git network-manager dbus openssh-server python3 gcc build-essential \
-        udev libcap2-bin procps >/dev/null
+        udev libcap2-bin procps bc >/dev/null
+    # polkitd from Mint 22, policykit-1 on Mint 21.
+    in_box sh -c 'command -v pkaction || apt-get -qq install -y polkitd || apt-get -qq install -y policykit-1' >/dev/null
     in_box systemctl enable --now cron atd ssh >/dev/null 2>&1 || true
 fi
 

@@ -32,6 +32,7 @@ motd	T1037	motd	^/etc/update-motd\.d/	unpackaged	9999	-
 network-manager	T1546	network_dispatcher	/NetworkManager/dispatcher\.d/	unpackaged	9999	-
 package-manager	T1546.016	pkg_hook	^/(etc/apt/|etc/dnf/|etc/yum/|usr/lib)	unpackaged	9999	-
 pam	T1556.003	pam	^/etc/pam\.(d/|conf$)	unpackaged|conffile-modified|packaged-modified	9999	-
+polkit	T1556	polkit_rule	^/etc/polkit-1/(rules\.d/|localauthority/)	unpackaged	-	a rule or .pkla section that answers yes; it grants rather than runs, so carries no payload
 rc-local	T1037.004	rc_local	^/etc/(rc\.d/)?rc\.local$	unpackaged	9999	-
 shell-profile	T1546.004	shell_profile	(^/etc/profile$|/\.bash_profile$)	unpackaged|conffile-modified	9999	-
 ssh-key	T1098.004	ssh_authorized_key	/\.ssh/authorized_keys2?$	unpackaged	-	-
@@ -50,7 +51,6 @@ bind-shell	T1059.004	OUT_OF_SCOPE	-	-	-	§1: a process running now, which surviv
 reverse-shell	T1059.004	OUT_OF_SCOPE	-	-	-	§1: a process running now, which survives nothing
 grub	T1542	OUT_OF_SCOPE	-	-	-	§5 defers GRUB: pre-OS, needs image parsing
 initramfs	T1542	OUT_OF_SCOPE	-	-	-	§5 defers initramfs: pre-OS, needs image parsing
-polkit	T1556	OUT_OF_SCOPE	-	-	-	§5 defers Polkit rules
 rootkit	T1014	OUT_OF_SCOPE	-	-	-	§2: a module that hides itself defeats userspace enumeration by construction
 web-shell	T1505.003	OUT_OF_SCOPE	-	-	-	§5 defers web shells: finding one needs content heuristics
 malicious-container	T1610	OUT_OF_SCOPE	-	-	-	§5 defers container runtimes

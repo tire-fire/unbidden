@@ -97,6 +97,7 @@ plant_args() {
         malicious-package) echo "$DIAL $PKG_FLAG" ;;
         package-manager)   echo "$DIAL $PM_FLAG" ;;
         pam)               echo "--pam-exec --backdoor $DIAL" ;;
+        polkit)            echo "" ;;
         ssh-key)           echo "--default" ;;
         sudoers)           echo "--username root" ;;
         suid)              echo "--default" ;;
