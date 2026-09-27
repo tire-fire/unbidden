@@ -112,6 +112,62 @@ fn autostart(cx: &mut Ctx) -> Vec<Entry> {
             out.push(e);
         }
     }
+
+    // gnome-session also reads the data directories' gnome/autostart
+    // (gnome-session 46, gsm-util.c), after the user's and before
+    // /etc/xdg's; no other session does.
+    for dir in ["usr/local/share/gnome/autostart", "usr/share/gnome/autostart"] {
+        for ent in cx.dir(dir) {
+            if !is_desktop(&ent.name) {
+                continue;
+            }
+            let rel = Path::new(dir).join(&ent.name);
+            let Some(mut e) = desktop_file(cx, &rel, &ent.name, None) else { continue };
+            e.note("desktop_session", "GNOME");
+            out.push(e);
+        }
+    }
+
+    // Plasma (5.27 and 6, startplasma.cpp and plasma-shutdown): the files
+    // in ~/.config/autostart-scripts are made into autostart entries at the
+    // next login and so run; every file in each plasma-workspace/shutdown
+    // directory runs at logout. Both skip what Plasma takes for a backup.
+    let backup = |n: &[u8]| {
+        n.ends_with(b"~") || n.ends_with(b".bak") || (n.len() > 1 && ((n[0] == b'%' && n.ends_with(b"%")) || (n[0] == b'#' && n.ends_with(b"#"))))
+    };
+    let mut plasma: Vec<(PathBuf, Option<String>, &str)> = vec![(PathBuf::from("etc/xdg/plasma-workspace/shutdown"), None, "shutdown")];
+    for u in users {
+        plasma.push((u.in_home(".config/autostart-scripts"), Some(u.name.clone()), "autostart-scripts"));
+        plasma.push((u.in_home(".config/plasma-workspace/shutdown"), Some(u.name.clone()), "shutdown"));
+    }
+    for (dir, user, what) in plasma {
+        if !seen.insert(dir.clone()) {
+            continue;
+        }
+        for ent in cx.dir(&dir) {
+            if ent.is_dir || backup(ent.name.as_bytes()) {
+                continue;
+            }
+            let rel = dir.join(&ent.name);
+            let mut e = cx.entry(Kind::XdgAutostart, &rel, ent.name.to_string_lossy().into_owned());
+            name_from_os(&mut e, &ent.name);
+            e.trigger = Trigger::Login;
+            e.principal = user.clone();
+            e.target_path = Some(cx.root.abs(&rel));
+            e.note("desktop_session", "KDE Plasma");
+            e.enabled = Enablement::Enabled;
+            if what == "shutdown" {
+                e.note("runs", "at logout");
+                if e.mode & 0o111 == 0 {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", "not executable");
+                }
+            } else {
+                e.note("runs", "made an autostart entry at the next Plasma login");
+            }
+            out.push(e);
+        }
+    }
     out
 }
 
@@ -1334,6 +1390,29 @@ mod tests {
         assert_eq!(session.raw.get("overrides"), Some(&system.source.to_string_lossy().into_owned()));
         assert_eq!(system.raw.get("overridden_by"), Some(&session.source.to_string_lossy().into_owned()));
         assert_eq!(by_name(&entries, Kind::XdgAutostart, "lx.desktop")[0].raw["desktop_session"], "Lubuntu");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn gnome_and_plasma_session_files_are_read_where_each_session_reads_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tree("kde");
+        put(&dir, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/bash\n");
+        put(&dir, "usr/share/gnome/autostart/tracker.desktop", b"[Desktop Entry]\nType=Application\nExec=/usr/bin/tracker\n");
+        put(&dir, "home/alice/.config/autostart-scripts/beacon.sh", b"#!/bin/sh\n/tmp/b &\n");
+        put(&dir, "home/alice/.config/autostart-scripts/beacon.sh~", b"#!/bin/sh\n");
+        put(&dir, "home/alice/.config/plasma-workspace/shutdown/wipe", b"#!/bin/sh\n");
+        std::fs::set_permissions(dir.join("home/alice/.config/plasma-workspace/shutdown/wipe"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        put(&dir, "etc/xdg/plasma-workspace/shutdown/inert", b"#!/bin/sh\n");
+        std::fs::set_permissions(dir.join("etc/xdg/plasma-workspace/shutdown/inert"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (entries, _) = run(&dir);
+        let get = |name: &str| entries.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no {name}"));
+        assert_eq!(get("tracker.desktop").raw["desktop_session"], "GNOME");
+        let b = get("beacon.sh");
+        assert_eq!((b.enabled, b.principal.as_deref()), (Enablement::Enabled, Some("alice")));
+        assert!(!entries.iter().any(|e| e.name == "beacon.sh~"), "Plasma skips a backup name");
+        assert_eq!(get("wipe").raw["runs"], "at logout");
+        assert_eq!(get("inert").enabled, Enablement::Disabled);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

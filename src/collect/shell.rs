@@ -180,6 +180,7 @@ impl Collector for Shell {
         }
 
         x_session(cx, &mut seen, &mut out);
+        plasma_env(cx, &mut seen, &mut out);
         preload(cx, &mut out);
         library_dirs(cx, &mut out);
         out
@@ -264,6 +265,27 @@ fn x_session(cx: &mut Ctx, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<Entry>) {
                 (false, _) => None,
             };
             add(cx, &rel, Some(u), "the X session, as the session itself", off, out);
+        }
+    }
+}
+
+/// Plasma (5.27 and 6, startplasma.cpp) sources every config location's
+/// plasma-workspace/env/*.sh at the start of each session, X11 or Wayland:
+/// /etc/xdg's first, the user's last, each directory in name order.
+fn plasma_env(cx: &mut Ctx, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<Entry>) {
+    let mut dirs: Vec<(PathBuf, Option<&User>)> = vec![(PathBuf::from("etc/xdg/plasma-workspace/env"), None)];
+    let users = cx.users;
+    dirs.extend(users.iter().map(|u| (u.in_home(".config/plasma-workspace/env"), Some(u))));
+    for (dir, user) in dirs {
+        let mut names: Vec<_> =
+            cx.dir(&dir).into_iter().filter(|e| !e.is_dir && e.name.as_encoded_bytes().ends_with(b".sh")).map(|e| e.name).collect();
+        names.sort();
+        for n in names {
+            let at = out.len();
+            profile(cx, &dir.join(n), user, Syntax::Shell, seen, out);
+            if let Some(e) = out.get_mut(at) {
+                e.note("sourced_by", "startplasma, at every Plasma login");
+            }
         }
     }
 }
@@ -1245,5 +1267,25 @@ mod tests {
         assert_eq!(state(&s, "home/alice/.xsession", &d), Enablement::Disabled, "not executable");
         assert_eq!(state(&s, "home/alice/.Xclients", &d), Enablement::NotApplicable, "the executable one is used");
         std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn plasma_sources_its_env_scripts_at_every_login() {
+        let d = tmpdir("plasma-env");
+        let put = |rel: &str, body: &[u8]| {
+            let p = d.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        };
+        put("etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/bash\n");
+        put("home/alice/.config/plasma-workspace/env/agent.sh", b"export LD_PRELOAD=/home/alice/.x.so\n");
+        put("home/alice/.config/plasma-workspace/env/notes.txt", b"export NOT=1\n");
+        put("etc/xdg/plasma-workspace/env/sys.sh", b"export A=1\n");
+        let s = run(&d);
+        let env: Vec<&Entry> = s.entries.iter().filter(|e| e.raw.get("sourced_by").is_some_and(|b| b.starts_with("startplasma"))).collect();
+        assert_eq!(env.len(), 2, "only *.sh is sourced");
+        let agent = env.iter().find(|e| e.principal.as_deref() == Some("alice")).unwrap();
+        assert_eq!(agent.raw["env.LD_PRELOAD"], "/home/alice/.x.so");
+        fs::remove_dir_all(&d).unwrap();
     }
 }
