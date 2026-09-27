@@ -87,6 +87,7 @@ str_enum!(Kind {
     Doas => "doas",
     SshClient => "ssh_client",
     CloudInit => "cloud_init",
+    SystemdHook => "systemd_hook",
 });
 
 str_enum!(Trigger {
@@ -97,6 +98,7 @@ str_enum!(Trigger {
     DeviceEvent => "device-event",
     NetworkEvent => "network-event",
     PackageOp => "package-op",
+    PowerEvent => "power-event",
     Always => "always",
 });
 

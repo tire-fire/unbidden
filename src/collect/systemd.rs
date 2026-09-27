@@ -227,6 +227,8 @@ impl Collector for Systemd {
 
         let mut out = w.entries(cx);
         out.extend(generators(cx, &mut seen));
+        out.extend(power_hooks(cx));
+        out.extend(manager_environment(cx));
         out.extend(tmpfiles(cx));
         out.extend(presets(cx, &PRESET_PATHS, &SYSTEM_PATHS, "system"));
         out.extend(presets(cx, &USER_PRESET_PATHS, &USER_PATHS, "user"));
@@ -541,6 +543,9 @@ fn generators(cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>) -> Vec<Entry> {
             if ent.is_dir {
                 continue;
             }
+            if hidden_or_backup(&ent.name) {
+                continue;
+            }
             let rel = Path::new(dir).join(&ent.name);
             // A generator runs only if it is executable. A dangling link is
             // kept: what it points at is enrichment's problem, not a reason to
@@ -570,6 +575,164 @@ fn generators(cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>) -> Vec<Entry> {
         }
     }
     out
+}
+
+/// systemd's hidden_or_backup_file: a name it never runs or reads from a
+/// directory of executables or drop-ins.
+fn hidden_or_backup(name: &std::ffi::OsStr) -> bool {
+    let name = name.as_encoded_bytes();
+    const SUFFIXES: [&[u8]; 17] = [
+        b"rpmnew", b"rpmsave", b"rpmorig", b"dpkg-old", b"dpkg-new", b"dpkg-tmp", b"dpkg-dist", b"dpkg-bak",
+        b"dpkg-backup", b"dpkg-remove", b"ucf-new", b"ucf-old", b"ucf-dist", b"swp", b"bak", b"old", b"new",
+    ];
+    name.starts_with(b".")
+        || matches!(name, b"lost+found" | b"aquota.user" | b"aquota.group")
+        || name.ends_with(b"~")
+        || name.iter().rposition(|b| *b == b'.').is_some_and(|dot| SUFFIXES.contains(&&name[dot + 1..]))
+}
+
+/// The one directory each of systemd-sleep and systemd-shutdown runs every
+/// executable in, as root: before suspend or hibernation and after resume,
+/// with `pre` or `post`; and at the very end of shutdown, after every
+/// service has stopped, with `poweroff`, `reboot`, `halt` or `kexec`. The
+/// same in systemd 249 through 257. An empty file or a link to /dev/null is
+/// masked; a name systemd treats as hidden or a backup is never run.
+const POWER_HOOK_DIRS: [(&str, &str); 4] = [
+    ("usr/lib/systemd/system-sleep", "sleep"),
+    ("lib/systemd/system-sleep", "sleep"),
+    ("usr/lib/systemd/system-shutdown", "shutdown"),
+    ("lib/systemd/system-shutdown", "shutdown"),
+];
+
+fn power_hooks(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();
+    for (dir, hook) in POWER_HOOK_DIRS {
+        match cx.root.dir_identity(dir) {
+            Ok(id) if seen.insert(id) => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                cx.note_failed(dir, &e);
+                continue;
+            }
+        }
+        let mut ents = cx.dir(dir);
+        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        for ent in ents {
+            if ent.is_dir || hidden_or_backup(&ent.name) {
+                continue;
+            }
+            let rel = Path::new(dir).join(&ent.name);
+            let meta = cx.root.stat_follow(&rel).ok();
+            if meta.as_ref().is_some_and(|m| !m.is_file) && !cx.root.read_link(&rel).is_ok_and(|t| t == Path::new("/dev/null")) {
+                continue;
+            }
+            let abs = cx.root.abs(&rel);
+            let mut e = cx.entry(Kind::SystemdHook, &rel, format!("{hook}:{}", ent.name.to_string_lossy()));
+            name_from_os(&mut e, &ent.name);
+            e.trigger = Trigger::PowerEvent;
+            e.principal = Some("root".into());
+            e.note("hook", hook);
+            e.command = Some(abs.clone().into_os_string().into_vec());
+            e.target_path = Some(abs);
+            e.enabled = match &meta {
+                _ if cx.root.read_link(&rel).is_ok_and(|t| t == Path::new("/dev/null")) => Enablement::Masked,
+                Some(m) if m.size == 0 => Enablement::Masked,
+                Some(m) if m.mode & 0o111 == 0 => {
+                    e.note("not_run", "not executable");
+                    Enablement::Disabled
+                }
+                _ => Enablement::Enabled,
+            };
+            out.push(e);
+        }
+    }
+    out
+}
+
+/// The system manager's configuration: `DefaultEnvironment=` sets variables
+/// for every service it starts, and `ManagerEnvironment=` for the manager
+/// itself and its generators, so an LD_PRELOAD there reaches all of them.
+/// Read from system.conf and its drop-ins the way systemd reads them: the
+/// drop-ins in system.conf.d under /etc, /run, /usr/local/lib and /usr/lib,
+/// a same-named one in an earlier directory replacing a later one, applied
+/// after the main file. The main file is /etc/systemd/system.conf up to
+/// systemd 255; from 256 the first of the four directories to hold one. The
+/// user manager reads user.conf the same way. One entry per assignment line.
+fn manager_environment(cx: &mut Ctx) -> Vec<Entry> {
+    const CONF_DIRS: [&str; 4] = ["etc/systemd", "run/systemd", "usr/local/lib/systemd", "usr/lib/systemd"];
+    let version = systemd_version(cx);
+    let mut out = Vec::new();
+    for (file, scope) in [("system.conf", "system"), ("user.conf", "user")] {
+        // The main files in search order, and whether systemd reads each.
+        let mut main_read = false;
+        let mut files: Vec<(PathBuf, Option<String>)> = Vec::new();
+        for (i, dir) in CONF_DIRS.iter().enumerate() {
+            let rel = Path::new(dir).join(file);
+            if !cx.root.exists(&rel) {
+                continue;
+            }
+            let why_not = if main_read {
+                Some("an earlier main file is read instead".to_string())
+            } else if i > 0 {
+                match version {
+                    Some(v) if v >= 256 => None,
+                    Some(v) => Some(format!("systemd {v} reads only /etc/systemd/{file}")),
+                    None => Some("read from systemd 256 on; the version here is unknown".to_string()),
+                }
+            } else {
+                None
+            };
+            main_read |= why_not.is_none();
+            files.push((rel, why_not));
+        }
+        let dropin_dirs: Vec<String> = CONF_DIRS.iter().map(|d| format!("{d}/{file}.d")).collect();
+        let dirs: Vec<&str> = dropin_dirs.iter().map(String::as_str).collect();
+        for (rel, shadowed_by) in replaceable(cx, &dirs, ".conf") {
+            let why = shadowed_by.map(|by| format!("replaced by /{}", by.display()));
+            files.push((rel, why));
+        }
+        for (rel, why_not) in files {
+            let Some(bytes) = read_regular(cx, &rel, crate::root::READ_CAP) else { continue };
+            for d in parse_unit(&bytes) {
+                if d.section != "Manager" || !matches!(d.key.as_str(), "DefaultEnvironment" | "ManagerEnvironment") {
+                    continue;
+                }
+                let name = format!("{}:{}", d.key, String::from_utf8_lossy(&d.value));
+                let mut e = cx.entry(Kind::SystemdHook, &rel, name);
+                e.trigger = Trigger::Boot;
+                e.note("hook", d.key.clone());
+                e.note("scope", scope);
+                if scope == "system" {
+                    e.principal = Some("root".into());
+                }
+                for (k, v) in split_env(&d.value) {
+                    e.note(&format!("env.{k}"), v);
+                }
+                e.enabled = Enablement::Enabled;
+                if let Some(why) = &why_not {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_read", why.clone());
+                }
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
+/// systemd's major version, from the name of the shared library every one
+/// of its binaries links: libsystemd-shared-252.so, or on Fedora
+/// libsystemd-shared-257.9-1.fc42.so.
+fn systemd_version(cx: &mut Ctx) -> Option<u32> {
+    ["usr/lib/systemd", "usr/lib64/systemd", "lib/systemd"].iter().find_map(|dir| {
+        cx.dir(dir).into_iter().find_map(|e| {
+            let name = e.name.to_str()?.strip_prefix("libsystemd-shared-")?;
+            let digits: String = name.chars().take_while(char::is_ascii_digit).collect();
+            digits.parse().ok()
+        })
+    })
 }
 
 // ---------------------------------------------------------------- unit files
@@ -1150,6 +1313,77 @@ mod tests {
     }
 
     const VENDOR: &[u8] = b"[Unit]\nDescription=v\n[Service]\nExecStart=/usr/sbin/sshd -D\n[Install]\nWantedBy=multi-user.target\n";
+
+    #[test]
+    fn sleep_and_shutdown_hooks_run_as_systemd_runs_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tree("power");
+        let exe = |dir: &Path, rel: &str, body: &[u8], mode: u32| {
+            write(dir, rel, body);
+            std::fs::set_permissions(dir.join(rel), std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        exe(&dir, "usr/lib/systemd/system-sleep/50-beacon", b"#!/bin/sh\n", 0o755);
+        exe(&dir, "usr/lib/systemd/system-sleep/inert", b"#!/bin/sh\n", 0o644);
+        exe(&dir, "usr/lib/systemd/system-sleep/old.dpkg-old", b"#!/bin/sh\n", 0o755);
+        exe(&dir, "usr/lib/systemd/system-sleep/.hidden", b"#!/bin/sh\n", 0o755);
+        exe(&dir, "usr/lib/systemd/system-sleep/emptied", b"", 0o755);
+        exe(&dir, "usr/lib/systemd/system-shutdown/wipe", b"#!/bin/sh\n", 0o755);
+        link(&dir, "/dev/null", "usr/lib/systemd/system-shutdown/masked");
+        std::os::unix::fs::symlink("usr/lib", dir.join("lib")).unwrap();
+        let s = scan(&dir);
+        let mut names: Vec<(&str, Enablement)> =
+            s.entries.iter().filter(|e| e.kind == Kind::SystemdHook).map(|e| (e.name.as_str(), e.enabled)).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                ("shutdown:masked", Enablement::Masked),
+                ("shutdown:wipe", Enablement::Enabled),
+                ("sleep:50-beacon", Enablement::Enabled),
+                ("sleep:emptied", Enablement::Masked),
+                ("sleep:inert", Enablement::Disabled),
+            ],
+            "hidden and backup names never run; /lib is /usr/lib, walked once"
+        );
+        let beacon = one(&s, "sleep:50-beacon");
+        assert_eq!((beacon.trigger, beacon.principal.as_deref()), (Trigger::PowerEvent, Some("root")));
+        assert_eq!(beacon.target_path, Some(dir.join("usr/lib/systemd/system-sleep/50-beacon")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn default_environment_is_read_from_the_files_systemd_reads() {
+        let dir = tree("manager-env");
+        write(&dir, "usr/lib/systemd/libsystemd-shared-255.so", b"");
+        write(&dir, "etc/systemd/system.conf", b"[Manager]\n#DefaultEnvironment=A=commented\nDefaultEnvironment=\"LD_PRELOAD=/tmp/x.so\" LANG=C\n");
+        write(&dir, "usr/lib/systemd/system.conf", b"[Manager]\nDefaultEnvironment=VENDOR=1\n");
+        write(&dir, "usr/lib/systemd/system.conf.d/10-v.conf", b"[Manager]\nManagerEnvironment=V=1\n");
+        write(&dir, "etc/systemd/system.conf.d/10-v.conf", b"[Manager]\nDefaultEnvironment=E=1\n");
+        write(&dir, "etc/systemd/user.conf", b"[Manager]\nDefaultEnvironment=PERL5OPT=-Mhook\n[Other]\nDefaultEnvironment=NOT=1\n");
+        let s = scan(&dir);
+        let hooks: Vec<&Entry> = s.entries.iter().filter(|e| e.kind == Kind::SystemdHook).collect();
+        let by = |name: &str| *hooks.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no {name}"));
+        let main = by("DefaultEnvironment:\"LD_PRELOAD=/tmp/x.so\" LANG=C");
+        assert_eq!((main.enabled, main.raw["env.LD_PRELOAD"].as_str(), main.raw["env.LANG"].as_str()), (Enablement::Enabled, "/tmp/x.so", "C"));
+        let vendor = by("DefaultEnvironment:VENDOR=1");
+        assert_eq!(vendor.enabled, Enablement::Disabled);
+        assert_eq!(vendor.raw["not_read"], "an earlier main file is read instead");
+        assert_eq!(by("ManagerEnvironment:V=1").raw["not_read"], "replaced by /etc/systemd/system.conf.d/10-v.conf");
+        assert_eq!(by("DefaultEnvironment:E=1").enabled, Enablement::Enabled);
+        assert_eq!(by("DefaultEnvironment:PERL5OPT=-Mhook").raw["scope"], "user");
+        assert_eq!(hooks.len(), 5, "a commented line and another section are not settings");
+
+        // Before 256 a main file outside /etc is never read, earlier one or not.
+        std::fs::remove_file(dir.join("etc/systemd/system.conf")).unwrap();
+        let s = scan(&dir);
+        let vendor = s.entries.iter().find(|e| e.name == "DefaultEnvironment:VENDOR=1").unwrap();
+        assert_eq!(vendor.raw["not_read"], "systemd 255 reads only /etc/systemd/system.conf");
+        std::fs::remove_file(dir.join("usr/lib/systemd/libsystemd-shared-255.so")).unwrap();
+        write(&dir, "usr/lib/systemd/libsystemd-shared-257.9-1.fc42.so", b"");
+        let s = scan(&dir);
+        assert_eq!(s.entries.iter().find(|e| e.name == "DefaultEnvironment:VENDOR=1").unwrap().enabled, Enablement::Enabled);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn merged_usr_reports_each_vendor_unit_once() {
