@@ -67,6 +67,25 @@
 //! and `start`, `stop`, `restart` and `exec`, each a quoted string split on
 //! white space and executed without a shell. The grammar is read loosely,
 //! by those keywords alone.
+//!
+//! Zabbix agent and agent 2 (6.0 to 7.4; cfg.c, agent_conf.c, the Go conf
+//! package): /etc/zabbix/zabbix_agentd.conf and zabbix_agent2.conf, of
+//! `Parameter=value` lines, `#` comment lines, each `Include` read in its
+//! place: a file, every regular file of a directory, or a directory's files
+//! matching a pattern in the last component; a relative path is taken from
+//! the including file's directory, ten levels deep. `UserParameter=key,cmd`
+//! runs `cmd` through `/bin/sh -c`, as `User` (zabbix) unless `AllowRoot`,
+//! whenever the server asks for `key`. `AllowKey=system.run[...]` (and the
+//! older `EnableRemoteCommands=1`) lets the server send any command to run;
+//! a `DenyKey` for it earlier in the file refuses it. Agent 2 starts every
+//! `Plugins.<name>.System.Path` as an external plugin.
+//!
+//! NRPE 4.1 (nrpe.c): /etc/nagios/nrpe.cfg, lines of `name=value`, `#`
+//! comments; `include` and `include_file` read a file, `include_dir` every
+//! regular `*.cfg` file in a directory and its subdirectories not starting
+//! `.`. `command[name]=line` runs `line`, after any `command_prefix`,
+//! through popen as `nrpe_user`, when a client asks for `name`; with
+//! `dont_blame_nrpe=1` the client supplies its `$ARGn$` values.
 
 use std::path::{Path, PathBuf};
 
@@ -93,6 +112,8 @@ impl Collector for Agents {
         facter(cx, &mut out);
         munin(cx, &mut out);
         monit(cx, &mut out);
+        zabbix(cx, &mut out);
+        nrpe(cx, &mut out);
         crate::entry::dedup_ids(&mut out);
         out
     }
@@ -581,6 +602,192 @@ fn monit(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
+/// A configuration's `name=value` lines, each include read in its place,
+/// with the file each came from; `include` says which names include what.
+fn eq_lines(
+    cx: &mut Ctx,
+    rel: &Path,
+    depth: usize,
+    include: &dyn Fn(&mut Ctx, &Path, &str, &str) -> Option<Vec<PathBuf>>,
+    out: &mut Vec<(PathBuf, String, String)>,
+) {
+    if depth > 10 {
+        return;
+    }
+    let Some(bytes) = cx.read_capped(rel, CAP) else { return };
+    for line in String::from_utf8_lossy(&bytes).lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let (k, v) = (k.trim_end(), v.trim_start());
+        match include(cx, rel, k, v) {
+            Some(targets) => {
+                for t in targets {
+                    eq_lines(cx, &t, depth + 1, include, out);
+                }
+            }
+            None => out.push((rel.to_path_buf(), k.to_string(), v.to_string())),
+        }
+    }
+}
+
+/// What a Zabbix `Include` names: a file, a directory's regular files, or
+/// those matching the pattern in its last component.
+fn zabbix_include(cx: &mut Ctx, from: &Path, key: &str, value: &str) -> Option<Vec<PathBuf>> {
+    if key != "Include" {
+        return None;
+    }
+    let base = from.parent().unwrap_or(Path::new(""));
+    let rel = super::include_rel(base, value.trim_end_matches('/').as_bytes());
+    let mut files = if cx.root.stat_follow(&rel).is_ok_and(|m| m.is_dir) {
+        let mut names: Vec<_> = cx.dir(&rel).into_iter().map(|e| rel.join(e.name)).collect();
+        names.sort();
+        names
+    } else {
+        super::expand_glob(cx, &rel)
+    };
+    files.retain(|f| cx.root.stat_follow(f).is_ok_and(|m| m.is_file));
+    Some(files)
+}
+
+fn zabbix(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    for (agent, conf, bin) in [("agentd", "etc/zabbix/zabbix_agentd.conf", "usr/sbin/zabbix_agentd"), ("agent2", "etc/zabbix/zabbix_agent2.conf", "usr/sbin/zabbix_agent2")] {
+        let installed = cx.root.exists(bin);
+        let mut lines = Vec::new();
+        eq_lines(cx, Path::new(conf), 0, &zabbix_include, &mut lines);
+        let last = |k: &str| lines.iter().rev().find(|l| l.1 == k).map(|l| l.2.clone());
+        let user = last("User").unwrap_or_else(|| "zabbix".into());
+        let allow_root = last("AllowRoot").is_some_and(|v| v == "1");
+        let dir = last("UserParameterDir");
+        let mut denied = false;
+        for (rel, k, v) in &lines {
+            let mut e = match k.as_str() {
+                "UserParameter" => {
+                    let Some((key, cmd)) = v.split_once(',') else { continue };
+                    let mut e = cx.entry(Kind::MonitorPlugin, rel, format!("zabbix:{agent}:{key}"));
+                    e.trigger = Trigger::Schedule;
+                    e.command = Some(cmd.as_bytes().to_vec());
+                    e.note("item_key", key);
+                    if let Some(d) = &dir {
+                        e.note("working_directory", d.clone());
+                    }
+                    e
+                }
+                "DenyKey" if v.starts_with("system.run") => {
+                    denied = true;
+                    continue;
+                }
+                "AllowKey" if v.starts_with("system.run") => remote(cx, rel, agent, v, denied),
+                "EnableRemoteCommands" if v == "1" => remote(cx, rel, agent, v, denied),
+                _ if agent == "agent2" && k.starts_with("Plugins.") && k.ends_with(".System.Path") => {
+                    let name = &k["Plugins.".len()..k.len() - ".System.Path".len()];
+                    let mut e = cx.entry(Kind::MonitorPlugin, rel, format!("zabbix:agent2:plugin:{name}"));
+                    e.trigger = Trigger::Always;
+                    e.command = Some(v.as_bytes().to_vec());
+                    e.target_path = Some(PathBuf::from(v));
+                    if !v.starts_with('/') {
+                        e.enabled = Enablement::Disabled;
+                        e.note("not_run", "agent 2 refuses a plugin path that is not absolute");
+                    }
+                    e
+                }
+                _ => continue,
+            };
+            e.principal = Some(user.clone());
+            e.note("run_by", format!("zabbix_{agent}"));
+            if allow_root {
+                e.note("allow_root", "1: runs as root when the agent is started as root");
+            }
+            if e.enabled == Enablement::Unknown {
+                e.enabled = Enablement::Enabled;
+            }
+            if e.enabled == Enablement::Enabled && !installed {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", format!("zabbix_{agent} is not installed"));
+            }
+            out.push(e);
+        }
+    }
+}
+
+/// The server's licence to send any command.
+fn remote(cx: &mut Ctx, rel: &Path, agent: &str, value: &str, denied: bool) -> Entry {
+    let mut e = cx.entry(Kind::MonitorPlugin, rel, format!("zabbix:{agent}:system.run"));
+    e.trigger = Trigger::Schedule;
+    e.note("allows", value);
+    e.note("target_unverifiable", "whatever command the Zabbix server sends");
+    if denied {
+        e.enabled = Enablement::Disabled;
+        e.note("not_run", "an earlier DenyKey refuses system.run");
+    }
+    e
+}
+
+/// What an NRPE include names: `include_dir` recursively, its regular
+/// `*.cfg` files and its subdirectories not starting `.`.
+fn nrpe_include(cx: &mut Ctx, _from: &Path, key: &str, value: &str) -> Option<Vec<PathBuf>> {
+    fn walk(cx: &mut Ctx, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 10 {
+            return;
+        }
+        let mut names: Vec<_> = cx.dir(dir).into_iter().map(|e| e.name).collect();
+        names.sort();
+        for n in names {
+            let p = dir.join(&n);
+            let name = n.as_encoded_bytes();
+            match cx.root.stat_follow(&p) {
+                Ok(m) if m.is_file && name.len() > 4 && name.ends_with(b".cfg") => out.push(p),
+                Ok(m) if m.is_dir && !name.starts_with(b".") => walk(cx, &p, depth + 1, out),
+                _ => {}
+            }
+        }
+    }
+    let rel = super::include_rel(Path::new(""), value.trim_end_matches('/').as_bytes());
+    match key {
+        "include" | "include_file" => Some(vec![rel]),
+        "include_dir" => {
+            let mut out = Vec::new();
+            walk(cx, &rel, 0, &mut out);
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
+fn nrpe(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let installed = cx.root.exists("usr/sbin/nrpe");
+    let mut lines = Vec::new();
+    eq_lines(cx, Path::new("etc/nagios/nrpe.cfg"), 0, &nrpe_include, &mut lines);
+    let last = |k: &str| lines.iter().rev().find(|l| l.1 == k).map(|l| l.2.clone());
+    let user = last("nrpe_user").unwrap_or_else(|| "nagios".into());
+    let prefix = last("command_prefix");
+    let arguments = last("dont_blame_nrpe").is_some_and(|v| v.trim().parse::<i64>() == Ok(1));
+    for (rel, k, v) in &lines {
+        let Some(name) = k.split_once('[').and_then(|(_, r)| r.split(']').next()).filter(|_| k.contains("command[")) else { continue };
+        // strtok on `=` skips a run of them.
+        let line = v.trim_start_matches('=');
+        let mut e = cx.entry(Kind::MonitorPlugin, rel, format!("nrpe:{name}"));
+        e.trigger = Trigger::Schedule;
+        e.enabled = Enablement::Enabled;
+        e.principal = Some(user.clone());
+        e.note("run_by", "nrpe");
+        e.command = Some(match &prefix {
+            Some(p) => format!("{p} {line}"),
+            None => line.to_string(),
+        }.into_bytes());
+        if arguments {
+            e.note("arguments", "dont_blame_nrpe=1: the client supplies $ARGn$");
+        }
+        if !installed {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", "nrpe is not installed");
+        }
+        out.push(e);
+    }
+}
+
 /// One collectd statement: `Key values`, `<Key values>` or `</Key>`.
 #[derive(Debug, PartialEq)]
 enum Stmt {
@@ -1021,6 +1228,60 @@ mod tests {
                 ("monit:nginx:stop", "www", "/usr/sbin/service nginx stop"),
             ]
         );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn zabbix_runs_user_parameters_and_what_the_server_may_send() {
+        let d = fixture("zabbix");
+        put(&d, "usr/sbin/zabbix_agentd", b"");
+        put(&d, "etc/zabbix/zabbix_agentd.conf", b"# UserParameter=never,/tmp/x\nUser=zbx\nInclude=/etc/zabbix/zabbix_agentd.conf.d/*.conf\nInclude=extra\n");
+        put(&d, "etc/zabbix/zabbix_agentd.conf.d/a.conf", b"UserParameter=mysql.ping[*],  mysqladmin -u$1 ping | grep -c alive\nDenyKey=system.run[rm *]\nAllowKey=system.run[*]\n");
+        put(&d, "etc/zabbix/zabbix_agentd.conf.d/b.txt", b"UserParameter=no,/tmp/no\n");
+        put(&d, "etc/zabbix/extra/one", b"UserParameter = x , /opt/x\n");
+        put(&d, "etc/zabbix/zabbix_agent2.conf", b"Include=./zabbix_agent2.d/plugins.d/*.conf\n");
+        put(&d, "etc/zabbix/zabbix_agent2.d/plugins.d/m.conf", b"Plugins.Beacon.System.Path=/opt/beacon\nPlugins.Rel.System.Path=rel\n");
+        let s = scan(&d);
+        let got: Vec<(&str, &str, Enablement)> = s
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.command.as_deref().map(|c| std::str::from_utf8(c).unwrap()).unwrap_or("-"), e.enabled))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("zabbix:agentd:x ", " /opt/x", Enablement::Enabled),
+                ("zabbix:agent2:plugin:Beacon", "/opt/beacon", Enablement::Disabled),
+                ("zabbix:agent2:plugin:Rel", "rel", Enablement::Disabled),
+                ("zabbix:agentd:mysql.ping[*]", "  mysqladmin -u$1 ping | grep -c alive", Enablement::Enabled),
+                ("zabbix:agentd:system.run", "-", Enablement::Disabled),
+            ]
+        );
+        assert!(s.entries.iter().filter(|e| e.name.starts_with("zabbix:agentd")).all(|e| e.principal.as_deref() == Some("zbx")));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn nrpe_runs_the_commands_its_configuration_names() {
+        let d = fixture("nrpe");
+        put(&d, "usr/sbin/nrpe", b"");
+        put(&d, "etc/nagios/nrpe.cfg", b"nrpe_user=nagios\ncommand_prefix=/usr/bin/sudo\ncommand[check_users]=/usr/lib/nagios/plugins/check_users -w 5\ninclude_dir=/etc/nagios/nrpe.d/\n");
+        put(&d, "etc/nagios/nrpe.d/local.cfg", b"# command[x]=/tmp/x\ncommand[beacon]==/opt/beacon $ARG1$\ndont_blame_nrpe=1\n");
+        put(&d, "etc/nagios/nrpe.d/sub/deep.cfg", b"command[deep]=/opt/deep\n");
+        put(&d, "etc/nagios/nrpe.d/.hid/h.cfg", b"command[hid]=/opt/h\n");
+        put(&d, "etc/nagios/nrpe.d/notes.txt", b"command[txt]=/opt/t\n");
+        let s = scan(&d);
+        let got: Vec<(&str, &str)> =
+            s.entries.iter().map(|e| (e.name.as_str(), std::str::from_utf8(e.command.as_deref().unwrap()).unwrap())).collect();
+        assert_eq!(
+            got,
+            [
+                ("nrpe:check_users", "/usr/bin/sudo /usr/lib/nagios/plugins/check_users -w 5"),
+                ("nrpe:beacon", "/usr/bin/sudo /opt/beacon $ARG1$"),
+                ("nrpe:deep", "/usr/bin/sudo /opt/deep"),
+            ]
+        );
+        assert!(s.entries.iter().all(|e| e.raw.contains_key("arguments") && e.principal.as_deref() == Some("nagios")));
         std::fs::remove_dir_all(&d).unwrap();
     }
 

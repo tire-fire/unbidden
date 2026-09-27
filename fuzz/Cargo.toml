@@ -577,3 +577,17 @@ path = "fuzz_targets/facter_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "nrpe_cfg"
+path = "fuzz_targets/nrpe_cfg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zabbix_conf"
+path = "fuzz_targets/zabbix_conf.rs"
+test = false
+doc = false
+bench = false
