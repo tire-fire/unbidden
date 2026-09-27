@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::entry::{Enablement, Entry, Kind, Trigger};
+use crate::entry::{Enablement, Entry, Kind, Trigger, hex};
 use crate::scan::{Collector, Ctx};
 
 pub struct Events;
@@ -45,6 +45,8 @@ impl Collector for Events {
         if cx.root.exists("usr/share/apport/apport") {
             apport(cx, &mut out);
         }
+        rsyslog(cx, &mut out);
+        cups(cx, &mut out);
         out
     }
 }
@@ -171,6 +173,159 @@ fn apport(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
+
+// ------------------------------------------------------------- rsyslog ----
+
+/// rsyslog (8.2312): programs it feeds log messages to, from
+/// /etc/rsyslog.conf and what its `$IncludeConfig` and `include(file=...)`
+/// lines name: each `action(type="omprog" binary="...")`, and each legacy
+/// `^program` action. They run as the user `$PrivDropToUser` or
+/// `global(privdrop.user.name=...)` names, root where none is named (Ubuntu
+/// drops to syslog). Off where rsyslogd is not installed.
+fn rsyslog(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let mut texts: Vec<(PathBuf, String)> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    rsyslog_file(cx, Path::new("etc/rsyslog.conf"), 0, &mut seen, &mut texts);
+    let mut user = None;
+    for (_, t) in &texts {
+        for line in t.lines() {
+            let l = line.trim();
+            if let Some(u) = l.strip_prefix("$PrivDropToUser ") {
+                user = Some(u.trim().to_string());
+            }
+            if let Some(i) = l.find("privdrop.user.name") {
+                if let Some(v) = quoted_after(&l[i..]) {
+                    user = Some(v);
+                }
+            }
+        }
+    }
+    let installed = cx.root.exists("usr/sbin/rsyslogd");
+    for (rel, text) in texts {
+        let mut actions: Vec<String> = Vec::new();
+        // action( ... ) blocks, which may span lines; quotes may hold `)`.
+        let bytes = text.as_bytes();
+        let mut i = 0;
+        while let Some(at) = text[i..].find("action(").map(|n| i + n) {
+            let (mut j, mut quote) = (at + 7, None);
+            while j < bytes.len() {
+                match (bytes[j], quote) {
+                    (b'"' | b'\'', None) => quote = Some(bytes[j]),
+                    (c, Some(q)) if c == q => quote = None,
+                    (b')', None) => break,
+                    _ => {}
+                }
+                j += 1;
+            }
+            let params = &text[at + 7..j.min(text.len())];
+            if param(params, "type").is_some_and(|t| t.eq_ignore_ascii_case("omprog")) {
+                if let Some(b) = param(params, "binary") {
+                    actions.push(b);
+                }
+            }
+            i = j.min(text.len());
+            if i <= at {
+                break;
+            }
+        }
+        // A legacy selector line whose action is `^program;template`.
+        for line in text.lines() {
+            let l = line.trim();
+            if l.starts_with('#') || l.starts_with('$') {
+                continue;
+            }
+            if let Some(action) = l.split_whitespace().nth(1).and_then(|a| a.strip_prefix('^')) {
+                actions.push(action.split(';').next().unwrap_or(action).to_string());
+            }
+        }
+        for binary in actions {
+            let mut e = entry(cx, &rel, format!("rsyslog:{}", hex(&blake3::hash(binary.as_bytes()).as_bytes()[..6])), "rsyslog", Trigger::Always);
+            e.principal = Some(user.clone().unwrap_or_else(|| "root".into()));
+            e.note("runs", "for every log message its selector matches");
+            if let Some(first) = binary.split_whitespace().next().filter(|w| w.starts_with('/')) {
+                e.target_path = Some(PathBuf::from(first));
+            }
+            e.command = Some(binary.into_bytes());
+            if !installed {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "rsyslogd is not installed");
+            }
+            out.push(e);
+        }
+    }
+    crate::entry::dedup_ids(out);
+}
+
+fn rsyslog_file(cx: &mut Ctx, rel: &Path, depth: usize, seen: &mut std::collections::BTreeSet<PathBuf>, out: &mut Vec<(PathBuf, String)>) {
+    if depth > 8 || !seen.insert(rel.to_path_buf()) {
+        return;
+    }
+    let Some(bytes) = cx.read_capped(rel, 256 * 1024) else { return };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let mut includes = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        if let Some(g) = l.strip_prefix("$IncludeConfig ") {
+            includes.push(g.trim().to_string());
+        } else if let Some(args) = l.strip_prefix("include(") {
+            if let Some(f) = param(args, "file") {
+                includes.push(f);
+            }
+        }
+    }
+    out.push((rel.to_path_buf(), text));
+    for g in includes {
+        let target = super::include_rel(Path::new("etc"), g.as_bytes());
+        for f in super::expand_glob(cx, &target) {
+            rsyslog_file(cx, &f, depth + 1, seen, out);
+        }
+    }
+}
+
+/// `name="value"` in RainerScript parameters, the name without regard to
+/// case.
+fn param(params: &str, name: &str) -> Option<String> {
+    let lower = params.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find(name).map(|n| from + n) {
+        let before_ok = at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric() && lower.as_bytes()[at - 1] != b'.';
+        let rest = params[at + name.len()..].trim_start();
+        if before_ok && rest.starts_with('=') {
+            return quoted_after(rest);
+        }
+        from = at + name.len();
+    }
+    None
+}
+
+fn quoted_after(s: &str) -> Option<String> {
+    let start = s.find('"')? + 1;
+    let end = s[start..].find('"')? + start;
+    Some(s[start..end].to_string())
+}
+
+// ---------------------------------------------------------------- cups ----
+
+/// CUPS backends (backend(7)): the scheduler runs a backend as root when its
+/// file grants nothing to group or other, and otherwise as its unprivileged
+/// user, whenever a job goes to a queue using it.
+fn cups(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    if !cx.root.exists("usr/sbin/cupsd") {
+        return;
+    }
+    for rel in sorted(cx, Path::new("usr/lib/cups/backend")) {
+        let Ok(meta) = cx.root.stat_follow(&rel) else { continue };
+        if !meta.is_file || meta.mode & 0o111 == 0 {
+            continue;
+        }
+        let name = file_name(&rel);
+        let mut e = entry(cx, &rel, format!("cups:{name}"), "cupsd", Trigger::Always);
+        e.target_path = Some(cx.root.abs(&rel));
+        e.note("runs", "for each print job sent to a queue using it");
+        e.principal = Some(if meta.mode & 0o077 == 0 { "root" } else { "lp" }.into());
+        out.push(e);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,6 +372,37 @@ mod tests {
         assert!(!s.entries.iter().any(|e| e.name == "zed:zed.rc"), "zed.rc is configuration");
         assert_eq!(by("update-ca-certificates:jks-keystore").trigger, Trigger::PackageOp);
         assert_eq!(by("apport:evil.py").raw["loaded_for"], "every crash report");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn rsyslog_programs_and_root_cups_backends_are_found() {
+        let d = std::env::temp_dir().join(format!("unbidden-rsyslog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        put(&d, "usr/sbin/rsyslogd", b"", 0o755);
+        put(&d, "etc/rsyslog.conf", b"module(load=\"omprog\")\n$PrivDropToUser syslog\n$IncludeConfig /etc/rsyslog.d/*.conf\n", 0o644);
+        put(
+            &d,
+            "etc/rsyslog.d/50-exfil.conf",
+            b"*.* action(type=\"omprog\"\n  binary=\"/usr/local/bin/ship --to x\" template=\"t\")\nauth.* ^/opt/legacy;fmt\n",
+            0o644,
+        );
+        put(&d, "usr/sbin/cupsd", b"", 0o755);
+        put(&d, "usr/lib/cups/backend/rootly", b"#!/bin/sh\n", 0o700);
+        put(&d, "usr/lib/cups/backend/ipp", b"", 0o755);
+        let s = scan(&d);
+        let cmds: Vec<(&str, Option<&str>)> = s
+            .entries
+            .iter()
+            .filter(|e| e.raw.get("run_by").is_some_and(|r| r == "rsyslog"))
+            .map(|e| (std::str::from_utf8(e.command.as_deref().unwrap()).unwrap(), e.principal.as_deref()))
+            .collect();
+        assert_eq!(cmds.len(), 2);
+        assert!(cmds.contains(&("/usr/local/bin/ship --to x", Some("syslog"))), "{cmds:?}");
+        assert!(cmds.contains(&("/opt/legacy", Some("syslog"))));
+        let by = |n: &str| s.entries.iter().find(|e| e.name == n).unwrap();
+        assert_eq!(by("cups:rootly").principal.as_deref(), Some("root"));
+        assert_eq!(by("cups:ipp").principal.as_deref(), Some("lp"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

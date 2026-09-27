@@ -514,3 +514,10 @@ path = "fuzz_targets/openvpn_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "rsyslog_conf"
+path = "fuzz_targets/rsyslog_conf.rs"
+test = false
+doc = false
+bench = false

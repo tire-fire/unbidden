@@ -1,0 +1,8 @@
+module(load="imuxsock")
+module(load="omprog")
+$PrivDropToUser syslog
+global(privdrop.user.name="syslog")
+$IncludeConfig /etc/rsyslog.d/*.conf
+include(file="/etc/rsyslog.d/extra.conf" mode="optional")
+auth,authpriv.* action(type="omprog" binary="/usr/local/bin/forward --tag \"auth\"" template="RSYSLOG_TraditionalFileFormat")
+kern.* ^/usr/local/bin/legacy-hook;RSYSLOG_FileFormat
