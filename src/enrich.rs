@@ -1446,6 +1446,13 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
                 e.rekey(&root.rel(&carrier.source));
             }
             let path = Path::new(std::ffi::OsStr::from_bytes(&referenced));
+            // Sourcing a file that is not there runs nothing, and init
+            // scripts routinely source optional defaults after testing for
+            // them. A missing interpreter or exec target is a broken
+            // hand-off and is still reported.
+            if via == "source" && !root.exists(root.rel(path)) {
+                continue;
+            }
             if path.is_absolute() {
                 e.target_path = Some(root.abs(root.rel(path)));
             } else if let Some(found) = resolve_bare_command(root, carrier.kind, &referenced) {
@@ -2332,7 +2339,8 @@ mod tests {
             write(&format!("etc/cron.d/{job}"), b"@daily root x\n");
         }
         write("bin/sh", b"\x7fELF");
-        write("usr/local/bin/backup.sh", b"#!/bin/sh\n. /tmp/stage.sh\nexec /opt/tool --now\n");
+        write("usr/local/bin/backup.sh", b"#!/bin/sh\n. /tmp/stage.sh\n. /etc/default/absent\nexec /opt/tool --now\n");
+        write("tmp/stage.sh", b"x=1\n");
         write("usr/local/bin/report.py", b"#!/usr/bin/env python3 -u\nprint(1)\n");
         write("usr/local/bin/python3", b"\x7fELF");
         write("usr/local/bin/collect", b"#!/opt/python3.11/bin/python\n");
@@ -2390,7 +2398,7 @@ mod tests {
                 ("/tmp/stage.sh", "source"),
                 ("python3", "shebang"),
             ],
-            "a fifo must not be read and a file with no shebang is not a script"
+            "a fifo must not be read, a file with no shebang is not a script, and sourcing what is not there runs nothing"
         );
 
         // The finding: a packaged, unmodified cron file runs a packaged,
@@ -2428,7 +2436,7 @@ mod tests {
         assert_eq!(env.target_path, Some(dir.join("usr/local/bin/python3")));
         assert_eq!(env.raw["target_resolved_from"], "search path");
 
-        assert!(find(&scan, "/tmp/stage.sh").has_flag(Flag::TargetMissing));
+        assert!(find(&scan, "/tmp/stage.sh").has_flag(Flag::Unpackaged), "what the script sources is judged in its own right");
         assert_eq!(find(&scan, "/opt/tool").target_path, Some(dir.join("opt/tool")));
         assert!(
             find(&scan, "/opt/\u{fffd}\u{fffd}/py").has_flag(Flag::EncodingAnomaly),
