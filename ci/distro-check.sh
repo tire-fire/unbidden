@@ -348,6 +348,52 @@ SVC
     fi
 fi
 
+# Each mechanism added since, planted as an attacker would plant it, with no
+# package to install: found under its kind, unpackaged, gone once removed.
+# plant_check <file> <kind> <name fragment>  (the file's content is on stdin)
+plant_check() {
+    local file="$1" kind="$2" frag="$3" json
+    mkdir -p "$(dirname "$file")"; cat > "$file"
+    json=$("$BIN" --json --all | tail -n +2 | grep "\"kind\":\"$kind\"" | grep -F "$frag" || true)
+    rm -f "$file"
+    [ -n "$json" ] || fail "a $kind planted at $file was not reported"
+    case "$json" in
+        *'"unpackaged"'*) note "a $kind planted at $file reports unpackaged" ;;
+        *) fail "the planted $kind at $file is not unpackaged: $json" ;;
+    esac
+    # A counting grep reads all of the output: -q's early exit can SIGPIPE
+    # the scanner, and under pipefail a match would then read as none.
+    if [ "$("$BIN" --json --all | grep -Fc "$file")" -gt 0 ]; then
+        fail "the removed $kind at $file is still reported"
+    fi
+    return 0
+}
+gconvdir=$(ls -d /usr/lib/*/gconv /usr/lib64/gconv 2>/dev/null | head -1)
+if [ -n "$gconvdir" ]; then
+    cp /bin/true "$gconvdir/unbidden-check.so"
+    printf 'module INTERNAL UNBIDDEN// unbidden-check 1\n' | plant_check "$gconvdir/gconv-modules.d/unbidden-check.conf" plugin "gconv:unbidden-check"
+    rm -f "$gconvdir/unbidden-check.so"
+fi
+printf '{"ExtensionInstallForcelist": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;https://example.invalid/u"]}\n' | plant_check /etc/chromium/policies/managed/unbidden-check.json browser_policy "chromium:extension:aaaaaaaa"
+printf 'active = yes\npath = /tmp/unbidden-check-plugin\n' | plant_check /etc/audit/plugins.d/unbidden-check.conf audit_plugin "auditd:unbidden-check.conf"
+printf 'Cmnd_Alias UNBIDDEN = /bin/true, /bin/false\nunbidden-check ALL = (root) NOPASSWD: UNBIDDEN\n' | plant_check /etc/sudoers.d/unbidden-check sudoers '"commands_resolved":"/bin/true, /bin/false"'
+case "$FAMILY" in
+    dpkg) printf 'call system("/tmp/x")\n' | plant_check /etc/vim/vimrc.local program_startup "vim:vimrc.local" ;;
+    rpm)  printf 'call system("/tmp/x")\n' | plant_check /etc/vimrc.local program_startup "vim:vimrc.local" ;;
+esac
+# A member of the group sudo's default rule grants root through.
+grp=$([ "$FAMILY" = rpm ] && echo wheel || echo sudo)
+if getent group "$grp" >/dev/null && command -v useradd >/dev/null; then
+    useradd -M -s /bin/sh -G "$grp" unbidden-check
+    member=$("$BIN" --json --all | tail -n +2 | grep '"kind":"group_member"' | grep -F "\"name\":\"$grp:unbidden-check\"" || true)
+    userdel unbidden-check
+    [ -n "$member" ] || fail "an account added to $grp was not reported as a group member"
+    note "an account added to $grp reports as its member"
+    if [ "$("$BIN" --json --all | grep -Fc "$grp:unbidden-check")" -gt 0 ]; then
+        fail "the removed account is still a member"
+    fi
+fi
+
 # A command carrying terminal control sequences must reach the operator as
 # text. ESC[2K ESC[1A erases the row above; printed raw, it rewrites the
 # table line that reports it.
