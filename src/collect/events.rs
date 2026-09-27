@@ -51,6 +51,10 @@
 //! `#`, `//` and `/* */` comments and `<?include "file"?>`. X2Go: every
 //! readable file in /etc/x2go/x2go_logout.d, which x2go_logout sources from
 //! x2goruncommand, as the session's user, when an X2Go session ends.
+//! libreport (event_config.c): each `EVENT=name [conditions]` rule in
+//! /etc/libreport/events.d/*.conf, whose indented lines that follow are the
+//! shell abrt-handle-event runs, as root under abrtd, when that event fires
+//! for a crash; `#` comments to the end of the line.
 
 use std::path::{Path, PathBuf};
 
@@ -103,6 +107,7 @@ impl Collector for Events {
         if cx.root.exists("usr/bin/x2goruncommand") {
             x2go(cx, &mut out);
         }
+        libreport(cx, &mut out);
         out
     }
 }
@@ -409,6 +414,45 @@ fn kea(cx: &mut Ctx, out: &mut Vec<Entry>) {
                 }
                 out.push(e);
             }
+        }
+    }
+}
+
+fn libreport(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let installed = cx.root.exists("usr/libexec/abrt-handle-event");
+    for rel in sorted(cx, Path::new("etc/libreport/events.d")) {
+        let file = file_name(&rel);
+        if !file.ends_with(".conf") {
+            continue;
+        }
+        let Some(bytes) = cx.read_capped(&rel, 256 * 1024) else { continue };
+        let mut rules: Vec<(String, Vec<String>)> = Vec::new();
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
+            if let Some(head) = line.strip_prefix("EVENT=") {
+                rules.push((head.trim().to_string(), Vec::new()));
+            } else if line.starts_with([' ', '\t']) && !line.trim().is_empty() {
+                if let Some((_, body)) = rules.last_mut() {
+                    body.push(line.trim().to_string());
+                }
+            }
+        }
+        for (i, (head, body)) in rules.into_iter().enumerate() {
+            if body.is_empty() {
+                continue;
+            }
+            let event = head.split_whitespace().next().unwrap_or_default().to_string();
+            let mut e = entry(cx, &rel, format!("abrt:{file}:{event}:{}", i + 1), "abrt-handle-event", Trigger::Always);
+            e.note("event", head);
+            e.note("runs_when", "a crash reaches this event, as root under abrtd");
+            e.command = Some(body.join("\n").into_bytes());
+            if !installed {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "abrt is not installed");
+            }
+            out.push(e);
         }
     }
 }
@@ -802,7 +846,11 @@ mod tests {
         put(&d, "etc/cron-apt/config.d/3-download", b"OPTIONS=-q\n", 0o644);
         put(&d, "usr/bin/x2goruncommand", b"", 0o755);
         put(&d, "etc/x2go/x2go_logout.d/010_userscripts.sh", b"echo bye\n", 0o644);
+        put(&d, "usr/libexec/abrt-handle-event", b"", 0o755);
+        put(&d, "etc/libreport/events.d/evil_event.conf", b"# c\nEVENT=post-create analyzer=CCpp\n    /opt/beacon --crash \\\n        \"$DUMP_DIR\"\nEVENT=notify\n\nEVENT=report_x\n   reporter-x\n", 0o644);
         let s = scan(&d);
+        let abrt: Vec<(&str, &str)> = s.entries.iter().filter(|e| e.name.starts_with("abrt:")).map(|e| (e.name.as_str(), std::str::from_utf8(e.command.as_deref().unwrap()).unwrap())).collect();
+        assert_eq!(abrt, [("abrt:evil_event.conf:post-create:1", "/opt/beacon --crash \\\n\"$DUMP_DIR\""), ("abrt:evil_event.conf:report_x:3", "reporter-x")], "an event with no command runs nothing");
         assert!(s.entries.iter().any(|e| e.name == "x2go:logout:010_userscripts.sh" && e.principal.is_none()));
         let names = |p: &str| s.entries.iter().filter(|e| e.name.starts_with(p)).map(|e| e.name.clone()).collect::<Vec<_>>();
         assert_eq!(names("schroot:"), ["schroot:00check", "schroot:15binfmt", "schroot:_x.y-z1", "schroot:a-"], "schroot's LSB names only");

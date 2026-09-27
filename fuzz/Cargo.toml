@@ -689,3 +689,10 @@ path = "fuzz_targets/pixbuf_loaders.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "libreport_event"
+path = "fuzz_targets/libreport_event.rs"
+test = false
+doc = false
+bench = false

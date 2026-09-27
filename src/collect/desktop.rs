@@ -178,15 +178,22 @@ fn autostart(cx: &mut Ctx) -> Vec<Entry> {
 
     // gnome-session also reads the data directories' gnome/autostart
     // (gnome-session 46, gsm-util.c), after the user's and before
-    // /etc/xdg's; no other session does.
-    for dir in ["usr/local/share/gnome/autostart", "usr/share/gnome/autostart"] {
+    // /etc/xdg's, and mate-session the data directories' mate/autostart
+    // (mate-session-manager 1.26, gsm-util.c) in the same place; no other
+    // session reads a data directory.
+    for (dir, session) in [
+        ("usr/local/share/gnome/autostart", "GNOME"),
+        ("usr/share/gnome/autostart", "GNOME"),
+        ("usr/local/share/mate/autostart", "MATE"),
+        ("usr/share/mate/autostart", "MATE"),
+    ] {
         for ent in cx.dir(dir) {
             if !is_desktop(&ent.name) {
                 continue;
             }
             let rel = Path::new(dir).join(&ent.name);
             let Some(mut e) = desktop_file(cx, &rel, &ent.name, None) else { continue };
-            e.note("desktop_session", "GNOME");
+            e.note("desktop_session", session);
             out.push(e);
         }
     }
@@ -1462,6 +1469,7 @@ mod tests {
         let dir = tree("kde");
         put(&dir, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/bash\n");
         put(&dir, "usr/share/gnome/autostart/tracker.desktop", b"[Desktop Entry]\nType=Application\nExec=/usr/bin/tracker\n");
+        put(&dir, "usr/share/mate/autostart/mate-beacon.desktop", b"[Desktop Entry]\nType=Application\nExec=/opt/mb\n");
         put(&dir, "home/alice/.config/autostart-scripts/beacon.sh", b"#!/bin/sh\n/tmp/b &\n");
         put(&dir, "home/alice/.config/autostart-scripts/beacon.sh~", b"#!/bin/sh\n");
         put(&dir, "home/alice/.config/plasma-workspace/shutdown/wipe", b"#!/bin/sh\n");
@@ -1471,6 +1479,7 @@ mod tests {
         let (entries, _) = run(&dir);
         let get = |name: &str| entries.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no {name}"));
         assert_eq!(get("tracker.desktop").raw["desktop_session"], "GNOME");
+        assert_eq!(get("mate-beacon.desktop").raw["desktop_session"], "MATE");
         let b = get("beacon.sh");
         assert_eq!((b.enabled, b.principal.as_deref()), (Enablement::Enabled, Some("alice")));
         assert!(!entries.iter().any(|e| e.name == "beacon.sh~"), "Plasma skips a backup name");
