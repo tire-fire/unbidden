@@ -12,7 +12,9 @@
 //! `module: path` line of each `.module` file in /usr/share/p11-kit/modules
 //! and /etc/pkcs11/modules, a PKCS#11 library loaded by anything that uses
 //! one (gnutls, libssh, ssh's PKCS11Provider). EGL (libglvnd): the
-//! `ICD.library_path` of each JSON in /usr/share/glvnd/egl_vendor.d. Vulkan
+//! `ICD.library_path` of each JSON in glvnd/egl_vendor.d and, for the
+//! external platforms (Wayland, GBM) libEGL loads the same way, in
+//! egl/egl_external_platform.d, under /usr/share and /etc. Vulkan
 //! (the loader): the `ICD.library_path` of each JSON in vulkan/icd.d, and the
 //! `layer.library_path` of each in implicit_layer.d, loaded into every
 //! Vulkan program without being asked for. OpenCL (ocl-icd): each line of
@@ -43,6 +45,9 @@ impl Collector for Plugins {
         p11_kit(cx, &libdirs, &mut out);
         for (dir, framework, trigger) in [
             ("usr/share/glvnd/egl_vendor.d", "EGL", Trigger::Always),
+            ("etc/glvnd/egl_vendor.d", "EGL", Trigger::Always),
+            ("usr/share/egl/egl_external_platform.d", "EGL", Trigger::Always),
+            ("etc/egl/egl_external_platform.d", "EGL", Trigger::Always),
             ("usr/share/vulkan/icd.d", "Vulkan", Trigger::Always),
             ("etc/vulkan/icd.d", "Vulkan", Trigger::Always),
             ("usr/share/vulkan/implicit_layer.d", "Vulkan", Trigger::Always),
@@ -329,6 +334,7 @@ mod tests {
         put(&d, "usr/lib/x86_64-linux-gnu/bare.so", b"\x7fELF");
         // EGL and a Vulkan implicit layer.
         put(&d, "usr/share/glvnd/egl_vendor.d/50_mesa.json", b"{ \"ICD\": { \"library_path\": \"libEGL_mesa.so.0\" } }");
+        put(&d, "etc/egl/egl_external_platform.d/99_evil.json", b"{ \"file_format_version\": \"1.0.0\", \"ICD\": { \"library_path\": \"/opt/platform.so\" } }");
         put(&d, "usr/share/vulkan/implicit_layer.d/beacon.json", b"{ \"layer\": { \"library_path\": \"/opt/layer.so\" } }");
         // OpenCL.
         put(&d, "etc/OpenCL/vendors/mesa.icd", b"/usr/lib/libMesaOpenCL.so.1\n");
@@ -341,6 +347,7 @@ mod tests {
             got,
             [
                 ("egl:50_mesa.json", None),
+                ("egl:99_evil.json", Some("/opt/platform.so")),
                 ("gconv:/opt/abs", Some("/opt/abs.so")),
                 ("gconv:evil", Some(d.join("usr/lib64/gconv/evil.so").to_str().unwrap())),
                 ("gdk-pixbuf:evil.so", Some("/opt/evil.so")),
@@ -351,7 +358,7 @@ mod tests {
                 ("vulkan:beacon.json", Some("/opt/layer.so")),
             ]
         );
-        let egl = s.entries.iter().find(|e| e.name.starts_with("egl:")).unwrap();
+        let egl = s.entries.iter().find(|e| e.name == "egl:50_mesa.json").unwrap();
         assert!(egl.raw.contains_key("target_unverifiable"), "an soname EGL resolves via glvnd is left to the loader");
         let layer = s.entries.iter().find(|e| e.name == "vulkan:beacon.json").unwrap();
         assert!(layer.raw["kind"].contains("implicit layer"));

@@ -198,6 +198,39 @@ fn autostart(cx: &mut Ctx) -> Vec<Entry> {
         }
     }
 
+    // gsd-xsettings (gnome-settings-daemon 3.36 on, gsd-xsettings-manager.c):
+    // in a Wayland session, every regular executable file in each
+    // $XDG_CONFIG_DIRS/Xwayland-session.d, in name order, is spawned as the
+    // user when the daemon starts, before any X11 client can.
+    let gsd = cx.root.exists("usr/libexec/gsd-xsettings");
+    let dir = Path::new("etc/xdg/Xwayland-session.d");
+    let mut names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
+    names.sort();
+    for name in names {
+        let rel = dir.join(&name);
+        let Ok(meta) = cx.root.stat_follow(&rel) else { continue };
+        if !meta.is_file {
+            continue;
+        }
+        let mut e = cx.entry(Kind::XdgAutostart, &rel, name.to_string_lossy().into_owned());
+        name_from_os(&mut e, &name);
+        e.trigger = Trigger::Login;
+        e.enabled = Enablement::Enabled;
+        e.principal = None;
+        e.note("directory", "Xwayland-session.d");
+        e.note("run_by", "gsd-xsettings");
+        e.note("runs_when", "a GNOME Wayland session starts, as the user, before any X11 client");
+        e.target_path = Some(cx.root.abs(&rel));
+        if meta.mode & 0o111 == 0 {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", "not executable");
+        } else if !gsd {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", "gnome-settings-daemon is not installed");
+        }
+        out.push(e);
+    }
+
     // Plasma (5.27 and 6, startplasma.cpp and plasma-shutdown): the files
     // in ~/.config/autostart-scripts are made into autostart entries at the
     // next login and so run; every file in each plasma-workspace/shutdown
@@ -1470,6 +1503,11 @@ mod tests {
         put(&dir, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/bash\n");
         put(&dir, "usr/share/gnome/autostart/tracker.desktop", b"[Desktop Entry]\nType=Application\nExec=/usr/bin/tracker\n");
         put(&dir, "usr/share/mate/autostart/mate-beacon.desktop", b"[Desktop Entry]\nType=Application\nExec=/opt/mb\n");
+        put(&dir, "usr/libexec/gsd-xsettings", b"");
+        put(&dir, "etc/xdg/Xwayland-session.d/00-at-spi", b"#!/bin/sh\n");
+        put(&dir, "etc/xdg/Xwayland-session.d/99-evil", b"#!/bin/sh\n/opt/e\n");
+        put(&dir, "etc/xdg/Xwayland-session.d/README", b"x\n");
+        std::fs::set_permissions(dir.join("etc/xdg/Xwayland-session.d/99-evil"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         put(&dir, "home/alice/.config/autostart-scripts/beacon.sh", b"#!/bin/sh\n/tmp/b &\n");
         put(&dir, "home/alice/.config/autostart-scripts/beacon.sh~", b"#!/bin/sh\n");
         put(&dir, "home/alice/.config/plasma-workspace/shutdown/wipe", b"#!/bin/sh\n");
@@ -1480,6 +1518,8 @@ mod tests {
         let get = |name: &str| entries.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no {name}"));
         assert_eq!(get("tracker.desktop").raw["desktop_session"], "GNOME");
         assert_eq!(get("mate-beacon.desktop").raw["desktop_session"], "MATE");
+        assert_eq!(get("99-evil").raw["run_by"], "gsd-xsettings");
+        assert_eq!(get("README").enabled, Enablement::Disabled, "gsd-xsettings spawns only executables");
         let b = get("beacon.sh");
         assert_eq!((b.enabled, b.principal.as_deref()), (Enablement::Enabled, Some("alice")));
         assert!(!entries.iter().any(|e| e.name == "beacon.sh~"), "Plasma skips a backup name");

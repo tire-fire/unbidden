@@ -854,7 +854,17 @@ fn standard_roots(kind: Kind) -> &'static [&'static str] {
         ],
         // ponytail: a prefix, since the session directories are globbed;
         // /etc/xdg/xdg-*/ is root's to write either way.
-        Kind::XdgAutostart => &["/etc/xdg/autostart/", "/etc/xdg/xdg-"],
+        Kind::XdgAutostart => &[
+            "/etc/xdg/autostart/",
+            "/etc/xdg/xdg-",
+            // gnome-session's and mate-session's data-directory autostart,
+            // and the scripts gsd-xsettings runs when Xwayland starts.
+            "/usr/share/gnome/autostart/",
+            "/usr/local/share/gnome/autostart/",
+            "/usr/share/mate/autostart/",
+            "/usr/local/share/mate/autostart/",
+            "/etc/xdg/Xwayland-session.d/",
+        ],
         Kind::Tmpfiles => &[
             "/etc/tmpfiles.d/",
             "/run/tmpfiles.d/",
@@ -881,7 +891,7 @@ fn apply_location(root: &Root, entry: &mut Entry) {
     // are built from the homes actually found rather than matched loosely.
     let mut acceptable: Vec<String> = roots.iter().map(|r| (*r).to_string()).collect();
     let per_home: &[&str] = match entry.kind {
-        Kind::XdgAutostart => &[".config/autostart/"],
+        Kind::XdgAutostart => &[".config/autostart/", ".config/autostart-scripts/", ".config/plasma-workspace/"],
         Kind::Tmpfiles => &[".config/user-tmpfiles.d/", ".local/share/user-tmpfiles.d/"],
         // The per-account half of the user manager's search path.
         Kind::SystemdUnit | Kind::SystemdTimer => {

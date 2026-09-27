@@ -1,0 +1,4 @@
+# actions
+post_transaction:*:in::/usr/bin/logger installed ${pkg.name}
+repos_configured::::/usr/local/bin/mirror-select
+pre_transaction:kernel*:in:mode=plain:/opt/notify ${pkg.full_nevra}
