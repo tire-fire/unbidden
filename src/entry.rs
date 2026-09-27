@@ -94,6 +94,7 @@ str_enum!(Kind {
     DisplayManager => "display_manager",
     Logrotate => "logrotate",
     EventHandler => "event_handler",
+    InterpreterEnv => "interpreter_env",
 });
 
 str_enum!(Trigger {

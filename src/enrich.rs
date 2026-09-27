@@ -75,6 +75,9 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
     if let Some(preloads) = stage(&mut failed, "preloads", || preload_entries(root, &scan.entries)) {
         scan.entries.extend(preloads);
     }
+    if let Some(hooks) = stage(&mut failed, "interpreter variables", || interpreter_entries(root, &scan.entries)) {
+        scan.entries.extend(hooks);
+    }
 
     per_entry(&mut failed, "search paths", &mut scan.entries, |e| writable_search_path(root, e));
     per_entry(&mut failed, "setuid bits", &mut scan.entries, |e| setuid_changed_after_install(root, e));
@@ -1136,6 +1139,81 @@ fn preload_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
     out
 }
 
+/// Variables that make an interpreter run or load code of their choosing
+/// before its own: what reads each, and when.
+const INTERPRETER_VARS: [(&str, &str); 12] = [
+    ("PERL5OPT", "every perl, as command-line switches (-M loads a module)"),
+    ("PERL5LIB", "every perl, ahead of its own module directories"),
+    ("RUBYOPT", "every ruby, as options (-r loads a library)"),
+    ("RUBYLIB", "every ruby, ahead of its own library directories"),
+    ("NODE_OPTIONS", "every node, as options (--require and --import load a module)"),
+    ("JAVA_TOOL_OPTIONS", "every JVM, as options (-javaagent loads a jar)"),
+    ("_JAVA_OPTIONS", "every HotSpot JVM, as options"),
+    ("PYTHONPATH", "every python, ahead of its own module directories"),
+    ("PYTHONSTARTUP", "every interactive python, which runs the file"),
+    ("BASH_ENV", "every non-interactive bash, a script included, which sources the file"),
+    ("ENV", "every interactive sh and ksh, which source the file"),
+    ("PROMPT_COMMAND", "every interactive bash, before each prompt"),
+];
+
+/// One entry per interpreter variable an entry sets: the file that sets it
+/// is where its code comes from, whatever it names. Where the value names a
+/// file to run or load, that file is the target.
+fn interpreter_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for carrier in entries {
+        if carrier.kind == Kind::InterpreterEnv {
+            continue;
+        }
+        for (variable, reads) in INTERPRETER_VARS {
+            let Some(value) = carrier.raw.get(&format!("env.{variable}")) else { continue };
+            if value.is_empty() {
+                continue;
+            }
+            let mut e = Entry::new(Kind::InterpreterEnv, &carrier.source, variable);
+            e.collector = carrier.collector.clone();
+            e.rekey(&root.rel(&carrier.source));
+            e.command = Some(format!("{variable}={value}").into_bytes());
+            let file = match variable {
+                "BASH_ENV" | "ENV" | "PYTHONSTARTUP" => Some(value.as_str()),
+                "JAVA_TOOL_OPTIONS" | "_JAVA_OPTIONS" => value.split_whitespace().find_map(|w| w.strip_prefix("-javaagent:")).map(|a| a.split('=').next().unwrap_or(a)),
+                "NODE_OPTIONS" => {
+                    let words: Vec<&str> = value.split_whitespace().collect();
+                    words.windows(2).find(|w| matches!(w[0], "--require" | "-r" | "--import")).map(|w| w[1])
+                }
+                _ => None,
+            };
+            match file.filter(|f| f.starts_with('/')) {
+                // Judged by the file it names, in the late pass.
+                Some(f) => e.target_path = Some(root.abs(root.rel(Path::new(f)))),
+                // Otherwise the setting's own file is what vouches for it.
+                None => {
+                    e.provenance = carrier.provenance.clone();
+                    for f in &carrier.flags {
+                        if matches!(f, Flag::Unpackaged | Flag::PackagedModified | Flag::ConffileModified) {
+                            e.flag(*f);
+                        }
+                    }
+                }
+            }
+            // What the variable holds is code or options, not a command line.
+            e.note("target_unverifiable", "a variable an interpreter reads");
+            e.trigger = carrier.trigger;
+            e.principal = carrier.principal.clone();
+            e.owner_uid = carrier.owner_uid;
+            e.mode = carrier.mode;
+            e.mtime = carrier.mtime;
+            e.enabled = carrier.enabled;
+            e.note("variable", variable);
+            e.note("read_by", reads);
+            e.note("declared_in", carrier.source.to_string_lossy());
+            e.note("declared_by_entry", &carrier.id);
+            out.push(e);
+        }
+    }
+    out
+}
+
 /// dpkg records no file modes, so a setuid bit added to a packaged binary
 /// leaves its digest intact: `chmod u+s /usr/bin/find` verifies clean. What
 /// dpkg does leave is when it installed the package, as its `.list` file's
@@ -1482,11 +1560,18 @@ fn handed_off(head: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 
 /// A synthesised preload entry is built after provenance has run, so it needs
 /// its own pass over the same machinery.
+/// Entries synthesised after the main provenance pass whose target still
+/// needs a verdict: preloaded libraries, and files interpreter variables
+/// name.
+fn late(e: &Entry) -> bool {
+    matches!(e.kind, Kind::LdPreload | Kind::InterpreterEnv) && e.target_path.is_some() && e.target_sha256.is_none()
+}
+
 pub fn enrich_late(root: &Root, scan: &mut Scan) {
     let wanted: BTreeSet<PathBuf> = scan
         .entries
         .iter()
-        .filter(|e| e.kind == Kind::LdPreload && e.target_sha256.is_none())
+        .filter(|e| late(e))
         .filter_map(|e| e.target_path.as_ref().map(|t| root.rel(t)))
         .collect();
     if wanted.is_empty() {
@@ -1501,7 +1586,7 @@ pub fn enrich_late(root: &Root, scan: &mut Scan) {
         None => provenance::Answers::new(),
     };
     per_entry(&mut failed, "preload provenance", &mut scan.entries, |e| {
-        if e.kind == Kind::LdPreload && e.target_sha256.is_none() {
+        if late(e) {
             apply_provenance(root, e, &answers);
             apply_target(root, e);
         }
@@ -1747,6 +1832,34 @@ mod tests {
         look_through_wrappers(&root, std::slice::from_mut(&mut e));
         assert_eq!(e.target_path, Some(dir.join("usr/sbin/in.telnetd")));
         assert_eq!(e.raw["target_wrapped_by"], "tcpd");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn interpreter_variables_become_entries_about_what_they_load() {
+        let dir = std::env::temp_dir().join(format!("unbidden-interp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc/passwd"), "root:x:0:0::/root:/bin/sh\n").unwrap();
+        std::fs::write(
+            dir.join("etc/environment"),
+            "PERL5OPT=-Mevil\nBASH_ENV=/opt/every-script.sh\nNODE_OPTIONS=--max-old-space-size=64 --require /opt/hook.js\nLANG=C\n",
+        )
+        .unwrap();
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(crate::collect::shell::Shell)];
+        let mut scan = scan::run(&root, &Options { deep: false }, &collectors);
+        enrich(&root, &mut scan);
+        enrich_late(&root, &mut scan);
+        let get = |v: &str| scan.entries.iter().find(|e| e.kind == Kind::InterpreterEnv && e.name == v).unwrap_or_else(|| panic!("no {v}"));
+        let perl = get("PERL5OPT");
+        assert_eq!((perl.command.as_deref(), perl.target_path.as_deref()), (Some(&b"PERL5OPT=-Mevil"[..]), None));
+        let carrier = scan.entries.iter().find(|e| e.kind == Kind::ShellProfile && e.source == dir.join("etc/environment")).unwrap();
+        assert_eq!(perl.provenance, carrier.provenance, "no file named, so the setting's own file vouches");
+        assert_eq!(get("BASH_ENV").target_path, Some(dir.join("opt/every-script.sh")));
+        assert_eq!(get("NODE_OPTIONS").target_path, Some(dir.join("opt/hook.js")));
+        assert!(get("BASH_ENV").raw["read_by"].contains("non-interactive bash"));
+        assert!(!scan.entries.iter().any(|e| e.kind == Kind::InterpreterEnv && e.name == "LANG"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
