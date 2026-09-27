@@ -14,6 +14,24 @@
 //! /etc/ca-certificates/update.d, on every certificate change. apport: the
 //! Python in /usr/share/apport/general-hooks, loaded for every crash report,
 //! and in package-hooks, for a crash in that package.
+//!
+//! molly-guard: what run-parts selects in /etc/molly-guard/run.d, before a
+//! shutdown or reboot command goes ahead. netfilter-persistent: what
+//! run-parts selects in /usr/share/netfilter-persistent/plugins.d, at boot.
+//! schroot 1.6 (sbuild-run-parts.cc, sbuild-util.cc): each file in
+//! /etc/schroot/setup.d whose name is all `[a-z0-9]`, LSB-style
+//! `_?([a-z0-9_.]+-)+[a-z0-9]+`, or cron-style `[a-z0-9][a-z0-9-]*`, and not
+//! ending `dpkg-old`, `-dist`, `-new` or `-tmp`, in name order, as root when
+//! a chroot session starts or ends. ModemManager 1.20 (mm-dispatcher*.c):
+//! from /etc/ModemManager and its library directory, the `connection.d`
+//! scripts on every connect and disconnect, and the `fcc-unlock.d` script
+//! named for a modem's `vid:pid`, when that modem needs unlocking; a script
+//! runs only if, links followed, it is regular, non-empty, owned by root,
+//! executable by its owner, not writable by group or other, not setuid, and
+//! not a link to /dev/null. cron-apt: /etc/cron-apt/config and, for each
+//! action, config.d/<action>, sourced as shell, and each line of each action
+//! in action.d (regular files named `[[:alnum:]_-]` alone) run as the
+//! arguments of apt-get; all as root, on cron-apt's schedule.
 
 use std::path::{Path, PathBuf};
 
@@ -37,6 +55,8 @@ impl Collector for Events {
         for (dir, tool, trigger, installed) in [
             ("etc/smartmontools/run.d", "smartd", Trigger::DeviceEvent, "usr/sbin/smartd"),
             ("etc/ca-certificates/update.d", "update-ca-certificates", Trigger::PackageOp, "usr/sbin/update-ca-certificates"),
+            ("etc/molly-guard/run.d", "molly-guard", Trigger::PowerEvent, "usr/lib/molly-guard/molly-guard"),
+            ("usr/share/netfilter-persistent/plugins.d", "netfilter-persistent", Trigger::Boot, "usr/sbin/netfilter-persistent"),
         ] {
             if cx.root.exists(installed) {
                 run_parts(cx, &mut out, Path::new(dir), tool, trigger, flavour);
@@ -47,7 +67,140 @@ impl Collector for Events {
         }
         rsyslog(cx, &mut out);
         cups(cx, &mut out);
+        if cx.root.exists("usr/bin/schroot") {
+            schroot(cx, &mut out);
+        }
+        if cx.root.exists("usr/sbin/ModemManager") {
+            modem_manager(cx, &mut out);
+        }
+        if cx.root.exists("usr/sbin/cron-apt") {
+            cron_apt(cx, &mut out);
+        }
         out
+    }
+}
+
+/// schroot's own run-parts, always in its LSB mode.
+fn schroot(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let lanana = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    let cron = |n: &str| {
+        n.bytes().next().is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+            && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    };
+    // `_?([a-z0-9_.]+-)+[a-z0-9]+`: past an optional `_`, a last part of
+    // [a-z0-9] after the final `-`, and before it only [a-z0-9_.-] with no
+    // empty part.
+    let lsb = |n: &str| {
+        let n = n.strip_prefix('_').unwrap_or(n);
+        let Some((head, last)) = n.rsplit_once('-') else { return false };
+        lanana(last)
+            && !head.is_empty()
+            && head.split('-').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.'))
+    };
+    let cruft = |n: &str| ["dpkg-old", "dpkg-dist", "dpkg-new", "dpkg-tmp"].iter().any(|c| n.ends_with(c));
+    for rel in sorted(cx, Path::new("etc/schroot/setup.d")) {
+        let name = file_name(&rel);
+        if !(lanana(&name) || lsb(&name) || cron(&name)) || cruft(&name) {
+            continue;
+        }
+        let mut e = entry(cx, &rel, format!("schroot:{name}"), "schroot", Trigger::Login);
+        e.target_path = Some(cx.root.abs(&rel));
+        if e.mode & 0o111 == 0 {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", "not executable");
+        }
+        out.push(e);
+    }
+}
+
+fn modem_manager(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    // The library directory: /usr/lib64, a multiarch one, or /usr/lib.
+    let mut libdirs: Vec<PathBuf> = vec!["usr/lib64/ModemManager".into(), "usr/lib/ModemManager".into()];
+    for ent in cx.dir(Path::new("usr/lib")) {
+        if ent.is_dir && ent.name.to_string_lossy().contains("-linux-") {
+            libdirs.push(Path::new("usr/lib").join(&ent.name).join("ModemManager"));
+        }
+    }
+    let dirs: Vec<PathBuf> = std::iter::once(PathBuf::from("etc/ModemManager")).chain(libdirs).collect();
+    for (sub, trigger, what) in [("connection.d", Trigger::NetworkEvent, "a modem connects or disconnects"), ("fcc-unlock.d", Trigger::DeviceEvent, "a modem with that vid:pid needs FCC unlock")] {
+        for dir in &dirs {
+            for rel in sorted(cx, &dir.join(sub)) {
+                let name = file_name(&rel);
+                let file = cx.root.resolve(&rel).unwrap_or_else(|_| rel.clone());
+                let mut e = entry(cx, &file, format!("ModemManager:{sub}:{name}"), "ModemManager", trigger);
+                e.target_path = Some(cx.root.abs(&file));
+                e.note("dispatcher", cx.root.abs(&rel).display().to_string());
+                e.note("runs_when", what);
+                let meta = cx.root.stat_follow(&rel).ok();
+                let why = if cx.root.read_link(&rel).is_ok_and(|t| t == Path::new("/dev/null")) {
+                    Some("a link to /dev/null masks it")
+                } else if let Some(m) = meta {
+                    if !m.is_file {
+                        Some("not a regular file")
+                    } else if m.size == 0 {
+                        Some("empty")
+                    } else if m.uid != 0 {
+                        Some("not owned by root")
+                    } else if m.mode & 0o022 != 0 {
+                        Some("writable by group or other")
+                    } else if m.mode & 0o4000 != 0 {
+                        Some("setuid")
+                    } else if m.mode & 0o100 == 0 {
+                        Some("not executable by its owner")
+                    } else {
+                        None
+                    }
+                } else {
+                    Some("cannot be read")
+                };
+                let why = why.or_else(|| {
+                    let vid_pid = name.len() == 9
+                        && name.as_bytes()[4] == b':'
+                        && name.bytes().enumerate().all(|(i, b)| i == 4 || matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+                    (sub == "fcc-unlock.d" && !vid_pid).then_some("ModemManager looks up only a lowercase vid:pid name")
+                });
+                if let Some(why) = why {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", why);
+                }
+                out.push(e);
+            }
+        }
+    }
+}
+
+fn cron_apt(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let shell = |cx: &mut Ctx, out: &mut Vec<Entry>, rel: &Path, name: String| {
+        if !cx.root.stat_follow(rel).is_ok_and(|m| m.is_file) {
+            return;
+        }
+        let mut e = entry(cx, rel, name, "cron-apt", Trigger::Schedule);
+        e.target_path = Some(cx.root.abs(rel));
+        e.note("sourced_by", "cron-apt");
+        out.push(e);
+    };
+    shell(cx, out, Path::new("etc/cron-apt/config"), "cron-apt:config".into());
+    let action_dir = Path::new("etc/cron-apt/action.d");
+    for rel in sorted(cx, action_dir) {
+        let name = file_name(&rel);
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+            continue;
+        }
+        if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
+            continue;
+        }
+        shell(cx, out, &Path::new("etc/cron-apt/config.d").join(&name), format!("cron-apt:config.d:{name}"));
+        let Some(bytes) = cx.read_capped(&rel, 64 * 1024) else { continue };
+        for (n, line) in bytes.split(|b| *b == b'\n').enumerate() {
+            // `sed -e "s/#.*$//"`, then blank lines dropped.
+            let line = &line[..line.iter().position(|b| *b == b'#').unwrap_or(line.len())];
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let mut e = entry(cx, &rel, format!("cron-apt:{name}:{}", n + 1), "cron-apt", Trigger::Schedule);
+            e.command = Some([b"/usr/bin/apt-get ".as_slice(), line.trim_ascii()].concat());
+            out.push(e);
+        }
     }
 }
 
@@ -372,6 +525,49 @@ mod tests {
         assert!(!s.entries.iter().any(|e| e.name == "zed:zed.rc"), "zed.rc is configuration");
         assert_eq!(by("update-ca-certificates:jks-keystore").trigger, Trigger::PackageOp);
         assert_eq!(by("apport:evil.py").raw["loaded_for"], "every crash report");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn package_hook_directories_run_as_their_tools_choose() {
+        let d = std::env::temp_dir().join(format!("unbidden-hookdirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        put(&d, "usr/bin/schroot", b"", 0o755);
+        for name in ["00check", "15binfmt", "_x.y-z1", "a-", "Upper", "05file.dpkg-old", "x_y"] {
+            put(&d, &format!("etc/schroot/setup.d/{name}"), b"#!/bin/sh\n", 0o755);
+        }
+        put(&d, "usr/sbin/ModemManager", b"", 0o755);
+        put(&d, "etc/ModemManager/connection.d/10-beacon", b"#!/bin/sh\n", 0o755);
+        put(&d, "usr/lib/x86_64-linux-gnu/ModemManager/fcc-unlock.d/105b:e0ab", b"#!/bin/sh\n", 0o755);
+        put(&d, "etc/ModemManager/fcc-unlock.d/NOTVIDPID", b"#!/bin/sh\n", 0o755);
+        put(&d, "usr/sbin/cron-apt", b"", 0o755);
+        put(&d, "etc/cron-apt/config", b"MAILON=error\n", 0o644);
+        put(&d, "etc/cron-apt/action.d/3-download", b"# comment\ndist-upgrade -d -y # trailing\n\n-o APT::Update::Pre-Invoke::=/opt/x update\n", 0o644);
+        put(&d, "etc/cron-apt/action.d/9.bak", b"install evil\n", 0o644);
+        put(&d, "etc/cron-apt/config.d/3-download", b"OPTIONS=-q\n", 0o644);
+        let s = scan(&d);
+        let names = |p: &str| s.entries.iter().filter(|e| e.name.starts_with(p)).map(|e| e.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names("schroot:"), ["schroot:00check", "schroot:15binfmt", "schroot:_x.y-z1", "schroot:a-"], "schroot's LSB names only");
+        let mm: Vec<(&str, Enablement)> = s.entries.iter().filter(|e| e.name.starts_with("ModemManager:")).map(|e| (e.name.as_str(), e.enabled)).collect();
+        assert_eq!(mm.len(), 3);
+        assert!(mm.iter().all(|(_, en)| *en == Enablement::Disabled), "fixture files are not root's: {mm:?}");
+        let fcc = s.entries.iter().find(|e| e.name.ends_with("NOTVIDPID")).unwrap();
+        assert_eq!(fcc.raw["not_run"], "not owned by root");
+        let apt: Vec<(&str, &str)> = s
+            .entries
+            .iter()
+            .filter(|e| e.name.starts_with("cron-apt:"))
+            .map(|e| (e.name.as_str(), e.command.as_deref().map(|c| std::str::from_utf8(c).unwrap()).unwrap_or("-")))
+            .collect();
+        assert_eq!(
+            apt,
+            [
+                ("cron-apt:3-download:2", "/usr/bin/apt-get dist-upgrade -d -y"),
+                ("cron-apt:3-download:4", "/usr/bin/apt-get -o APT::Update::Pre-Invoke::=/opt/x update"),
+                ("cron-apt:config", "-"),
+                ("cron-apt:config.d:3-download", "-"),
+            ]
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 
