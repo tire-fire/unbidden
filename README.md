@@ -11,20 +11,40 @@ Finds what runs automatically on Linux.
 What it reads, grouped by when each thing runs:
 
 - Boot: systemd units, generators and presets, SysV init scripts and
-  rc.local, kernel modules and modprobe `install` lines, tmpfiles.d
-- A schedule: cron, anacron, at, systemd timers
-- Login: shell startup files, XDG autostart, GNOME and Cinnamon
-  extensions, MOTD scripts, SSH keys and the sshd settings that decide which
-  keys count
-- Authentication: PAM, sudoers and sudo plugins, polkit rules
-- A device or network event: udev rules, NetworkManager dispatcher
-  scripts, xinetd and inetd services
-- Package installs: apt and dnf hooks, dpkg and rpm scriptlets
+  rc.local, kernel modules and modprobe `install` lines, tmpfiles.d, what
+  builds the initramfs (initramfs-tools, dracut, DKMS), cloud-init,
+  crypttab keyscripts, display-manager scripts, systemd's sleep and
+  shutdown hooks
+- A schedule: cron, anacron, at, systemd timers, logrotate scripts
+- Login: shell startup files for bash, zsh, csh, fish and ksh, the X
+  session, XDG autostart and the GNOME, MATE and Plasma session files,
+  GNOME and Cinnamon extensions, file-manager extensions, browser policy,
+  MOTD scripts, the system-wide startup files of editors, tmux and screen,
+  SSH keys and the sshd settings that decide which keys count, membership
+  of groups that grant root
+- Authentication: PAM, sudoers (aliases resolved) and sudo plugins, doas,
+  polkit rules, what the ssh client runs
+- A device, network or system event: udev rules, NetworkManager, DHCP,
+  ifupdown, networkd-dispatcher, PPP, WireGuard and OpenVPN hooks, xinetd
+  and inetd services, TCP wrappers, fail2ban actions, and the handlers of
+  acpid, smartd, zed, apport, ClamAV, SpamAssassin, ModemManager and a
+  dozen more daemons
+- Monitoring and management agents: auditd plugins, collectd, munin,
+  monit, Zabbix, NRPE, incron, facter, Salt schedules
+- Package installs: apt, dnf and dpkg hooks, kernel package hooks, dpkg
+  and rpm scriptlets, package sources and the keys trusted to sign them,
+  alternatives and diversions
 - Any time, or whenever something asks: `ld.so.preload`, library search
-  paths, NSS modules, D-Bus services, and what the kernel runs itself
+  paths, NSS modules, D-Bus services, Python startup hooks, interpreter
+  variables, the plug-in registries of gconv, p11-kit, Vulkan, EGL, OpenCL
+  and gdk-pixbuf, rsyslog and CUPS, and what the kernel runs itself
   (`core_pattern`, binfmt_misc, request-key)
 - With `--deep`: setuid binaries, file capabilities, hooks in every git
-  repository
+  repository, and every packaged program or library whose contents differ
+  from what its package shipped
+
+Each is read by the rule of the program that runs it, and only where that
+program is installed; [spec.md](spec.md) §5 has the full list and why.
 
 If it runs without a person typing something, it should turn up here.
 
@@ -118,6 +138,9 @@ runs in a VM for Debian, Ubuntu and Fedora (`ci/vm-harness.sh`) and in a
 systemd container for Mint and LMDE (`ci/container-harness.sh`).
 `ci/panix-coverage.tsv` lists every PANIX module with its ATT&CK technique,
 including the ones out of scope and why.
+`ci/attack-coverage.tsv` goes the other way: every ATT&CK Linux
+persistence technique, with the entry kinds that report it or the decision
+that puts it out of scope, and a test fails when one has no answer.
 
 ## License
 
