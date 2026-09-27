@@ -1,0 +1,4 @@
+# /etc/acpi/events/powerbtn
+# called when the power button is pressed
+event=button[ /]power
+action=/etc/acpi/powerbtn.sh "%e"

@@ -17,6 +17,7 @@ pub mod cron;
 pub mod deep;
 pub mod desktop;
 pub mod dm;
+pub mod events;
 pub mod inetd;
 pub mod initscripts;
 pub mod kernel;
@@ -228,6 +229,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(inetd::Inetd),
         Box::new(kernel::Kernel),
         Box::new(logrotate::Logrotate),
+        Box::new(events::Events),
         Box::new(pkg::PkgHooks),
         Box::new(cloudinit::CloudInit),
         Box::new(python::Python),

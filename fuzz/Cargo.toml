@@ -479,3 +479,10 @@ path = "fuzz_targets/dpkg_cfg.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "acpi_event"
+path = "fuzz_targets/acpi_event.rs"
+test = false
+doc = false
+bench = false

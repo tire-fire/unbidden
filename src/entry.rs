@@ -93,6 +93,7 @@ str_enum!(Kind {
     Crypttab => "crypttab",
     DisplayManager => "display_manager",
     Logrotate => "logrotate",
+    EventHandler => "event_handler",
 });
 
 str_enum!(Trigger {

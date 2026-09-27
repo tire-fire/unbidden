@@ -1436,6 +1436,11 @@
       },
       {
         "entries": 0,
+        "name": "events",
+        "status": "complete"
+      },
+      {
+        "entries": 0,
         "name": "git_config",
         "status": "complete"
       },
