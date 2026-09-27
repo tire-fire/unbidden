@@ -1488,6 +1488,11 @@
         "status": "complete"
       },
       {
+        "entries": 0,
+        "name": "sources",
+        "status": "complete"
+      },
+      {
         "entries": 5,
         "name": "systemd",
         "status": "complete"

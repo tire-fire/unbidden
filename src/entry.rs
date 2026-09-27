@@ -95,6 +95,7 @@ str_enum!(Kind {
     Logrotate => "logrotate",
     EventHandler => "event_handler",
     InterpreterEnv => "interpreter_env",
+    PkgSource => "pkg_source",
 });
 
 str_enum!(Trigger {

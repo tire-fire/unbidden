@@ -70,6 +70,7 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
         apply_shadowing(&mut scan.entries);
         cross_reference_suid(&mut scan.entries);
         gate_on_super_server(&mut scan.entries);
+        vouch_for_sources(&mut scan.entries);
     });
 
     if let Some(preloads) = stage(&mut failed, "preloads", || preload_entries(root, &scan.entries)) {
@@ -1009,6 +1010,29 @@ fn apply_encoding(entry: &mut Entry) {
     entry.note("encoded_run", format!("{alphabet}, {len} chars at offset {offset}"));
 }
 
+/// A repository can install only what the keys it trusts have signed. Where
+/// signature checking is on and every one of those key files is packaged and
+/// intact, the repository adds nothing a package did not already vouch for,
+/// however its own sources file came to be written (an installer writes the
+/// distribution's). Noted, for the default view to judge by.
+fn vouch_for_sources(entries: &mut [Entry]) {
+    let verified: BTreeMap<String, bool> = entries
+        .iter()
+        .filter(|e| e.kind == Kind::PkgSource && e.name.starts_with("key:"))
+        .map(|e| (e.source.to_string_lossy().into_owned(), e.provenance.is_verified()))
+        .collect();
+    for e in entries.iter_mut() {
+        if e.kind != Kind::PkgSource || e.raw.contains_key("signature_checking") {
+            continue;
+        }
+        let Some(trusts) = e.raw.get("trusts") else { continue };
+        let all = trusts.split(", ").all(|k| verified.get(k).copied().unwrap_or(false));
+        if all {
+            e.note("vouched", "every key it trusts is packaged and intact");
+        }
+    }
+}
+
 /// The unit names and init scripts each super-server daemon is started by.
 const SUPER_SERVERS: [(&str, &[&str], &[&str]); 2] = [
     ("xinetd", &["xinetd.service"], &["xinetd"]),
@@ -1861,6 +1885,38 @@ mod tests {
         assert!(get("BASH_ENV").raw["read_by"].contains("non-interactive bash"));
         assert!(!scan.entries.iter().any(|e| e.kind == Kind::InterpreterEnv && e.name == "LANG"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_repository_is_vouched_for_only_by_keys_all_packaged_and_intact() {
+        let key = |path: &str, ok: bool| {
+            let mut e = Entry::new(Kind::PkgSource, path, format!("key:{path}"));
+            e.provenance = if ok {
+                Provenance::Packaged { package: "debian-archive-keyring".into(), version: "1".into(), integrity: crate::entry::Integrity::Intact }
+            } else {
+                Provenance::Unpackaged
+            };
+            e
+        };
+        let repo = |trusts: &str, off: bool| {
+            let mut e = Entry::new(Kind::PkgSource, "/etc/apt/sources.list.d/x.sources", format!("apt:{trusts}"));
+            e.note("trusts", trusts);
+            if off {
+                e.note("signature_checking", "off (trusted=yes)");
+            }
+            e
+        };
+        let mut entries = vec![
+            key("/usr/share/keyrings/a.gpg", true),
+            key("/etc/apt/trusted.gpg.d/planted.asc", false),
+            repo("/usr/share/keyrings/a.gpg", false),
+            repo("/usr/share/keyrings/a.gpg, /etc/apt/trusted.gpg.d/planted.asc", false),
+            repo("/usr/share/keyrings/a.gpg", true),
+            repo("/nowhere.gpg", false),
+        ];
+        vouch_for_sources(&mut entries);
+        let vouched: Vec<bool> = entries[2..].iter().map(|e| e.raw.contains_key("vouched")).collect();
+        assert_eq!(vouched, [true, false, false, false], "a planted key, trusted=yes or a missing key each withhold it");
     }
 
     #[test]

@@ -1,0 +1,11 @@
+Types: deb deb-src
+URIs: https://pkg.example.org/debian
+Suites: bookworm bookworm-updates
+Components: main
+Signed-By: /etc/apt/keyrings/example.gpg
+
+Types: deb
+URIs: http://192.0.2.1/repo
+Suites: stable
+Trusted: yes
+Enabled: no

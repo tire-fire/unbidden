@@ -26,6 +26,7 @@ pub mod pkg;
 pub mod polkit;
 pub mod python;
 pub mod shell;
+pub mod sources;
 pub mod systemd;
 
 /// The command word of shell text, cut where the shell cuts it. A `;`, `|`,
@@ -231,6 +232,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(logrotate::Logrotate),
         Box::new(events::Events),
         Box::new(pkg::PkgHooks),
+        Box::new(sources::Sources),
         Box::new(cloudinit::CloudInit),
         Box::new(python::Python),
         Box::new(deep::GitConfig),

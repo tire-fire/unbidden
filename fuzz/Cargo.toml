@@ -486,3 +486,24 @@ path = "fuzz_targets/acpi_event.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "apt_sources_list"
+path = "fuzz_targets/apt_sources_list.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "apt_deb822"
+path = "fuzz_targets/apt_deb822.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dnf_repo"
+path = "fuzz_targets/dnf_repo.rs"
+test = false
+doc = false
+bench = false

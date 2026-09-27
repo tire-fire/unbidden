@@ -1,0 +1,4 @@
+# main archive
+deb http://deb.debian.org/debian bookworm main contrib
+deb-src [arch=amd64 signed-by=/usr/share/keyrings/x.gpg] http://deb.debian.org/debian bookworm main
+deb [trusted=yes] http://192.0.2.1/repo ./

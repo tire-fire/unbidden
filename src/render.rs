@@ -67,6 +67,12 @@ pub fn suppressed(e: &Entry) -> bool {
         let source_only = e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
         return source_only && target_verified && !e.raw.contains_key("after_hash");
     }
+    // A repository whose sources file no package owns, but whose every
+    // trusted key is packaged and intact, can install only what a package
+    // already vouched for: the distribution's own, as its installer wrote it.
+    if e.kind == Kind::PkgSource && e.raw.contains_key("vouched") {
+        return e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged | Flag::ConffileModified));
+    }
     // A file whose inode changed after its package installed it was touched
     // by something other than the package manager, however it verifies.
     let untouched = !e.raw.contains_key("changed_after_install");
