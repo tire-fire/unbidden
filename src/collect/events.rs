@@ -32,6 +32,14 @@
 //! action, config.d/<action>, sourced as shell, and each line of each action
 //! in action.d (regular files named `[[:alnum:]_-]` alone) run as the
 //! arguments of apt-get; all as root, on cron-apt's schedule.
+//!
+//! ClamAV 1.0 (optparser.c, clamd_others.c, freshclam.c): clamd.conf's
+//! `VirusEvent`, run through `/bin/sh -c` as clamd's `User` (root when
+//! unset) on each detection; freshclam.conf's `OnUpdateExecute`,
+//! `OnErrorExecute` and `OnOutdatedExecute`, run through a shell as
+//! `DatabaseOwner` (clamav). Lines are `Name value`, the value trimmed and
+//! a leading `"` quoting to the last; a line of two characters or fewer or
+//! starting `#` is skipped, and an `Example` line stops the daemon.
 
 use std::path::{Path, PathBuf};
 
@@ -76,6 +84,7 @@ impl Collector for Events {
         if cx.root.exists("usr/sbin/cron-apt") {
             cron_apt(cx, &mut out);
         }
+        clamav(cx, &mut out);
         out
     }
 }
@@ -162,6 +171,66 @@ fn modem_manager(cx: &mut Ctx, out: &mut Vec<Entry>) {
                 if let Some(why) = why {
                     e.enabled = Enablement::Disabled;
                     e.note("not_run", why);
+                }
+                out.push(e);
+            }
+        }
+    }
+}
+
+/// A ClamAV configuration's options, the last of each name winning, and
+/// whether an `Example` line leaves the daemon refusing to start.
+fn clamav_options(bytes: &[u8]) -> (std::collections::BTreeMap<String, String>, bool) {
+    let mut opts = std::collections::BTreeMap::new();
+    for line in String::from_utf8_lossy(bytes).lines() {
+        let line = line.trim_start_matches([' ', '\t']);
+        // fgets keeps the newline, so "two characters" is one and a break.
+        if line.len() <= 1 || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with("Example") {
+            return (opts, true);
+        }
+        let Some((name, value)) = line.split_once([' ', '\t']) else { continue };
+        let value = value.trim_matches([' ', '\t']);
+        let value = match value.strip_prefix('"') {
+            Some(v) => &v[..v.rfind('"').unwrap_or(v.len())],
+            None => value,
+        };
+        if !value.is_empty() {
+            opts.insert(name.to_string(), value.to_string());
+        }
+    }
+    (opts, false)
+}
+
+fn clamav(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let daemons: [(&str, &[&str], &[&str], &str); 2] = [
+        ("clamd", &["etc/clamav/clamd.conf", "etc/clamd.d/scan.conf"], &["VirusEvent"], "usr/sbin/clamd"),
+        ("freshclam", &["etc/clamav/freshclam.conf", "etc/freshclam.conf"], &["OnUpdateExecute", "OnErrorExecute", "OnOutdatedExecute"], "usr/bin/freshclam"),
+    ];
+    for (daemon, confs, keys, bin) in daemons {
+        let installed = cx.root.exists(bin);
+        for conf in confs {
+            let rel = Path::new(conf);
+            let Some(bytes) = cx.read_capped(rel, 256 * 1024) else { continue };
+            let (opts, example) = clamav_options(&bytes);
+            let principal = match daemon {
+                "clamd" => opts.get("User").cloned().unwrap_or_else(|| "root".into()),
+                _ => opts.get("DatabaseOwner").cloned().unwrap_or_else(|| "clamav".into()),
+            };
+            for key in keys {
+                let Some(cmd) = opts.get(*key) else { continue };
+                let trigger = if daemon == "clamd" { Trigger::Always } else { Trigger::Schedule };
+                let mut e = entry(cx, rel, format!("{daemon}:{key}"), daemon, trigger);
+                e.principal = Some(principal.clone());
+                e.command = Some(cmd.as_bytes().to_vec());
+                if example {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", "an Example line stops the daemon starting");
+                } else if !installed {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", format!("{daemon} is not installed"));
                 }
                 out.push(e);
             }
@@ -566,6 +635,30 @@ mod tests {
                 ("cron-apt:3-download:4", "/usr/bin/apt-get -o APT::Update::Pre-Invoke::=/opt/x update"),
                 ("cron-apt:config", "-"),
                 ("cron-apt:config.d:3-download", "-"),
+            ]
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn clamav_runs_its_event_commands() {
+        let d = std::env::temp_dir().join(format!("unbidden-clamav-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        put(&d, "usr/sbin/clamd", b"", 0o755);
+        put(&d, "etc/clamav/clamd.conf", b"# VirusEvent /never\nUser clamav\nVirusEvent   \"/opt/alert %v\"  \n", 0o644);
+        put(&d, "etc/clamav/freshclam.conf", b"OnUpdateExecute /opt/updated\n", 0o644);
+        put(&d, "etc/clamd.d/scan.conf", b"Example\nVirusEvent /opt/example\n", 0o644);
+        let s = scan(&d);
+        let got: Vec<(&str, &str, &str, Enablement)> = s
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.principal.as_deref().unwrap(), std::str::from_utf8(e.command.as_deref().unwrap()).unwrap(), e.enabled))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("clamd:VirusEvent", "clamav", "/opt/alert %v", Enablement::Enabled),
+                ("freshclam:OnUpdateExecute", "clamav", "/opt/updated", Enablement::Disabled),
             ]
         );
         std::fs::remove_dir_all(&d).unwrap();
