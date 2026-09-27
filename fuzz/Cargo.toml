@@ -507,3 +507,10 @@ path = "fuzz_targets/dnf_repo.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "openvpn_conf"
+path = "fuzz_targets/openvpn_conf.rs"
+test = false
+doc = false
+bench = false

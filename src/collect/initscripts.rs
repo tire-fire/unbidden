@@ -64,6 +64,8 @@ impl Collector for InitScripts {
         out.extend(ifupdown(cx));
         out.extend(ppp(cx));
         out.extend(wireguard(cx));
+        out.extend(openvpn(cx));
+        out.extend(ifplugd(cx));
         out
     }
 }
@@ -302,6 +304,148 @@ fn wireguard(cx: &mut Ctx) -> Vec<Entry> {
             }
             out.push(e);
         }
+    }
+    out
+}
+
+/// OpenVPN (2.6, Debian's units): each configuration is started by its own
+/// template unit, whose working directory resolves a relative path: *.conf
+/// in /etc/openvpn by openvpn@, which passes `--script-security 2`, and
+/// client/*.conf and server/*.conf by openvpn-client@ and openvpn-server@,
+/// which do not, so there a configuration's scripts run only if it sets
+/// `script-security 2` or higher itself. A `plugin` is loaded either way.
+/// On where the configuration's unit is enabled, unknown elsewhere.
+const OPENVPN_SCRIPTS: [&str; 12] = [
+    "up", "down", "route-up", "route-pre-down", "ipchange", "client-connect", "client-disconnect", "learn-address",
+    "auth-user-pass-verify", "tls-verify", "client-crresponse", "plugin",
+];
+
+/// An OpenVPN configuration line's words: `"`, `'` and backslash quoting,
+/// `#` or `;` starting a comment where a word would.
+fn openvpn_words(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let (mut quote, mut escape, mut in_word) = (None, false, false);
+    for c in line.chars() {
+        if escape {
+            cur.push(c);
+            escape = false;
+            continue;
+        }
+        match (c, quote) {
+            ('\\', q) if q != Some('\'') => escape = true,
+            ('"' | '\'', None) => {
+                quote = Some(c);
+                in_word = true;
+            }
+            (c, Some(q)) if c == q => quote = None,
+            (c, None) if c.is_whitespace() => {
+                if in_word {
+                    out.push(std::mem::take(&mut cur));
+                    in_word = false;
+                }
+            }
+            ('#' | ';', None) if !in_word => break,
+            (c, _) => {
+                cur.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        out.push(cur);
+    }
+    out
+}
+
+fn openvpn(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let installed = cx.root.exists("usr/sbin/openvpn");
+    let wants: Vec<PathBuf> = cx
+        .dir("etc/systemd/system")
+        .into_iter()
+        .filter(|e| e.is_dir && e.name.as_encoded_bytes().ends_with(b".wants"))
+        .map(|e| Path::new("etc/systemd/system").join(e.name))
+        .collect();
+    for (dir, unit, cli_security) in
+        [("etc/openvpn", "openvpn@", true), ("etc/openvpn/client", "openvpn-client@", false), ("etc/openvpn/server", "openvpn-server@", false)]
+    {
+        let mut names: Vec<_> =
+            cx.dir(dir).into_iter().filter(|e| !e.is_dir && e.name.as_encoded_bytes().ends_with(b".conf")).map(|e| e.name).collect();
+        names.sort();
+        for name in names {
+            let rel = Path::new(dir).join(&name);
+            let Some(bytes) = cx.read_capped(&rel, 256 * 1024) else { continue };
+            let text = String::from_utf8_lossy(&bytes);
+            let instance = name.to_string_lossy().trim_end_matches(".conf").to_string();
+            let unit = format!("{unit}{instance}.service");
+            let enabled = wants.iter().any(|w| cx.root.exists(w.join(&unit)));
+            let lines: Vec<Vec<String>> = text.lines().map(openvpn_words).filter(|w| !w.is_empty()).collect();
+            let security = lines
+                .iter()
+                .rev()
+                .find(|w| w[0] == "script-security")
+                .and_then(|w| w.get(1)?.parse::<u32>().ok())
+                .unwrap_or(if cli_security { 2 } else { 1 });
+            for words in &lines {
+                let option = words[0].as_str();
+                let Some(arg) = words.get(1).filter(|_| OPENVPN_SCRIPTS.contains(&option)) else { continue };
+                let mut e = cx.entry(Kind::NetworkDispatcher, &rel, format!("{instance}:{option}:{}", hex(&blake3::hash(arg.as_bytes()).as_bytes()[..6])));
+                e.trigger = Trigger::NetworkEvent;
+                e.principal = Some("root".into());
+                e.note("dispatcher", "openvpn");
+                e.note("hook_phase", option);
+                e.note("unit", unit.clone());
+                let command = words[1..].join(" ");
+                // A relative path is taken from the unit's working directory.
+                if let Some(first) = arg.split_whitespace().next() {
+                    let path = if first.starts_with('/') { PathBuf::from(first) } else { Path::new("/").join(dir).join(first) };
+                    e.target_path = Some(path);
+                }
+                e.command = Some(command.into_bytes());
+                e.enabled = if enabled { Enablement::Enabled } else { Enablement::Unknown };
+                if !enabled {
+                    e.note("depends_on", format!("{unit}, not enabled, or openvpn run by hand"));
+                }
+                if option != "plugin" && security < 2 {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", "script-security below 2 runs no external program");
+                }
+                if !installed {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", "openvpn is not installed");
+                }
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
+/// ifplugd's action script (Debian's) runs `run-parts` over
+/// /etc/ifplugd/action.d on each link going up or down.
+fn ifplugd(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    if !cx.root.exists("usr/sbin/ifplugd") {
+        return out;
+    }
+    let flavour = super::run_parts_flavour(cx);
+    let dir = Path::new("etc/ifplugd/action.d");
+    let mut ents = cx.dir(dir);
+    ents.sort_by(|a, b| a.name.cmp(&b.name));
+    for ent in ents {
+        let rel = dir.join(&ent.name);
+        if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
+            continue;
+        }
+        let mut e = script_entry(cx, Kind::NetworkDispatcher, &rel, &ent.name, Trigger::NetworkEvent);
+        e.note("dispatcher", "ifplugd");
+        e.enabled = if exec_mode(cx, &rel) != 0 { Enablement::Enabled } else { Enablement::Disabled };
+        if let Some(why) = super::run_parts_skips(cx, flavour, dir, ent.name.as_encoded_bytes()) {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", why);
+        }
+        out.push(e);
     }
     out
 }
@@ -1461,6 +1605,44 @@ exec /usr/sbin/sshd\n";
         let wg = cmd("/opt/wg-up %i");
         assert_eq!((wg.enabled, wg.raw["hook_phase"].as_str()), (Enablement::Enabled, "PostUp"));
         assert!(s.entries.iter().all(|e| e.command.as_deref() != Some(&b"/not/interface"[..])));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn openvpn_scripts_run_by_script_security_and_ifplugd_by_run_parts() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("unbidden-ovpn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let put = |rel: &str, body: &[u8], mode: u32| {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        put("usr/sbin/openvpn", b"", 0o755);
+        put("etc/openvpn/office.conf", b"remote vpn.example 1194\nup \"/etc/openvpn/up.sh --x\"\n; down /commented\n", 0o600);
+        put("etc/openvpn/client/home.conf", b"remote h 1194\nup scripts/up.sh\nplugin /usr/lib/openvpn/evil.so\n", 0o600);
+        put("etc/openvpn/server/srv.conf", b"script-security 2\nclient-connect /opt/cc\n", 0o600);
+        std::fs::create_dir_all(d.join("etc/systemd/system/multi-user.target.wants")).unwrap();
+        std::os::unix::fs::symlink("/lib/systemd/system/openvpn-server@.service", d.join("etc/systemd/system/multi-user.target.wants/openvpn-server@srv.service")).unwrap();
+        put("usr/sbin/ifplugd", b"", 0o755);
+        put("etc/ifplugd/action.d/mount-nfs", b"#!/bin/sh\n", 0o755);
+
+        let root = crate::root::Root::at(&d).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(InitScripts)];
+        let s = crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors);
+        let by = |phase: &str, conf: &str| {
+            s.entries.iter().find(|e| e.raw.get("hook_phase").is_some_and(|p| p == phase) && e.source == d.join(conf)).unwrap_or_else(|| panic!("no {phase} in {conf}"))
+        };
+        let office = by("up", "etc/openvpn/office.conf");
+        assert_eq!((office.command.as_deref(), office.enabled), (Some(&b"/etc/openvpn/up.sh --x"[..]), Enablement::Unknown), "openvpn@ passes script-security 2");
+        let home = by("up", "etc/openvpn/client/home.conf");
+        assert_eq!(home.enabled, Enablement::Disabled, "openvpn-client@ does not, and the file does not either");
+        assert_eq!(home.target_path, Some(PathBuf::from("/etc/openvpn/client/scripts/up.sh")), "relative to the unit's directory");
+        assert_eq!(by("plugin", "etc/openvpn/client/home.conf").enabled, Enablement::Unknown, "a plugin loads whatever script-security says");
+        assert_eq!(by("client-connect", "etc/openvpn/server/srv.conf").enabled, Enablement::Enabled);
+        assert!(!s.entries.iter().any(|e| e.command.as_deref() == Some(&b"/commented"[..])));
+        assert!(s.entries.iter().any(|e| e.name == "mount-nfs" && e.enabled == Enablement::Enabled));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

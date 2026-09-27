@@ -1,0 +1,10 @@
+client
+dev tun
+remote vpn.example.org 1194 udp
+# comment
+; also a comment
+script-security 2
+up "/etc/openvpn/update-resolv-conf up"
+down /etc/openvpn/update-resolv-conf
+route-up scripts/routes.sh
+plugin /usr/lib/openvpn/openvpn-plugin-auth-pam.so login
