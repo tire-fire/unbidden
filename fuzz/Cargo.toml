@@ -598,3 +598,24 @@ path = "fuzz_targets/cron_apt_action.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "spamassassin_cf"
+path = "fuzz_targets/spamassassin_cf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kea_conf"
+path = "fuzz_targets/kea_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "clamd_conf"
+path = "fuzz_targets/clamd_conf.rs"
+test = false
+doc = false
+bench = false

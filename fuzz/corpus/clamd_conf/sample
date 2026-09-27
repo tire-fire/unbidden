@@ -1,0 +1,4 @@
+LocalSocket /run/clamav/clamd.ctl
+User clamav
+VirusEvent "/opt/alert %v"
+# x

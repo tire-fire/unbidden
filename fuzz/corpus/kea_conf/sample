@@ -1,0 +1,4 @@
+{ "Dhcp4": { /* c */ "hooks-libraries": [ { "library": "/usr/lib/kea/hooks/libdhcp_lease_cmds.so" } ], // x
+# y
+<?include "extra.json"?>
+"valid-lifetime": 4000 } }

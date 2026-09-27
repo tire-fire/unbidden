@@ -1,0 +1,3 @@
+loadplugin Mail::SpamAssassin::Plugin::SPF
+loadplugin X x.pm # c
+required_score 5.0

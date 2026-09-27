@@ -40,6 +40,15 @@
 //! `DatabaseOwner` (clamav). Lines are `Name value`, the value trimmed and
 //! a leading `"` quoting to the last; a line of two characters or fewer or
 //! starting `#` is skipped, and an `Example` line stops the daemon.
+//!
+//! SpamAssassin: each `loadplugin Name [file]` in /etc/spamassassin's
+//! `.pre` and `.cf` files loads Perl into spamd, from the file (relative to
+//! the configuration's directory) or else from Perl's @INC; and Debian's
+//! daily sa-update job runs what `run-parts --lsbsysinit` selects in
+//! /etc/spamassassin/sa-update-hooks.d. Kea: each `"library"` of a
+//! `"hooks-libraries"` list in the kea-dhcp4, kea-dhcp6, kea-dhcp-ddns and
+//! kea-ctrl-agent configurations, loaded into that daemon; Kea's JSON takes
+//! `#`, `//` and `/* */` comments and `<?include "file"?>`.
 
 use std::path::{Path, PathBuf};
 
@@ -85,6 +94,10 @@ impl Collector for Events {
             cron_apt(cx, &mut out);
         }
         clamav(cx, &mut out);
+        if cx.root.exists("usr/sbin/spamd") || cx.root.exists("usr/bin/spamassassin") {
+            spamassassin(cx, &mut out);
+        }
+        kea(cx, &mut out);
         out
     }
 }
@@ -229,6 +242,163 @@ fn clamav(cx: &mut Ctx, out: &mut Vec<Entry>) {
                     e.enabled = Enablement::Disabled;
                     e.note("not_run", "an Example line stops the daemon starting");
                 } else if !installed {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", format!("{daemon} is not installed"));
+                }
+                out.push(e);
+            }
+        }
+    }
+}
+
+fn spamassassin(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let dir = Path::new("etc/spamassassin");
+    for rel in sorted(cx, dir) {
+        let name = file_name(&rel);
+        if !(name.ends_with(".pre") || name.ends_with(".cf")) {
+            continue;
+        }
+        let Some(bytes) = cx.read_capped(&rel, 256 * 1024) else { continue };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let line = line.split('#').next().unwrap_or_default();
+            let mut words = line.split_whitespace();
+            if words.next() != Some("loadplugin") {
+                continue;
+            }
+            let Some(module) = words.next() else { continue };
+            let mut e = entry(cx, &rel, format!("spamassassin:{module}"), "spamd", Trigger::Always);
+            e.command = Some(module.as_bytes().to_vec());
+            match words.next() {
+                Some(file) if file.starts_with('/') => e.target_path = Some(PathBuf::from(file)),
+                Some(file) => e.target_path = Some(cx.root.abs(dir.join(file))),
+                None => e.note("target_unverifiable", "a Perl module found on @INC"),
+            }
+            out.push(e);
+        }
+    }
+    // run-parts --lsbsysinit: LANANA, LSB hierarchical, or Debian cron
+    // names, and no dpkg leftovers.
+    if cx.root.exists("usr/bin/sa-update") {
+        let lanana = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+        let lsb = |n: &str| {
+            let n = n.strip_prefix('_').unwrap_or(n);
+            n.rsplit_once('-').is_some_and(|(head, last)| {
+                lanana(last) && head.split('-').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.'))
+            })
+        };
+        let cron = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        for rel in sorted(cx, &dir.join("sa-update-hooks.d")) {
+            let name = file_name(&rel);
+            let cruft = [".dpkg-old", ".dpkg-dist", ".dpkg-new", ".dpkg-tmp"].iter().any(|c| name.ends_with(c));
+            if !(lanana(&name) || lsb(&name) || cron(&name)) || cruft {
+                continue;
+            }
+            let mut e = entry(cx, &rel, format!("sa-update:{name}"), "sa-update", Trigger::Schedule);
+            e.target_path = Some(cx.root.abs(&rel));
+            if e.mode & 0o111 == 0 {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "not executable");
+            }
+            out.push(e);
+        }
+    }
+}
+
+/// Kea's JSON with its comments blanked out, strings kept whole.
+fn kea_uncomment(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                out.push(c);
+                while let Some(c) = chars.next() {
+                    out.push(c);
+                    if c == '\\' {
+                        out.extend(chars.next());
+                    } else if c == '"' {
+                        break;
+                    }
+                }
+            }
+            '#' => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut last = ' ';
+                for c in chars.by_ref() {
+                    if last == '*' && c == '/' {
+                        break;
+                    }
+                    last = c;
+                }
+                out.push(' ');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// The quoted string after `"key"` and a colon, wherever they appear.
+fn json_strings<'a>(text: &'a str, key: &str) -> Vec<&'a str> {
+    let needle = format!("\"{key}\"");
+    let mut out = Vec::new();
+    for (i, _) in text.match_indices(&needle) {
+        let rest = text[i + needle.len()..].trim_start();
+        let Some(rest) = rest.strip_prefix(':') else { continue };
+        let Some(rest) = rest.trim_start().strip_prefix('"') else { continue };
+        if let Some(end) = rest.find('"') {
+            out.push(&rest[..end]);
+        }
+    }
+    out
+}
+
+fn kea(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    for (conf, daemon) in [
+        ("etc/kea/kea-dhcp4.conf", "kea-dhcp4"),
+        ("etc/kea/kea-dhcp6.conf", "kea-dhcp6"),
+        ("etc/kea/kea-dhcp-ddns.conf", "kea-dhcp-ddns"),
+        ("etc/kea/kea-ctrl-agent.conf", "kea-ctrl-agent"),
+    ] {
+        let installed = cx.root.exists(format!("usr/sbin/{daemon}"));
+        let mut files = vec![PathBuf::from(conf)];
+        let mut i = 0;
+        while i < files.len() && i < 16 {
+            let rel = files[i].clone();
+            i += 1;
+            let Some(bytes) = cx.read_capped(&rel, 1024 * 1024) else { continue };
+            let text = kea_uncomment(&String::from_utf8_lossy(&bytes));
+            for (at, _) in text.match_indices("<?include") {
+                if let Some(q) = text[at..].split('"').nth(1) {
+                    files.push(super::include_rel(rel.parent().unwrap_or(Path::new("")), q.as_bytes()));
+                }
+            }
+            for lib in json_strings(&text, "library") {
+                let mut e = entry(cx, &rel, format!("{daemon}:{lib}"), daemon, Trigger::NetworkEvent);
+                e.principal = None;
+                e.command = Some(lib.as_bytes().to_vec());
+                if lib.starts_with('/') {
+                    e.target_path = Some(PathBuf::from(lib));
+                } else {
+                    e.note("target_unverifiable", "a hooks library found in Kea's hooks directory");
+                }
+                if !installed {
                     e.enabled = Enablement::Disabled;
                     e.note("not_run", format!("{daemon} is not installed"));
                 }
@@ -659,6 +829,36 @@ mod tests {
             [
                 ("clamd:VirusEvent", "clamav", "/opt/alert %v", Enablement::Enabled),
                 ("freshclam:OnUpdateExecute", "clamav", "/opt/updated", Enablement::Disabled),
+            ]
+        );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn spamassassin_and_kea_load_what_their_configurations_name() {
+        let d = std::env::temp_dir().join(format!("unbidden-plugins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        put(&d, "usr/sbin/spamd", b"", 0o755);
+        put(&d, "etc/spamassassin/v310.pre", b"# loadplugin Mail::SpamAssassin::Plugin::Never\nloadplugin Mail::SpamAssassin::Plugin::SPF\n", 0o644);
+        put(&d, "etc/spamassassin/local.cf", b"loadplugin Evil evil.pm # here\n", 0o644);
+        put(&d, "etc/spamassassin/notes.txt", b"loadplugin Never\n", 0o644);
+        put(&d, "usr/sbin/kea-dhcp4", b"", 0o755);
+        put(
+            &d,
+            "etc/kea/kea-dhcp4.conf",
+            b"{ \"Dhcp4\": {\n // \"library\": \"/never.so\"\n /* \"library\": \"/nor.so\" */\n \"hooks-libraries\": [ { \"library\" : \"/opt/hook.so\", \"parameters\": { \"x\": \"# not a comment\" } } ],\n<?include \"extra.json\"?>\n} }\n",
+            0o644,
+        );
+        put(&d, "etc/kea/extra.json", b"\"hooks-libraries\": [ { \"library\": \"libdhcp_lease_cmds.so\" } ]\n", 0o644);
+        let s = scan(&d);
+        let got: Vec<(&str, Option<&Path>)> = s.entries.iter().map(|e| (e.name.as_str(), e.target_path.as_deref())).collect();
+        assert_eq!(
+            got,
+            [
+                ("kea-dhcp4:libdhcp_lease_cmds.so", None),
+                ("kea-dhcp4:/opt/hook.so", Some(Path::new("/opt/hook.so"))),
+                ("spamassassin:Evil", Some(d.join("etc/spamassassin/evil.pm").as_path())),
+                ("spamassassin:Mail::SpamAssassin::Plugin::SPF", None),
             ]
         );
         std::fs::remove_dir_all(&d).unwrap();
