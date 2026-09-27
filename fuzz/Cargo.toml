@@ -430,3 +430,17 @@ path = "fuzz_targets/python_pth.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hosts_allow"
+path = "fuzz_targets/hosts_allow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crypttab"
+path = "fuzz_targets/crypttab.rs"
+test = false
+doc = false
+bench = false

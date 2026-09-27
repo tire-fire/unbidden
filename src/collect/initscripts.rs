@@ -59,10 +59,51 @@ impl Collector for InitScripts {
         out.extend(dispatcher(cx));
         out.extend(dhclient_hooks(cx));
         out.extend(dhcpcd_hooks(cx));
+        out.extend(crypttab(cx));
         out
     }
 }
 
+
+// ------------------------------------------------------------ crypttab ----
+
+/// `keyscript=` in /etc/crypttab: a program run as root at boot, its output
+/// taken as the key to unlock the device. Only Debian's cryptsetup scripts
+/// honour it, in the initramfs for the devices unlocked there and in
+/// cryptdisks; systemd-cryptsetup ignores it. So whether it runs depends on
+/// how the device is unlocked, which is left unknown. A name without a
+/// slash is a script in /lib/cryptsetup/scripts (crypttab(5)).
+fn crypttab(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let rel = Path::new("etc/crypttab");
+    let Some(bytes) = cx.read_capped(rel, 256 * 1024) else { return out };
+    for line in bytes.split(|b| *b == b'\n') {
+        let fields: Vec<&[u8]> = line.split(|b| b.is_ascii_whitespace()).filter(|f| !f.is_empty()).collect();
+        if fields.first().is_none_or(|f| f.starts_with(b"#")) || fields.len() < 4 {
+            continue;
+        }
+        for opt in fields[3].split(|b| *b == b',') {
+            let Some(script) = opt.strip_prefix(b"keyscript=").filter(|s| !s.is_empty()) else { continue };
+            let path = if script.contains(&b'/') {
+                PathBuf::from(std::ffi::OsStr::from_bytes(script))
+            } else {
+                Path::new("/lib/cryptsetup/scripts").join(std::ffi::OsStr::from_bytes(script))
+            };
+            let target = String::from_utf8_lossy(fields[0]).into_owned();
+            let mut e = cx.entry(Kind::Crypttab, rel, format!("keyscript:{target}"));
+            e.trigger = Trigger::Boot;
+            e.principal = Some("root".into());
+            e.enabled = Enablement::Unknown;
+            e.note("device", String::from_utf8_lossy(fields[1]).into_owned());
+            e.note("key", String::from_utf8_lossy(fields[2]).into_owned());
+            e.note("depends_on", "unlocked by Debian's cryptsetup scripts (initramfs or cryptdisks), not systemd-cryptsetup");
+            e.command = Some([path.as_os_str().as_bytes(), b" ", fields[2]].concat());
+            e.target_path = Some(path);
+            out.push(e);
+        }
+    }
+    out
+}
 // ------------------------------------------------------------ rc.local ----
 
 fn rc_local(cx: &mut Ctx) -> Vec<Entry> {
@@ -1099,5 +1140,35 @@ exec /usr/sbin/sshd\n";
         put(&d, "etc/dhcpcd.exit-hook", b"/opt/x\n", 0o644);
         assert!(scan(&d).entries.is_empty());
         fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_crypttab_keyscript_is_a_boot_program() {
+        let d = std::env::temp_dir().join(format!("unbidden-crypttab-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("etc")).unwrap();
+        std::fs::write(
+            d.join("etc/crypttab"),
+            "# <target> <source> <key> <options>\n\
+             root_crypt UUID=abc none luks,discard,keyscript=decrypt_keyctl\n\
+             data /dev/sdb1 /etc/k luks,keyscript=/usr/local/sbin/getkey\n\
+             swap /dev/sdc1 /dev/urandom swap\n\
+             short /dev/sdd\n",
+        )
+        .unwrap();
+        let root = crate::root::Root::at(&d).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(InitScripts)];
+        let s = crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors);
+        let mut got: Vec<(&str, Option<&Path>, Enablement)> =
+            s.entries.iter().map(|e| (e.name.as_str(), e.target_path.as_deref(), e.enabled)).collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("keyscript:data", Some(Path::new("/usr/local/sbin/getkey")), Enablement::Unknown),
+                ("keyscript:root_crypt", Some(Path::new("/lib/cryptsetup/scripts/decrypt_keyctl")), Enablement::Unknown),
+            ]
+        );
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

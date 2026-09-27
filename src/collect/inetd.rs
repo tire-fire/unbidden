@@ -36,6 +36,7 @@ impl Collector for Inetd {
         if INETD.iter().any(|d| cx.root.exists(d)) {
             inetd(cx, &mut out);
         }
+        tcp_wrappers(cx, &mut out);
         out
     }
 }
@@ -236,6 +237,113 @@ fn inetd(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
+
+// ------------------------------------------------------------ tcp wrappers --
+
+/// Whether libwrap is installed: without it nothing reads hosts.allow.
+fn libwrap(cx: &mut Ctx) -> bool {
+    let mut dirs: Vec<PathBuf> = ["usr/lib64", "lib64", "usr/lib", "lib"].iter().map(PathBuf::from).collect();
+    for base in ["usr/lib", "lib"] {
+        for e in cx.dir(base) {
+            if e.is_dir && e.name.as_encoded_bytes().ends_with(b"-linux-gnu") {
+                dirs.push(Path::new(base).join(e.name));
+            }
+        }
+    }
+    dirs.iter().any(|d| cx.root.exists(d.join("libwrap.so.0")))
+}
+
+/// A rule's fields, split at each `:` that is neither escaped with a
+/// backslash nor inside an IPv6 address's `[...]`.
+fn wrapper_fields(line: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = vec![Vec::new()];
+    let (mut escaped, mut bracket) = (false, false);
+    for &b in line {
+        let field = out.last_mut().expect("never empty");
+        match b {
+            _ if escaped => {
+                field.push(b);
+                escaped = false;
+            }
+            b'\\' => escaped = true,
+            b'[' => {
+                bracket = true;
+                field.push(b);
+            }
+            b']' => {
+                bracket = false;
+                field.push(b);
+            }
+            b':' if !bracket => out.push(Vec::new()),
+            _ => field.push(b),
+        }
+    }
+    out.into_iter().map(|f| f.trim_ascii().to_vec()).collect()
+}
+
+/// /etc/hosts.allow and /etc/hosts.deny, read by libwrap in every program
+/// linked against it (tcpd, and daemons such as rpcbind or vsftpd built
+/// with it) on each connection: `daemons : clients : options`, `#` comments,
+/// a trailing backslash continuing the line. A `spawn` option runs a shell
+/// command as the daemon's user alongside the connection; `twist` replaces
+/// the daemon with one. Built without the options extension, the third
+/// field is itself a shell command. Only lines that run something are
+/// entries. Everything is off where libwrap is not installed.
+fn tcp_wrappers(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let installed = libwrap(cx);
+    let mut used = BTreeMap::new();
+    for file in ["etc/hosts.allow", "etc/hosts.deny"] {
+        let rel = Path::new(file);
+        let Some(bytes) = cx.read_capped(rel, FILE_CAP) else { continue };
+        let mut logical: Vec<Vec<u8>> = Vec::new();
+        let mut open = false;
+        for raw in bytes.split(|b| *b == b'\n') {
+            let joined = raw.ends_with(b"\\");
+            let body = if joined { &raw[..raw.len() - 1] } else { raw };
+            match logical.last_mut() {
+                Some(prev) if open => prev.extend_from_slice(body),
+                _ => logical.push(body.to_vec()),
+            }
+            open = joined;
+        }
+        for line in logical {
+            let t = line.trim_ascii();
+            if t.is_empty() || t[0] == b'#' {
+                continue;
+            }
+            let fields = wrapper_fields(t);
+            if fields.len() < 3 {
+                continue;
+            }
+            let daemons = lossy(&fields[0]);
+            for opt in &fields[2..] {
+                let word_end = opt.iter().position(|b| b.is_ascii_whitespace() || *b == b'=').unwrap_or(opt.len());
+                let keyword = lossy(&opt[..word_end]).to_ascii_lowercase();
+                let value = opt[word_end..].trim_ascii_start();
+                let value = value.strip_prefix(b"=").unwrap_or(value).trim_ascii();
+                if !matches!(keyword.as_str(), "spawn" | "twist") || value.is_empty() {
+                    continue;
+                }
+                let name = uniq(&mut used, rel, format!("{daemons}:{keyword}"));
+                let mut e = cx.entry(Kind::TcpWrapper, rel, name);
+                e.trigger = Trigger::NetworkEvent;
+                e.enabled = if installed { Enablement::Enabled } else { Enablement::Disabled };
+                if !installed {
+                    e.note("not_run", "libwrap is not installed");
+                }
+                e.note("option", keyword.clone());
+                e.note("daemons", daemons.clone());
+                e.note("clients", lossy(&fields[1]));
+                e.command = Some(value.to_vec());
+                if std::str::from_utf8(&line).is_err() {
+                    e.flag(Flag::EncodingAnomaly);
+                }
+                out.push(e);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,6 +456,51 @@ mod tests {
         put(&d, "etc/xinetd.d/telnet", &service("telnet", "/usr/sbin/in.telnetd", ""));
         put(&d, "etc/inetd.conf", b"telnet stream tcp nowait root /usr/sbin/in.telnetd in.telnetd\n");
         assert!(scan(&d).entries.is_empty());
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn tcp_wrappers_spawn_and_twist_run_only_where_libwrap_is() {
+        let d = std::env::temp_dir().join(format!("unbidden-tcpw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let put = |rel: &str, body: &[u8]| {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        put(
+            "etc/hosts.allow",
+            b"# spawn (/bin/commented) &\n\
+              sshd : ALL : allow\n\
+              in.telnetd : [::1]/128 : spawn (/usr/bin/logger %h) & : allow\n\
+              vsftpd : ALL : severity auth.info : \\\n    twist = /bin/echo 421 denied\\: go away\n\
+              rpcbind : ALL\n",
+        );
+        put("etc/hosts.deny", b"ALL : ALL : spawn /opt/alert %d\n");
+        let run = || {
+            let root = crate::root::Root::at(&d).unwrap();
+            let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Inetd)];
+            crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors)
+        };
+        let s = run();
+        let mut got: Vec<(String, String, Enablement)> = s
+            .entries
+            .iter()
+            .map(|e| (e.name.clone(), String::from_utf8_lossy(e.command.as_deref().unwrap_or_default()).into_owned(), e.enabled))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("ALL:spawn".to_string(), "/opt/alert %d".to_string(), Enablement::Disabled),
+                ("in.telnetd:spawn".to_string(), "(/usr/bin/logger %h) &".to_string(), Enablement::Disabled),
+                ("vsftpd:twist".to_string(), "/bin/echo 421 denied: go away".to_string(), Enablement::Disabled),
+            ],
+            "an escaped colon stays in the command; an IPv6 client keeps its colons"
+        );
+        assert_eq!(s.entries[0].raw["not_run"], "libwrap is not installed");
+        put("usr/lib/x86_64-linux-gnu/libwrap.so.0", b"");
+        assert!(run().entries.iter().all(|e| e.enabled == Enablement::Enabled && e.trigger == Trigger::NetworkEvent));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

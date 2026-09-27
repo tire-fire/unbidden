@@ -1,0 +1,6 @@
+# /etc/hosts.allow
+sshd : 10.0.0.0/8 : allow
+in.telnetd : [2001:db8::]/32 : spawn (/usr/bin/logger -t tcpd %h) & : allow
+vsftpd : ALL : twist /bin/echo 421 go\: away
+ALL : ALL : \
+    deny

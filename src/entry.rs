@@ -89,6 +89,8 @@ str_enum!(Kind {
     CloudInit => "cloud_init",
     SystemdHook => "systemd_hook",
     PythonStartup => "python_startup",
+    TcpWrapper => "tcp_wrapper",
+    Crypttab => "crypttab",
 });
 
 str_enum!(Trigger {

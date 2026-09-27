@@ -1,0 +1,4 @@
+# <target> <source> <key> <options>
+root_crypt UUID=0f0f none luks,discard,keyscript=decrypt_keyctl
+home /dev/sdb1 /etc/keys/home luks,keyscript=/usr/local/sbin/fetch-key
+swap /dev/sdc1 /dev/urandom swap,cipher=aes-xts-plain64
