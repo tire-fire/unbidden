@@ -352,19 +352,19 @@ fi
 # package to install: found under its kind, unpackaged, gone once removed.
 # plant_check <file> <kind> <name fragment>  (the file's content is on stdin)
 plant_check() {
-    local file="$1" kind="$2" frag="$3" json
-    mkdir -p "$(dirname "$file")"; cat > "$file"
-    json=$("$BIN" --json --all | tail -n +2 | grep "\"kind\":\"$kind\"" | grep -F "$frag" || true)
-    rm -f "$file"
-    [ -n "$json" ] || fail "a $kind planted at $file was not reported"
-    case "$json" in
-        *'"unpackaged"'*) note "a $kind planted at $file reports unpackaged" ;;
-        *) fail "the planted $kind at $file is not unpackaged: $json" ;;
+    pc_file="$1"; pc_kind="$2"; pc_frag="$3"
+    mkdir -p "$(dirname "$pc_file")"; cat > "$pc_file"
+    pc_json=$("$BIN" --json --all | tail -n +2 | grep "\"kind\":\"$pc_kind\"" | grep -F "$pc_frag" || true)
+    rm -f "$pc_file"
+    [ -n "$pc_json" ] || fail "a $pc_kind planted at $pc_file was not reported"
+    case "$pc_json" in
+        *'"unpackaged"'*) note "a $pc_kind planted at $pc_file reports unpackaged" ;;
+        *) fail "the planted $pc_kind at $pc_file is not unpackaged: $pc_json" ;;
     esac
     # A counting grep reads all of the output: -q's early exit can SIGPIPE
     # the scanner, and under pipefail a match would then read as none.
-    if [ "$("$BIN" --json --all | grep -Fc "$file")" -gt 0 ]; then
-        fail "the removed $kind at $file is still reported"
+    if [ "$("$BIN" --json --all | grep -Fc "$pc_file")" -gt 0 ]; then
+        fail "the removed $pc_kind at $pc_file is still reported"
     fi
     return 0
 }
@@ -380,6 +380,11 @@ printf 'Cmnd_Alias UNBIDDEN = /bin/true, /bin/false\nunbidden-check ALL = (root)
 case "$FAMILY" in
     dpkg) printf 'call system("/tmp/x")\n' | plant_check /etc/vim/vimrc.local program_startup "vim:vimrc.local" ;;
     rpm)  printf 'call system("/tmp/x")\n' | plant_check /etc/vimrc.local program_startup "vim:vimrc.local" ;;
+esac
+# What builds the initramfs: a hook mkinitramfs runs, or a dracut module.
+case "$FAMILY" in
+    dpkg) printf '#!/bin/sh\ncp /opt/b "${DESTDIR}/bin/"\n' | plant_check /etc/initramfs-tools/hooks/unbidden-check initramfs_hook "initramfs-tools:hook:unbidden-check" ;;
+    rpm)  printf 'check() { return 0; }\ninstall() { inst /opt/b /bin/b; }\n' | plant_check /usr/lib/dracut/modules.d/99unbidden/module-setup.sh initramfs_hook "dracut:module:unbidden"; rmdir /usr/lib/dracut/modules.d/99unbidden 2>/dev/null ;;
 esac
 # A member of the group sudo's default rule grants root through.
 grp=$([ "$FAMILY" = rpm ] && echo wheel || echo sudo)
