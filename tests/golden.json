@@ -1465,6 +1465,12 @@
         "status": "complete"
       },
       {
+        "entries": 0,
+        "name": "integrity",
+        "reason": "needs --deep",
+        "status": "skipped"
+      },
+      {
         "entries": 3,
         "name": "kernel",
         "status": "partial",

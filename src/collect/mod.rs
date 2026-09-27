@@ -22,6 +22,7 @@ pub mod events;
 pub mod fail2ban;
 pub mod inetd;
 pub mod initscripts;
+pub mod integrity;
 pub mod kernel;
 pub mod logrotate;
 pub mod pkg;
@@ -243,6 +244,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(python::Python),
         Box::new(deep::GitConfig),
         Box::new(deep::Deep),
+        Box::new(integrity::Integrity),
     ]
 }
 

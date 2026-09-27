@@ -328,6 +328,28 @@ fn nevr(header: &Header) -> String {
     if arch.is_empty() { base } else { format!("{base}.{arch}") }
 }
 
+/// Every path a header claims, root-relative, ghosts left out: a ghost is
+/// a file the package never wrote and never verifies.
+pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
+    let mut out = BTreeSet::new();
+    let Some(blobs) = read_blobs(root) else { return out };
+    for blob in blobs {
+        let Some(h) = Header::parse(&blob) else { continue };
+        let basenames = h.string_array(TAG_BASENAMES);
+        let dirnames = h.string_array(TAG_DIRNAMES);
+        let dirindexes = h.int_array(TAG_DIRINDEXES);
+        let flags = h.int_array(TAG_FILEFLAGS);
+        for (i, base) in basenames.iter().enumerate() {
+            let Some(dir) = dirindexes.get(i).and_then(|d| dirnames.get(*d as usize)) else { continue };
+            if flags.get(i).copied().unwrap_or(0) as u32 & RPMFILE_GHOST != 0 {
+                continue;
+            }
+            out.insert(PathBuf::from(format!("{}{base}", dir.trim_start_matches('/'))));
+        }
+    }
+    out
+}
+
 /// A public key `rpm --import` wrote into the database as a `gpg-pubkey`
 /// header: what every package a repository serves is checked against.
 pub struct ImportedKey {

@@ -87,7 +87,7 @@ String
 Stable synthetic identity. See below.
 kind
 enum
-Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module, sudo_plugin, polkit_rule, polkit_action, inetd_service, library_dir, kernel_callout, doas, ssh_client, cloud_init, systemd_hook, python_startup, tcp_wrapper, crypttab, display_manager, logrotate, event_handler, interpreter_env, pkg_source, alternative, dpkg_diversion, audit_plugin, monitor_plugin, plugin, incron, external_fact
+Which mechanism class: systemd_unit, systemd_timer, cron, xdg_autostart, shell_profile, pam, udev, rc_local, sysv_init, ssh_authorized_key, sudoers, ld_preload, kernel_module, pkg_hook, motd, network_dispatcher, dbus_service, systemd_generator, at_job, desktop_extension, suid_binary, file_capability, git_hook, tmpfiles, systemd_preset, nss_module, sudo_plugin, polkit_rule, polkit_action, inetd_service, library_dir, kernel_callout, doas, ssh_client, cloud_init, systemd_hook, python_startup, tcp_wrapper, crypttab, display_manager, logrotate, event_handler, interpreter_env, pkg_source, alternative, dpkg_diversion, audit_plugin, monitor_plugin, plugin, package_file, incron, external_fact
 collector
 Option<String>
 The collector that produced the entry, or, for an entry enrichment made from another, that entry's collector. A diff judges each entry's differences by what this collector saw in both scans (§9). Absent from records written before the field existed.
@@ -267,7 +267,11 @@ Repositories can be anywhere
 Orphaned interpreters
 Scripts referenced by entries but living outside any package
 Only meaningful with a full walk
+Packaged code integrity
+Every program and shared object a package claims, checked against the package's own digest; the ones that differ, as package_file entries
+Every manifest on the host, and a digest of every program in them
 As built, the third is not a --deep collector. "Referenced by entries" is a relation between entries, which §14.4 puts in enrichment, and nothing in it needs a traversal: every file it reads was already named by an entry. So enrichment reads each script an entry runs, follows its interpreter line and any file it hands control to, and emits those as entries with their own provenance. One hop only, and only for paths written out in full; nothing is guessed at or recursed into. A sourced file that does not exist is not followed: it runs nothing, and init scripts source optional defaults only after testing for them.
+As built, the integrity check walks the package manifests rather than the filesystem: every path dpkg's file lists or rpm's headers claim (ghosts left out), kept where it is a regular file with an execute bit or a shared object by name, is judged by the package backends exactly as an entry's own file is (§7). A conffile edited is expected, a file with no recorded digest is unknown, and neither is reported; a file whose digest differs is a package_file entry, shown by the packaged-modified flag it carries. Bounded at 500,000 files, and marked partial past that.
 One traversal serves the other two. Walk once, feed every deep collector from the same pass, and skip pseudo-filesystems, network mounts and anything crossing a device boundary unless told otherwise. Getting this wrong means a scan that hangs on an unresponsive NFS mount, which on an incident host is the worst possible failure.
 --deep output is marked as such in the JSON header, and §9 treats a deep baseline and a shallow one as non-comparable for the same reason it rejects mismatched collector status.
 Merged-usr deduplication
@@ -646,7 +650,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §5: a command's first word kept the shell operator after it, so /opt/a.sh; was the target of a cron line.
 • §5: a Python module or script was not followed to the programs it starts; a dnf plugin module is one.
 • §7: a bare command was looked up by the text's first word, so an apt hook opening with [ ! -f … ] || /usr/bin/dbus-send read as running /usr/bin/[.
-• §5: shell text was split by a lexer written for unbidden. The bash grammar splits it now, so the headers of for, case and select are no longer read as commands, and command, time with options and xargs are looked through; builtin names no program.
+• §5: shell text was split by a lexer written for unbidden. The bash grammar splits it now, so the headers of for, case and select are no longer read as commands, and command, time with options and xargs are looked through; builtin names no program. A `trap` action is re-read as shell text too: it is code the shell runs when its signal arrives or at exit, and an entry wrapped by `trap` says so.
 • §7: rpm symlinks were never verified.
 • §7: maintainer scripts were hidden whatever had been done to them.
 • §11: offline roots were refused outright on kernels before 5.6.

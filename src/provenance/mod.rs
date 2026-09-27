@@ -39,6 +39,13 @@ pub struct Resolution {
 /// only ever asked about a path no package claims: the GeneratedBy verdict
 /// takes Unpackaged away, and a file a package ships must be checked against
 /// that package whatever it happens to be called.
+/// Every path some package claims, from whichever databases the host has.
+pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
+    let mut out = dpkg::packaged_files(root);
+    out.extend(rpm::packaged_files(root));
+    out
+}
+
 pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Resolution {
     resolve_with(root, wanted, &[("dpkg", dpkg::resolve), ("rpm", rpm::resolve)])
 }

@@ -34,6 +34,29 @@ pub fn present(root: &Root) -> bool {
     root.exists(STATUS)
 }
 
+/// Every path the file lists claim, root-relative, for a scan that asks
+/// about all of them.
+pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
+    let mut out = BTreeSet::new();
+    if !present(root) {
+        return out;
+    }
+    for ent in root.read_dir_optional(INFO).unwrap_or_default() {
+        let name = ent.name.to_string_lossy().into_owned();
+        if !name.ends_with(".list") {
+            continue;
+        }
+        let Ok((bytes, _)) = root.read_capped(format!("{INFO}/{name}"), DB_CAP) else { continue };
+        for line in bytes.split(|b| *b == b'\n') {
+            let listed = strip_slash(line);
+            if !listed.is_empty() {
+                out.insert(PathBuf::from(String::from_utf8_lossy(listed).into_owned()));
+            }
+        }
+    }
+    out
+}
+
 pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
     if !present(root) {
         return None;

@@ -194,7 +194,7 @@ const WRAPPERS: &[(&str, &[&str], usize)] = &[
 /// rather than looked up: `true` in `true; /tmp/evil` must not stand in for
 /// the command after it.
 const NO_PROGRAM: &[&str] = &[
-    "cd", "export", "exit", "set", "unset", "local", "shift", "return", "read", "wait", "trap", "ulimit",
+    "cd", "export", "exit", "set", "unset", "local", "shift", "return", "read", "wait", "ulimit",
     "umask", "true", "false", ":", "echo", "printf", "test", "[", "[[", "readonly", "declare", "alias",
     "break", "continue", "fi", "done", "esac", "}", "then", "else", "builtin",
 ];
@@ -350,6 +350,21 @@ fn programs(mut words: Vec<String>, by: Vec<&'static str>, depth: usize, out: &m
         "eval" => {
             for c in commands(&words[1..].join(" "), depth + 1) {
                 programs(c, by.clone(), depth + 1, out);
+            }
+            return;
+        }
+        // `trap action signal...`: the action is shell text the shell runs
+        // when the signal arrives, or at exit. `-` restores the default and
+        // an empty action ignores the signal; `-p` and `-l` only print, and
+        // one argument alone names a signal to reset.
+        "trap" => {
+            let args: Vec<&String> = words[1..].iter().skip_while(|a| matches!(a.as_str(), "-p" | "-l" | "--")).collect();
+            if args.len() >= 2 && !matches!(args[0].as_str(), "-" | "") {
+                let mut by_trap = by.clone();
+                by_trap.push("trap");
+                for c in commands(args[0], depth + 1) {
+                    programs(c, by_trap.clone(), depth + 1, out);
+                }
             }
             return;
         }
@@ -1968,6 +1983,16 @@ mod tests {
         lands("/bin/sh -ec '/usr/bin/true'", "bin/sh", Some("usr/bin/true"), "sh");
         lands("/usr/bin/env -S \"/tmp/evil a\"", "usr/bin/env", Some("tmp/evil"), "env");
         lands("/bin/sh -c 'FOO=1 BAR=2 /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh");
+        // A trap's action runs when its signal arrives; reset and ignore run
+        // nothing.
+        let (e, more) = run("/bin/sh -c 'trap \"/opt/x --cleanup\" EXIT INT; /usr/bin/true'", Some("bin/sh"));
+        let all: Vec<&Entry> = std::iter::once(&e).chain(more.iter()).collect();
+        assert!(
+            all.iter().any(|x| x.target_path.as_deref() == Some(dir.join("opt/x").as_path()) && x.raw.get("target_wrapped_by").is_some_and(|b| b.ends_with("trap"))),
+            "the trap action is a program the script runs: {:?}",
+            all.iter().map(|x| (x.target_path.clone(), x.raw.get("target_wrapped_by").cloned())).collect::<Vec<_>>()
+        );
+        lands("/bin/sh -c 'trap - EXIT; trap \"\" INT; trap -p; /usr/bin/true'", "bin/sh", Some("usr/bin/true"), "sh");
         // A builtin in front no longer stands in for the command after it.
         lands("/bin/sh -c 'true; /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh");
         lands("/bin/sh -c '[ -x /tmp/evil ] && /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh");

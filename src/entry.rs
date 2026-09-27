@@ -101,6 +101,7 @@ str_enum!(Kind {
     AuditPlugin => "audit_plugin",
     MonitorPlugin => "monitor_plugin",
     Plugin => "plugin",
+    PackageFile => "package_file",
     Incron => "incron",
     ExternalFact => "external_fact",
 });
