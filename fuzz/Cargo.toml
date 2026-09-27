@@ -668,3 +668,24 @@ path = "fuzz_targets/screenrc.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "dkms_conf"
+path = "fuzz_targets/dkms_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dracut_conf"
+path = "fuzz_targets/dracut_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pixbuf_loaders"
+path = "fuzz_targets/pixbuf_loaders.rs"
+test = false
+doc = false
+bench = false

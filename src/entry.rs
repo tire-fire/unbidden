@@ -107,6 +107,7 @@ str_enum!(Kind {
     BrowserPolicy => "browser_policy",
     ProgramStartup => "program_startup",
     GroupMember => "group_member",
+    InitramfsHook => "initramfs_hook",
     Incron => "incron",
     ExternalFact => "external_fact",
 });

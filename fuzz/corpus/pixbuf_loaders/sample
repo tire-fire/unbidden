@@ -1,0 +1,9 @@
+# GdkPixbuf Image Loader Modules file
+#
+
+"/usr/lib64/gdk-pixbuf-2.0/2.10.0/loaders/libpixbufloader-png.so"
+"png" 5 "gdk-pixbuf" "PNG" "LGPL"
+"image/png" ""
+"png" ""
+"\211PNG\r\n\032\n" "" 100
+

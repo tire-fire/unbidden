@@ -17,7 +17,10 @@
 //! `layer.library_path` of each in implicit_layer.d, loaded into every
 //! Vulkan program without being asked for. OpenCL (ocl-icd): each line of
 //! each `.icd` file in /etc/OpenCL/vendors, a library loaded by every OpenCL
-//! program. A relative library name is resolved on the loader's search path.
+//! program. gdk-pixbuf: the loader paths of `loaders.cache` in the
+//! gdk-pixbuf-2.0/2.10.0 directory, written by gdk-pixbuf-query-loaders
+//! (no package owns it) and loaded by every GTK program that shows an
+//! image. A relative library name is resolved on the loader's search path.
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +51,7 @@ impl Collector for Plugins {
             icd_json(cx, Path::new(dir), framework, trigger, &libdirs, &mut out);
         }
         opencl(cx, &libdirs, &mut out);
+        gdk_pixbuf(cx, &mut out);
         crate::entry::dedup_ids(&mut out);
         out
     }
@@ -252,6 +256,45 @@ fn opencl(cx: &mut Ctx, libdirs: &[String], out: &mut Vec<Entry>) {
     }
 }
 
+/// `loaders.cache`: stanzas whose first line is the quoted loader path.
+fn gdk_pixbuf(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let mut dirs: Vec<PathBuf> = vec!["usr/lib64".into(), "usr/lib".into()];
+    for ent in cx.dir(Path::new("usr/lib")) {
+        if ent.is_dir && ent.name.to_string_lossy().contains("-linux-") {
+            dirs.push(Path::new("usr/lib").join(&ent.name));
+        }
+    }
+    for lib in dirs {
+        let base = lib.join("gdk-pixbuf-2.0");
+        for ver in cx.dir(&base).into_iter().filter(|e| e.is_dir).map(|e| base.join(e.name)) {
+            let rel = ver.join("loaders.cache");
+            let Some(bytes) = cx.read_capped(&rel, CAP) else { continue };
+            let mut at_stanza_start = true;
+            for line in String::from_utf8_lossy(&bytes).lines() {
+                let t = line.trim();
+                if t.is_empty() {
+                    at_stanza_start = true;
+                    continue;
+                }
+                if t.starts_with('#') {
+                    continue;
+                }
+                if at_stanza_start
+                    && let Some(path) = t.strip_prefix('"').and_then(|r| r.split('"').next())
+                    && path.starts_with('/')
+                {
+                    let name = path.rsplit('/').next().unwrap_or(path);
+                    let mut e = entry(cx, &rel, format!("gdk-pixbuf:{name}"), "gdk-pixbuf", Trigger::Always);
+                    e.target_path = Some(PathBuf::from(path));
+                    e.note("registry_generated", "written by gdk-pixbuf-query-loaders; no package owns it");
+                    out.push(e);
+                }
+                at_stanza_start = false;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +332,7 @@ mod tests {
         put(&d, "usr/share/vulkan/implicit_layer.d/beacon.json", b"{ \"layer\": { \"library_path\": \"/opt/layer.so\" } }");
         // OpenCL.
         put(&d, "etc/OpenCL/vendors/mesa.icd", b"/usr/lib/libMesaOpenCL.so.1\n");
+        put(&d, "usr/lib64/gdk-pixbuf-2.0/2.10.0/loaders.cache", b"# generated\n\n\"/usr/lib64/gdk-pixbuf-2.0/2.10.0/loaders/libpixbufloader-png.so\"\n\"png\" 5 \"gdk-pixbuf\" \"PNG\" \"LGPL\"\n\"image/png\" \"\"\n\"png\" \"\"\n\"\\211PNG\\r\\n\\032\\n\" \"\" 100\n\n\"/opt/evil.so\"\n\"evil\" 5 \"gdk-pixbuf\" \"x\" \"x\"\n");
         let s = scan(&d);
         let mut got: Vec<(&str, Option<&str>)> =
             s.entries.iter().map(|e| (e.name.as_str(), e.target_path.as_deref().map(|p| p.to_str().unwrap()))).collect();
@@ -299,6 +343,8 @@ mod tests {
                 ("egl:50_mesa.json", None),
                 ("gconv:/opt/abs", Some("/opt/abs.so")),
                 ("gconv:evil", Some(d.join("usr/lib64/gconv/evil.so").to_str().unwrap())),
+                ("gdk-pixbuf:evil.so", Some("/opt/evil.so")),
+                ("gdk-pixbuf:libpixbufloader-png.so", Some("/usr/lib64/gdk-pixbuf-2.0/2.10.0/loaders/libpixbufloader-png.so")),
                 ("opencl:mesa.icd", Some("/usr/lib/libMesaOpenCL.so.1")),
                 ("p11-kit:mymod.module", Some("/usr/lib/mymod.so")),
                 ("p11-kit:soname.module", Some(d.join("usr/lib/x86_64-linux-gnu/bare.so").to_str().unwrap())),

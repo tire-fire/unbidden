@@ -23,6 +23,7 @@ pub mod editors;
 pub mod events;
 pub mod fail2ban;
 pub mod inetd;
+pub mod initramfs;
 pub mod initscripts;
 pub mod integrity;
 pub mod kernel;
@@ -236,6 +237,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(polkit::Polkit),
         Box::new(inetd::Inetd),
         Box::new(kernel::Kernel),
+        Box::new(initramfs::Initramfs),
         Box::new(logrotate::Logrotate),
         Box::new(events::Events),
         Box::new(agents::Agents),

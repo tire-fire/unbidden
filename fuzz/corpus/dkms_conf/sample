@@ -1,0 +1,7 @@
+PACKAGE_NAME="evil"
+PACKAGE_VERSION="1.0"
+BUILT_MODULE_NAME[0]="evil"
+DEST_MODULE_LOCATION[0]="/kernel/extra"
+POST_INSTALL="post.sh --now"
+PRE_BUILD=pre.sh
+AUTOINSTALL="yes"

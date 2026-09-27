@@ -1,0 +1,5 @@
+# dist
+install_optional_items+=" vi /usr/libexec/vi "
+add_dracutmodules+=" fips "
+install_items+=" /opt/x "
+compress="zstd"

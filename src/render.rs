@@ -76,7 +76,10 @@ pub fn suppressed(e: &Entry) -> bool {
     // or modified is a hijack the packaged registry already points at, and
     // shows; so does a registry file no package owns or one edited.
     if e.kind == Kind::Plugin {
-        if !e.provenance.is_verified() {
+        // A registry no package can own — gdk-pixbuf's loaders.cache is
+        // written by a trigger after every loader install — is judged by the
+        // libraries it names alone.
+        if !e.provenance.is_verified() && !e.raw.contains_key("registry_generated") {
             return false;
         }
         let target_ok = target_verified || e.has_flag(Flag::TargetMissing);

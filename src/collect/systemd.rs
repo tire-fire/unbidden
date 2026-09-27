@@ -708,7 +708,9 @@ fn power_hooks(cx: &mut Ctx) -> Vec<Entry> {
 /// a same-named one in an earlier directory replacing a later one, applied
 /// after the main file. The main file is /etc/systemd/system.conf up to
 /// systemd 255; from 256 the first of the four directories to hold one. The
-/// user manager reads user.conf the same way. One entry per assignment line.
+/// user manager reads user.conf the same way, and then the account's own
+/// ~/.config/systemd/user.conf and user.conf.d/*.conf. One entry per
+/// assignment line.
 fn manager_environment(cx: &mut Ctx) -> Vec<Entry> {
     const CONF_DIRS: [&str; 4] = ["etc/systemd", "run/systemd", "usr/local/lib/systemd", "usr/lib/systemd"];
     let version = systemd_version(cx);
@@ -742,7 +744,17 @@ fn manager_environment(cx: &mut Ctx) -> Vec<Entry> {
             let why = shadowed_by.map(|by| format!("replaced by /{}", by.display()));
             files.push((rel, why));
         }
-        for (rel, why_not) in files {
+        let mut files: Vec<(PathBuf, Option<String>, Option<String>)> = files.into_iter().map(|(r, w)| (r, w, None)).collect();
+        if scope == "user" {
+            for u in cx.users {
+                files.push((u.in_home(".config/systemd/user.conf"), None, Some(u.name.clone())));
+                let dir = u.in_home(".config/systemd/user.conf.d");
+                let mut names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir && e.name.to_string_lossy().ends_with(".conf")).map(|e| e.name).collect();
+                names.sort();
+                files.extend(names.into_iter().map(|n| (dir.join(n), None, Some(u.name.clone()))));
+            }
+        }
+        for (rel, why_not, account) in files {
             let Some(bytes) = read_regular(cx, &rel, crate::root::READ_CAP) else { continue };
             for d in parse_unit(&bytes) {
                 if d.section != "Manager" || !matches!(d.key.as_str(), "DefaultEnvironment" | "ManagerEnvironment") {
@@ -755,6 +767,10 @@ fn manager_environment(cx: &mut Ctx) -> Vec<Entry> {
                 e.note("scope", scope);
                 if scope == "system" {
                     e.principal = Some("root".into());
+                }
+                if let Some(a) = &account {
+                    e.principal = Some(a.clone());
+                    e.note("scope", "the account's own user manager");
                 }
                 for (k, v) in split_env(&d.value) {
                     e.note(&format!("env.{k}"), v);
@@ -1406,6 +1422,9 @@ mod tests {
         write(&dir, "usr/lib/systemd/libsystemd-shared-255.so", b"");
         write(&dir, "etc/systemd/system.conf", b"[Manager]\n#DefaultEnvironment=A=commented\nDefaultEnvironment=\"LD_PRELOAD=/tmp/x.so\" LANG=C\n");
         write(&dir, "usr/lib/systemd/system.conf", b"[Manager]\nDefaultEnvironment=VENDOR=1\n");
+        write(&dir, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/sh\n");
+        write(&dir, "home/alice/.config/systemd/user.conf", b"[Manager]\nDefaultEnvironment=LD_PRELOAD=/tmp/u.so\n");
+        write(&dir, "home/alice/.config/systemd/user.conf.d/10.conf", b"[Manager]\nManagerEnvironment=NODE_OPTIONS=-r/tmp/n\n");
         write(&dir, "usr/lib/systemd/system.conf.d/10-v.conf", b"[Manager]\nManagerEnvironment=V=1\n");
         write(&dir, "etc/systemd/system.conf.d/10-v.conf", b"[Manager]\nDefaultEnvironment=E=1\n");
         write(&dir, "etc/systemd/user.conf", b"[Manager]\nDefaultEnvironment=PERL5OPT=-Mhook\n[Other]\nDefaultEnvironment=NOT=1\n");
@@ -1420,7 +1439,10 @@ mod tests {
         assert_eq!(by("ManagerEnvironment:V=1").raw["not_read"], "replaced by /etc/systemd/system.conf.d/10-v.conf");
         assert_eq!(by("DefaultEnvironment:E=1").enabled, Enablement::Enabled);
         assert_eq!(by("DefaultEnvironment:PERL5OPT=-Mhook").raw["scope"], "user");
-        assert_eq!(hooks.len(), 5, "a commented line and another section are not settings");
+        let mine = by("DefaultEnvironment:LD_PRELOAD=/tmp/u.so");
+        assert_eq!((mine.principal.as_deref(), mine.raw["scope"].as_str()), (Some("alice"), "the account's own user manager"));
+        assert_eq!(by("ManagerEnvironment:NODE_OPTIONS=-r/tmp/n").principal.as_deref(), Some("alice"), "the account's drop-ins too");
+        assert_eq!(hooks.len(), 7, "a commented line and another section are not settings");
 
         // Before 256 a main file outside /etc is never read, earlier one or not.
         std::fs::remove_file(dir.join("etc/systemd/system.conf")).unwrap();

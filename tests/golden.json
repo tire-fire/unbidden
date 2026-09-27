@@ -1470,6 +1470,11 @@
         "status": "complete"
       },
       {
+        "entries": 0,
+        "name": "initramfs",
+        "status": "complete"
+      },
+      {
         "entries": 2,
         "name": "initscripts",
         "status": "complete"
