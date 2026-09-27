@@ -19,6 +19,7 @@ pub mod deep;
 pub mod desktop;
 pub mod dm;
 pub mod events;
+pub mod fail2ban;
 pub mod inetd;
 pub mod initscripts;
 pub mod kernel;
@@ -233,6 +234,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(logrotate::Logrotate),
         Box::new(events::Events),
         Box::new(agents::Agents),
+        Box::new(fail2ban::Fail2ban),
         Box::new(pkg::PkgHooks),
         Box::new(sources::Sources),
         Box::new(cloudinit::CloudInit),

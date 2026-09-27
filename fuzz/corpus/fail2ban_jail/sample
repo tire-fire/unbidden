@@ -1,0 +1,10 @@
+[INCLUDES]
+before = paths-debian.conf
+[DEFAULT]
+banaction = iptables
+action_ = %(banaction)s[port="%(port)s", chain="<chain>"]
+action = %(action_)s
+           other.py[x=1]
+[sshd]
+enabled = true ; on
+port = ssh

@@ -619,3 +619,10 @@ path = "fuzz_targets/clamd_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fail2ban_jail"
+path = "fuzz_targets/fail2ban_jail.rs"
+test = false
+doc = false
+bench = false

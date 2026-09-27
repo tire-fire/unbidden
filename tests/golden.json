@@ -1446,6 +1446,11 @@
       },
       {
         "entries": 0,
+        "name": "fail2ban",
+        "status": "complete"
+      },
+      {
+        "entries": 0,
         "name": "git_config",
         "status": "complete"
       },
