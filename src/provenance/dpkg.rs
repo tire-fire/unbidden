@@ -3,7 +3,10 @@
 //!
 //! Three files answer the question. `info/*.list` says which package owns a
 //! path, `status` gives the version and the conffile manifest, and
-//! `info/*.md5sums` gives the digest the package shipped.
+//! `info/*.md5sums` gives the digest the package shipped. `diversions`
+//! moves a listed path: as dpkg applies it, a path diverted by anyone but
+//! the package listing it (by hand, `:`, included) holds that package's file
+//! at the diverted-to name, and whatever sits at the original is not its.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -15,6 +18,7 @@ use super::{Answers, spellings};
 
 const INFO: &str = "var/lib/dpkg/info";
 const STATUS: &str = "var/lib/dpkg/status";
+const DIVERSIONS: &str = "var/lib/dpkg/diversions";
 
 /// File lists and the status database are large on a full desktop but are
 /// root-owned system files; the cap is a backstop, not a parsing limit.
@@ -49,7 +53,8 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
         }
     }
 
-    let mut owner: BTreeMap<PathBuf, String> = BTreeMap::new();
+    // The owning package, and the name its manifests list the file under.
+    let mut owner: BTreeMap<PathBuf, (String, PathBuf)> = BTreeMap::new();
 
     // dpkg's own metadata directory is not listed in anybody's .list, so
     // every maintainer script in it reads as unpackaged — a hundred rows of
@@ -60,10 +65,11 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
         let name = name.to_string_lossy();
         let Some((stem, ext)) = name.rsplit_once('.') else { continue };
         if MAINTAINER_SCRIPTS.contains(&ext) && !stem.is_empty() {
-            owner.insert(w.clone(), stem.to_string());
+            owner.insert(w.clone(), (stem.to_string(), w.clone()));
         }
     }
 
+    let diverted = diversions(root);
     for ent in root.read_dir_optional(INFO).unwrap_or_default() {
         let name = ent.name.to_string_lossy().into_owned();
         let Some(pkg) = name.strip_suffix(".list") else { continue };
@@ -73,9 +79,14 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
             if listed.is_empty() {
                 continue;
             }
-            if let Some(ws) = alias_to_wanted.get(Path::new(&String::from_utf8_lossy(listed).into_owned())) {
+            let listed = PathBuf::from(String::from_utf8_lossy(listed).into_owned());
+            let on_disk = match diverted.get(&listed) {
+                Some((to, by)) if by != base_name(pkg) => to,
+                _ => &listed,
+            };
+            if let Some(ws) = alias_to_wanted.get(on_disk) {
                 for w in ws {
-                    owner.insert(w.clone(), pkg.to_string());
+                    owner.insert(w.clone(), (pkg.to_string(), listed.clone()));
                 }
             }
         }
@@ -85,13 +96,13 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
         return Some(Answers::new());
     }
 
-    let needed: BTreeSet<String> = owner.values().cloned().collect();
+    let needed: BTreeSet<String> = owner.values().map(|(p, _)| p.clone()).collect();
     let status = read_status(root, &needed);
 
     let mut out = Answers::new();
-    for (path, pkg) in &owner {
+    for (path, (pkg, listed)) in &owner {
         let Some(info) = status.get(pkg) else { continue };
-        let integrity = verify(root, path, pkg, info);
+        let integrity = verify(root, path, listed, pkg, info);
         out.insert(path.clone(), Provenance::Packaged {
             package: base_name(pkg).to_string(),
             version: info.version.clone(),
@@ -167,7 +178,24 @@ fn read_status(root: &Root, needed: &BTreeSet<String>) -> BTreeMap<String, PkgIn
     out
 }
 
-fn verify(root: &Root, path: &Path, pkg: &str, info: &PkgInfo) -> Integrity {
+/// Diverted path, to where it went and who diverted it (`:` by hand), from
+/// dpkg's three-line records.
+fn diversions(root: &Root) -> BTreeMap<PathBuf, (PathBuf, String)> {
+    let Ok((bytes, _)) = root.read_capped(DIVERSIONS, DB_CAP) else { return BTreeMap::new() };
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    lines
+        .chunks(3)
+        .filter_map(|c| match c {
+            [from, to, by] => Some((PathBuf::from(strip_slash_str(from)), (PathBuf::from(strip_slash_str(to)), by.to_string()))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `path` is the file on disk, `listed` the name the package's manifests
+/// give it; they differ only for a diverted file.
+fn verify(root: &Root, path: &Path, listed: &Path, pkg: &str, info: &PkgInfo) -> Integrity {
     let Some(actual) = super::digests(root, path) else {
         return Integrity::Unknown;
     };
@@ -178,7 +206,7 @@ fn verify(root: &Root, path: &Path, pkg: &str, info: &PkgInfo) -> Integrity {
     let conffile = |p: &Path| {
         spellings(root, p).into_iter().find_map(|s| info.conffiles.get(&*s.to_string_lossy()).cloned())
     };
-    if let Some(expected) = conffile(path) {
+    if let Some(expected) = conffile(listed) {
         return if expected.eq_ignore_ascii_case(&actual.md5) { Integrity::Intact } else { Integrity::ConffileModified };
     }
 
@@ -214,7 +242,7 @@ fn verify(root: &Root, path: &Path, pkg: &str, info: &PkgInfo) -> Integrity {
         }
     }
 
-    match shipped_digest(root, pkg, path) {
+    match shipped_digest(root, pkg, listed) {
         // Not every package ships md5sums, and a path may be absent from one
         // that does. Integrity is then genuinely unknown; calling it intact
         // would give false assurance about exactly the file an attacker
@@ -386,6 +414,34 @@ mod tests {
             answers[Path::new("usr/lib/systemd/system/cron.service")],
             Provenance::Packaged { integrity: Integrity::Modified, .. }
         ));
+    }
+
+    #[test]
+    fn a_diverted_file_is_judged_where_dpkg_put_it() {
+        let f = Fixture::new("divert");
+        f.write("usr/bin/man", b"#!/bin/sh\necho stub\n");
+        f.write("usr/bin/man.REAL", b"man binary");
+        f.write("usr/bin/podselect", b"new podselect");
+        f.write("usr/bin/podselect.bundled", b"old podselect");
+        f.write(DIVERSIONS, b"/usr/bin/man\n/usr/bin/man.REAL\n:\n/usr/bin/podselect\n/usr/bin/podselect.bundled\nlibpod-parser-perl\n");
+        f.write(STATUS, b"Package: man-db\nVersion: 2\n\nPackage: perl\nVersion: 5\n\nPackage: libpod-parser-perl\nVersion: 1\n\n");
+        f.write(&format!("{INFO}/man-db.list"), b"/usr/bin/man\n");
+        f.write(&format!("{INFO}/man-db.md5sums"), format!("{}  usr/bin/man\n", md5_of(b"man binary")).as_bytes());
+        f.write(&format!("{INFO}/perl.list"), b"/usr/bin/podselect\n");
+        f.write(&format!("{INFO}/perl.md5sums"), format!("{}  usr/bin/podselect\n", md5_of(b"old podselect")).as_bytes());
+        f.write(&format!("{INFO}/libpod-parser-perl.list"), b"/usr/bin/podselect\n");
+        f.write(&format!("{INFO}/libpod-parser-perl.md5sums"), format!("{}  usr/bin/podselect\n", md5_of(b"new podselect")).as_bytes());
+
+        let root = f.root();
+        let answers = ask(&root, &["usr/bin/man", "usr/bin/man.REAL", "usr/bin/podselect", "usr/bin/podselect.bundled"]);
+        assert!(!answers.contains_key(Path::new("usr/bin/man")), "what replaced a file diverted by hand is nobody's");
+        let owner = |p: &str| match &answers[Path::new(p)] {
+            Provenance::Packaged { package, integrity, .. } => (package.clone(), *integrity),
+            other => panic!("{p}: {other:?}"),
+        };
+        assert_eq!(owner("usr/bin/man.REAL"), ("man-db".to_string(), Integrity::Intact));
+        assert_eq!(owner("usr/bin/podselect"), ("libpod-parser-perl".to_string(), Integrity::Intact), "the diverting package keeps its own path");
+        assert_eq!(owner("usr/bin/podselect.bundled"), ("perl".to_string(), Integrity::Intact));
     }
 
     #[test]
