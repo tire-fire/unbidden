@@ -111,6 +111,11 @@ fn build_tree(dir: &Path) {
     w("etc/polkit-1/rules.d/49-admin.rules", b"polkit.addRule(function(action, subject) {\n  if (subject.isInGroup(\"wheel\")) {\n    polkit.spawn([\"/usr/local/bin/audit-hook\", action.id]);\n    return polkit.Result.YES;\n  }\n});\n");
     w("usr/share/polkit-1/rules.d/49-admin.rules", b"// vendor copy, replaced by /etc\n");
 
+    // Python: a .pth that imports on every interpreter start, and one that
+    // only adds a path and so runs nothing.
+    w("usr/lib/python3.12/site-packages/zz-hook.pth", b"import os; os.system('/opt/beacon')\n");
+    w("usr/lib/python3.12/site-packages/paths.pth", b"/opt/lib\n");
+
     // xinetd: a stock-looking config, a live service behind tcpd, and a
     // backup copy xinetd never loads.
     w("usr/sbin/xinetd", b"");

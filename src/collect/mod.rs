@@ -21,6 +21,7 @@ pub mod initscripts;
 pub mod kernel;
 pub mod pkg;
 pub mod polkit;
+pub mod python;
 pub mod shell;
 pub mod systemd;
 
@@ -178,6 +179,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(kernel::Kernel),
         Box::new(pkg::PkgHooks),
         Box::new(cloudinit::CloudInit),
+        Box::new(python::Python),
         Box::new(deep::GitConfig),
         Box::new(deep::Deep),
     ]

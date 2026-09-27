@@ -1,0 +1,4 @@
+# a site-packages .pth
+/opt/extra/lib
+import os; os.environ.setdefault("FEATURE", "1")
+import	sys

@@ -1370,6 +1370,35 @@
       "target_path_utf8": true,
       "target_sha256": null,
       "trigger": "network-event"
+    },
+    {
+      "collector": "python",
+      "command": "import os; os.system('/opt/beacon')",
+      "command_utf8": true,
+      "enabled": "enabled",
+      "flags": [
+        "unpackaged"
+      ],
+      "id": "bafafb7840705c3d1ea9b85be12f4a41fa74e5cfdd5287c083c2b0f6d52fc2ca",
+      "kind": "python_startup",
+      "mode": 420,
+      "mtime": "<normalised>",
+      "name": "zz-hook.pth",
+      "owner_uid": "<normalised>",
+      "principal": null,
+      "provenance": {
+        "verdict": "unpackaged"
+      },
+      "raw": {
+        "hook": "pth",
+        "import_lines": "1",
+        "target_unverifiable": "Python code run inside the interpreter"
+      },
+      "source": "<ROOT>/usr/lib/python3.12/site-packages/zz-hook.pth",
+      "source_utf8": true,
+      "target_path": null,
+      "target_sha256": "7a8cf336e59d2cf7510cc2baade231d03ecfbd2bb759128217beb369c7f887ef",
+      "trigger": "always"
     }
   ],
   "header": {
@@ -1431,6 +1460,11 @@
       {
         "entries": 2,
         "name": "polkit",
+        "status": "complete"
+      },
+      {
+        "entries": 1,
+        "name": "python",
         "status": "complete"
       },
       {

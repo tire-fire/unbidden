@@ -88,6 +88,7 @@ str_enum!(Kind {
     SshClient => "ssh_client",
     CloudInit => "cloud_init",
     SystemdHook => "systemd_hook",
+    PythonStartup => "python_startup",
 });
 
 str_enum!(Trigger {

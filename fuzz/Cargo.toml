@@ -423,3 +423,10 @@ path = "fuzz_targets/cloud_cfg.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "python_pth"
+path = "fuzz_targets/python_pth.rs"
+test = false
+doc = false
+bench = false
