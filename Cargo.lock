@@ -639,12 +639,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libyaml-safer"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d325b93a27b93b93b7cf4a57d681c5b6a4d8f910e695db989c055eb1e4f657df"
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1091,7 +1085,6 @@ dependencies = [
  "blake3",
  "clap",
  "gvdb",
- "libyaml-safer",
  "md-5",
  "regex",
  "rusqlite",

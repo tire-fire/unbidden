@@ -4,17 +4,21 @@
 //! replacing an earlier one; an unhashable key, an unknown tag or a second
 //! document refusing the whole stream.
 //!
-//! libyaml-safer, a port of the libyaml that PyYAML wraps, supplies the
-//! events and nothing else. The tree is built here so that what a hostile
+//! [`crate::pyyaml`], a port of the pure-Python reader, scanner and parser
+//! SafeLoader runs, supplies the events and nothing else. The tree is built here so that what a hostile
 //! file can cost is bounded here: nesting past [`MAX_DEPTH`], or more than
 //! [`MAX_NODES`] nodes counting every copy an alias makes, is an error rather
 //! than a stack overflow or a billion laughs.
 
 use std::collections::HashMap;
 
-use libyaml_safer::{EventData, Parser, ScalarStyle};
+use crate::pyyaml::{Event, Parser};
 
-pub const MAX_DEPTH: usize = 64;
+/// Above what PyYAML reaches before Python's recursion limit stops it:
+/// 491 levels measured with 6.0.1, and fewer inside cloud-init, whose own
+/// frames count against the same limit. A lower bound would refuse a file
+/// cloud-init loads, and every command in it would go unread.
+pub const MAX_DEPTH: usize = 512;
 pub const MAX_NODES: usize = 100_000;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -65,39 +69,38 @@ impl Value {
 pub fn parse(text: &str) -> Result<Option<Value>, String> {
     let mut b = Builder::default();
     let mut docs = 0;
-    let mut input = text.as_bytes();
-    let mut parser = Parser::new();
-    parser.set_input_string(&mut input);
-    for ev in parser {
-        let ev = ev.map_err(|e| e.to_string())?;
-        match ev.data {
-            EventData::DocumentStart { .. } => {
+    for ev in Parser::new(text)? {
+        match ev? {
+            Event::DocumentStart => {
                 docs += 1;
                 if docs > 1 {
                     return Err("more than one document".into());
                 }
             }
-            EventData::SequenceStart { anchor, .. } => {
-                let anchor = b.anchor_id(anchor);
-                b.open(Frame::Seq(Vec::new()), anchor)?;
+            Event::SequenceStart { anchor, tag } => {
+                let anchor = b.anchor_id(anchor)?;
+                let shape = shape(tag.as_deref(), false)?;
+                b.open(Frame::Seq(Vec::new(), shape), anchor)?;
             }
-            EventData::MappingStart { anchor, .. } => {
-                let anchor = b.anchor_id(anchor);
-                b.open(Frame::Map(Vec::new(), None), anchor)?;
+            Event::MappingStart { anchor, tag } => {
+                let anchor = b.anchor_id(anchor)?;
+                let shape = shape(tag.as_deref(), true)?;
+                b.open(Frame::Map(Vec::new(), None, shape), anchor)?;
             }
-            EventData::SequenceEnd | EventData::MappingEnd => b.close()?,
-            EventData::Scalar { anchor, tag, value, style, .. } => {
-                let anchor = b.anchor_id(anchor);
-                let plain = style == ScalarStyle::Plain;
+            Event::SequenceEnd | Event::MappingEnd => b.close()?,
+            Event::Scalar { anchor, tag, implicit, value } => {
+                let anchor = b.anchor_id(anchor)?;
                 b.count(1)?;
+                // The resolver runs where PyYAML's composer lets it: a plain
+                // scalar with no tag, or any tagged `!`.
                 let item = match &*value {
-                    "<<" if plain && tag.is_none() => Item::Merge,
-                    "=" if plain && tag.is_none() => Item::Equals,
-                    _ => Item::Value(scalar(&value, plain, tag.as_deref())?),
+                    "<<" if implicit => Item::Merge,
+                    "=" if implicit => Item::Equals,
+                    _ => Item::Value(scalar(&value, implicit, tag.as_deref())?),
                 };
                 b.push(item, anchor)?;
             }
-            EventData::Alias { anchor } => {
+            Event::Alias { anchor } => {
                 let id = b.names.get(&anchor).copied().ok_or("alias to an undefined anchor")?;
                 let (v, depth) = b.anchors.get(&id).cloned().ok_or("alias to an undefined anchor")?;
                 // What an alias pastes in counts towards the depth too, or a
@@ -109,16 +112,45 @@ pub fn parse(text: &str) -> Result<Option<Value>, String> {
                 b.count(size(&v))?;
                 b.push(Item::Value(v), 0)?;
             }
-            EventData::StreamStart { .. } | EventData::StreamEnd | EventData::DocumentEnd { .. } => {}
+            Event::StreamStart | Event::StreamEnd | Event::DocumentEnd => {}
         }
     }
     Ok(b.done)
 }
 
 enum Frame {
-    Seq(Vec<Value>),
+    Seq(Vec<Value>, Shape),
     /// The pairs so far, and a key waiting for its value.
-    Map(Vec<(Item, Value)>, Option<Item>),
+    Map(Vec<(Item, Value)>, Option<Item>, Shape),
+}
+
+/// What SafeConstructor builds of a collection, by its tag.
+#[derive(Clone, Copy, PartialEq)]
+enum Shape {
+    /// A list or a dict: untagged, `!`, `!!seq` or `!!map`.
+    Plain,
+    /// `!!set`, a mapping whose keys are the set.
+    Set,
+    /// `!!omap` or `!!pairs`, a sequence of one-pair mappings, built as a
+    /// list of `[key, value]`.
+    Pairs,
+}
+
+/// The shape a tag gives a collection, or the error SafeConstructor raises
+/// for a tag it has no constructor for, or one that does not fit the node.
+fn shape(tag: Option<&str>, mapping: bool) -> Result<Shape, String> {
+    let kind = match tag {
+        None | Some("!") => return Ok(Shape::Plain),
+        Some(t) => t.strip_prefix(TAG).unwrap_or(t),
+    };
+    match (kind, mapping) {
+        ("map", true) | ("seq", false) => Ok(Shape::Plain),
+        ("set", true) => Ok(Shape::Set),
+        ("omap" | "pairs", false) => Ok(Shape::Pairs),
+        ("map" | "set", false) => Err(format!("expected a mapping node for {}", tag.unwrap_or_default())),
+        ("seq" | "omap" | "pairs", true) => Err(format!("expected a sequence node for {}", tag.unwrap_or_default())),
+        _ => Err(format!("no constructor for tag {}", tag.unwrap_or_default())),
+    }
 }
 
 /// A node as it arrives: a value, the `<<` that merges a mapping in, or a
@@ -136,19 +168,23 @@ struct Builder {
     stack: Vec<(Frame, usize)>,
     /// Each anchored value and how deeply it nests, by anchor id.
     anchors: HashMap<usize, (Value, usize)>,
-    /// Anchor names to ids. A name defined again refers to its latest
-    /// value, as in PyYAML.
+    /// Anchor names to ids; each name is defined once.
     names: HashMap<String, usize>,
     nodes: usize,
     done: Option<Value>,
 }
 
 impl Builder {
-    /// An anchor's id; 0 is none.
-    fn anchor_id(&mut self, name: Option<String>) -> usize {
-        let Some(name) = name else { return 0 };
-        let next = self.names.len() + 1;
-        *self.names.entry(name).or_insert(next)
+    /// An anchor's id; 0 is none. PyYAML's composer refuses a name
+    /// defined twice.
+    fn anchor_id(&mut self, name: Option<String>) -> Result<usize, String> {
+        let Some(name) = name else { return Ok(0) };
+        if self.names.contains_key(&name) {
+            return Err(format!("found duplicate anchor {name:?}"));
+        }
+        let id = self.names.len() + 1;
+        self.names.insert(name, id);
+        Ok(id)
     }
 
     fn count(&mut self, n: usize) -> Result<(), String> {
@@ -171,9 +207,22 @@ impl Builder {
     fn close(&mut self) -> Result<(), String> {
         let (f, anchor) = self.stack.pop().ok_or("unbalanced end")?;
         let v = match f {
-            Frame::Seq(items) => Value::Seq(items),
-            Frame::Map(pairs, None) => Value::Map(flatten(pairs)?),
-            Frame::Map(_, Some(_)) => return Err("mapping ended after a key".into()),
+            Frame::Seq(items, Shape::Pairs) => Value::Seq(
+                items
+                    .into_iter()
+                    .map(|item| match item {
+                        Value::Map(mut m) if m.len() == 1 => {
+                            let (k, v) = m.remove(0);
+                            Ok(Value::Seq(vec![k, v]))
+                        }
+                        _ => Err("an ordered map holds a mapping of one pair per item".to_string()),
+                    })
+                    .collect::<Result<_, _>>()?,
+            ),
+            Frame::Seq(items, _) => Value::Seq(items),
+            Frame::Map(pairs, None, Shape::Set) => Value::Map(flatten(pairs)?.into_iter().map(|(k, _)| (k, Value::Null)).collect()),
+            Frame::Map(pairs, None, _) => Value::Map(flatten(pairs)?),
+            Frame::Map(_, Some(_), _) => return Err("mapping ended after a key".into()),
         };
         self.push(Item::Value(v), anchor)
     }
@@ -194,8 +243,8 @@ impl Builder {
             return Ok(());
         };
         match frame {
-            Frame::Seq(items) => items.push(value(item)?),
-            Frame::Map(pairs, key) => match key.take() {
+            Frame::Seq(items, _) => items.push(value(item)?),
+            Frame::Map(pairs, key, _) => match key.take() {
                 None if matches!(item, Item::Equals) => *key = Some(Item::Value(Value::Str("=".into()))),
                 None => *key = Some(item),
                 Some(k) => pairs.push((k, value(item)?)),
@@ -327,16 +376,59 @@ fn scalar(text: &str, plain: bool, tag: Option<&str>) -> Result<Value, String> {
         None => "str",
         Some(t) => match t.strip_prefix(TAG) {
             Some(k @ ("str" | "null" | "bool" | "int" | "float" | "timestamp")) => k,
+            Some("binary") => return binary(text),
             _ => return Err(format!("no constructor for tag {t}")),
         },
     };
     Ok(match kind {
         "null" => Value::Null,
-        "bool" => Value::Bool(matches!(text.to_ascii_lowercase().as_str(), "yes" | "true" | "on")),
-        "int" => int(text).map(Value::Int).ok_or_else(|| format!("not an int: {text}"))?,
-        "float" | "timestamp" => Value::Other(text.to_string()),
+        "bool" => match text.to_lowercase().as_str() {
+            "yes" | "true" | "on" => Value::Bool(true),
+            "no" | "false" | "off" => Value::Bool(false),
+            _ => return Err(format!("not a bool: {text}")),
+        },
+        "int" => construct_int(text)?,
+        "timestamp" => match timestamp(text, false) {
+            Some(ts) if timestamp_valid(&ts) => Value::Other(text.to_string()),
+            _ => return Err(format!("not a timestamp datetime accepts: {text}")),
+        },
+        "float" => construct_float(text)?,
         _ => Value::Str(text.to_string()),
     })
+}
+
+/// `!!binary`, as SafeConstructor builds it: ASCII text that
+/// `base64.decodebytes` accepts, which is binascii's `a2b_base64` outside
+/// strict mode. Characters outside the alphabet are skipped; enough `=`
+/// after two or three characters of a group ends the data; a group left
+/// part-filled is an error.
+fn binary(text: &str) -> Result<Value, String> {
+    if !text.is_ascii() {
+        return Err("!!binary holds a non-ASCII character".into());
+    }
+    let (mut quad_pos, mut pads) = (0u32, 0u32);
+    for c in text.bytes() {
+        if c == b'=' {
+            if quad_pos >= 2 {
+                pads += 1;
+                if quad_pos + pads >= 4 {
+                    quad_pos = 0;
+                    break;
+                }
+            }
+            continue;
+        }
+        if !(c.is_ascii_alphanumeric() || c == b'+' || c == b'/') {
+            continue;
+        }
+        pads = 0;
+        quad_pos = (quad_pos + 1) % 4;
+    }
+    match quad_pos {
+        0 => Ok(Value::Other("binary".into())),
+        1 => Err("!!binary: a base64 length one more than a multiple of four".into()),
+        _ => Err("!!binary: incorrect padding".into()),
+    }
 }
 
 /// Which of YAML 1.1's implicit types a plain scalar is, by PyYAML's
@@ -350,69 +442,157 @@ fn resolve(t: &str) -> &'static str {
         "null"
     } else if BOOL.contains(&t) {
         "bool"
-    } else if int(t).is_some() {
+    } else if int_syntax(t) {
         "int"
     } else if is_float(t) {
         "float"
-    } else if is_timestamp(t) {
+    } else if timestamp(t, true).is_some() {
         "timestamp"
     } else {
         "str"
     }
 }
 
-/// PyYAML's int: binary, octal with a leading 0, decimal, hex, or base 60
-/// with colons, underscores allowed after the first digit, an optional sign.
-fn int(t: &str) -> Option<i128> {
-    let (neg, body) = match t.as_bytes().first()? {
-        b'-' => (true, &t[1..]),
-        b'+' => (false, &t[1..]),
-        _ => (false, t),
-    };
-    let digits = |s: &str, radix: u32| -> Option<i128> {
-        let s: String = s.chars().filter(|c| *c != '_').collect();
-        if s.is_empty() {
-            return None;
+/// PyYAML's int pattern: binary, octal with a leading 0, decimal, hex, or
+/// base 60 with colons, underscores anywhere after the prefix, one sign.
+fn int_syntax(t: &str) -> bool {
+    let body = t.strip_prefix(['-', '+']).unwrap_or(t);
+    let all = |s: &str, f: fn(char) -> bool| !s.is_empty() && s.chars().all(|c| c == '_' || f(c));
+    if let Some(b) = body.strip_prefix("0b") {
+        return all(b, |c| matches!(c, '0' | '1'));
+    }
+    if let Some(h) = body.strip_prefix("0x") {
+        return all(h, |c| c.is_ascii_hexdigit());
+    }
+    if body == "0" {
+        return true;
+    }
+    if let Some(o) = body.strip_prefix('0') {
+        return all(o, |c| matches!(c, '0'..='7'));
+    }
+    if !body.starts_with(|c: char| matches!(c, '1'..='9')) {
+        return false;
+    }
+    let mut parts = body.split(':');
+    let head = parts.next().unwrap_or_default();
+    if !all(head, |c| c.is_ascii_digit()) {
+        return false;
+    }
+    // Each `:` part is `[0-5]?[0-9]`.
+    parts.all(|p| {
+        let b = p.as_bytes();
+        match b {
+            [d] => d.is_ascii_digit(),
+            [a, d] => (b'0'..=b'5').contains(a) && d.is_ascii_digit(),
+            _ => false,
         }
-        i128::from_str_radix(&s, radix).ok()
+    })
+}
+
+/// Python's `int(s, radix)`: white space around, one sign, the base's
+/// own `0b`, `0o` or `0x` prefix allowed, then at least one digit. Whether
+/// it converts, and the value where it fits in i128.
+fn python_int(s: &str, radix: u32) -> Option<Option<i128>> {
+    let s = s.trim_matches(|c: char| c.is_whitespace());
+    let (neg, body) = match s.as_bytes().first()? {
+        b'-' => (true, &s[1..]),
+        b'+' => (false, &s[1..]),
+        _ => (false, s),
     };
-    let first_ok = |s: &str, f: fn(char) -> bool| s.chars().all(|c| c == '_' || f(c)) && !s.is_empty();
-    let n = if let Some(b) = body.strip_prefix("0b") {
-        first_ok(b, |c| matches!(c, '0' | '1')).then(|| digits(b, 2))??
+    let prefix = match radix {
+        2 => Some("0b"),
+        8 => Some("0o"),
+        16 => Some("0x"),
+        _ => None,
+    };
+    let digits = match prefix {
+        Some(p) if body.len() > 2 && body[..2].eq_ignore_ascii_case(p) => &body[2..],
+        _ => body,
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    Some(i128::from_str_radix(digits, radix).ok().map(|n| if neg { -n } else { n }))
+}
+
+/// Python's `float(s)` on text already lowercased: white space around, one
+/// sign, then `inf`, `infinity`, `nan`, or digits with an optional point
+/// and exponent.
+fn python_float(s: &str) -> bool {
+    let s = s.trim_matches(|c: char| c.is_whitespace());
+    let body = s.strip_prefix(['-', '+']).unwrap_or(s);
+    if matches!(body, "inf" | "infinity" | "nan") {
+        return true;
+    }
+    let (mantissa, exp) = match body.split_once('e') {
+        Some((m, e)) => (m, Some(e)),
+        None => (body, None),
+    };
+    let (whole, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let all = |d: &str| d.chars().all(|c| c.is_ascii_digit());
+    let mantissa_ok = all(whole) && all(frac) && !(whole.is_empty() && frac.is_empty());
+    let exp_ok = exp.is_none_or(|e| {
+        let e = e.strip_prefix(['-', '+']).unwrap_or(e);
+        !e.is_empty() && all(e)
+    });
+    mantissa_ok && exp_ok
+}
+
+/// SafeConstructor's `construct_yaml_int`: underscores dropped, one sign
+/// taken, then by prefix binary, hex, octal after a 0, base 60 with colons,
+/// or decimal, each through Python's `int`. A value past i128 is kept as
+/// written, since Python's ints have no bound; `Err` is text Python cannot
+/// convert.
+fn construct_int(t: &str) -> Result<Value, String> {
+    let fail = || format!("not an int: {t}");
+    let v: String = t.chars().filter(|c| *c != '_').collect();
+    let (neg, body) = match v.as_bytes().first() {
+        Some(b'-') => (true, &v[1..]),
+        Some(b'+') => (false, &v[1..]),
+        Some(_) => (false, &v[..]),
+        None => return Err(fail()),
+    };
+    let n = if body == "0" {
+        Some(0)
+    } else if let Some(b) = body.strip_prefix("0b") {
+        python_int(b, 2).ok_or_else(fail)?
     } else if let Some(h) = body.strip_prefix("0x") {
-        first_ok(h, |c| c.is_ascii_hexdigit()).then(|| digits(h, 16))??
-    } else if body == "0" {
-        0
-    } else if let Some(o) = body.strip_prefix('0') {
-        first_ok(o, |c| matches!(c, '0'..='7')).then(|| digits(o, 8))??
+        python_int(h, 16).ok_or_else(fail)?
+    } else if body.starts_with('0') {
+        python_int(body, 8).ok_or_else(fail)?
     } else if body.contains(':') {
-        let mut parts = body.split(':');
-        let head = parts.next()?;
-        if !head.starts_with(|c: char| matches!(c, '1'..='9')) || !first_ok(head, |c| c.is_ascii_digit()) {
-            return None;
-        }
-        let mut n = digits(head, 10)?;
-        for p in parts {
-            let ok = matches!(p.len(), 1 | 2) && p.chars().all(|c| c.is_ascii_digit()) && (p.len() == 1 || p.as_bytes()[0] <= b'5');
-            if !ok {
-                return None;
-            }
-            n = n.checked_mul(60)?.checked_add(p.parse::<i128>().ok()?)?;
+        let mut n = Some(0i128);
+        for p in body.split(':') {
+            let d = python_int(p, 10).ok_or_else(fail)?;
+            n = n.and_then(|n| n.checked_mul(60)).zip(d).and_then(|(n, d)| n.checked_add(d));
         }
         n
     } else {
-        if !body.starts_with(|c: char| matches!(c, '1'..='9')) || !first_ok(body, |c| c.is_ascii_digit()) {
-            return None;
-        }
-        digits(body, 10)?
+        python_int(body, 10).ok_or_else(fail)?
     };
-    Some(if neg { -n } else { n })
+    Ok(match n.and_then(|n| if neg { n.checked_neg() } else { Some(n) }) {
+        Some(n) => Value::Int(n),
+        None => Value::Other(t.to_string()),
+    })
+}
+
+/// SafeConstructor's `construct_yaml_float`: underscores dropped,
+/// lowercased, one sign taken, then `.inf`, `.nan`, base 60 with colons,
+/// or Python's `float`.
+fn construct_float(t: &str) -> Result<Value, String> {
+    let v = t.replace('_', "").to_lowercase();
+    let body = v.strip_prefix(['-', '+']).unwrap_or(&v);
+    if v.is_empty() {
+        return Err(format!("not a float: {t}"));
+    }
+    let ok = matches!(body, ".inf" | ".nan") || if body.contains(':') { body.split(':').all(python_float) } else { python_float(body) };
+    if ok { Ok(Value::Other(t.to_string())) } else { Err(format!("not a float: {t}")) }
 }
 
 /// PyYAML's float pattern: digits and a dot (an exponent needs a sign),
 /// a leading dot, base 60 with a dot, or the infinities and NaNs.
 fn is_float(t: &str) -> bool {
-    if matches!(t.trim_start_matches(['-', '+']), ".inf" | ".Inf" | ".INF") || matches!(t, ".nan" | ".NaN" | ".NAN") {
+    if matches!(t.strip_prefix(['-', '+']).unwrap_or(t), ".inf" | ".Inf" | ".INF") || matches!(t, ".nan" | ".NaN" | ".NAN") {
         return true;
     }
     let body = t.strip_prefix(['-', '+']).unwrap_or(t);
@@ -441,35 +621,106 @@ fn is_float(t: &str) -> bool {
     int_part.starts_with(|c: char| c.is_ascii_digit()) && digits_(int_part)
 }
 
-/// PyYAML's timestamp: a date, optionally with a time after `T`, `t` or
-/// whitespace.
-fn is_timestamp(t: &str) -> bool {
+/// A timestamp's fields as PyYAML's `timestamp_regexp` reads them: a
+/// date of one- or two-digit month and day, then optionally `T`, `t` or
+/// blanks, a time to the second, a fraction and a zone. `short` is the
+/// resolver's own pattern, which wants the two-digit date when there is no
+/// time.
+struct Timestamp {
+    date: (u32, u32, u32),
+    time: Option<(u32, u32, u32)>,
+    /// Zone hours and minutes.
+    zone: Option<(u32, u32)>,
+}
+
+fn timestamp(t: &str, short: bool) -> Option<Timestamp> {
     let b = t.as_bytes();
-    let d = |i: usize| b.get(i).is_some_and(u8::is_ascii_digit);
-    if !(d(0) && d(1) && d(2) && d(3) && b.get(4) == Some(&b'-')) {
-        return false;
-    }
-    // Month and day are one or two digits in the long form, two in the
-    // short one; the date alone must be exactly YYYY-MM-DD.
-    let rest = &t[5..];
-    let (date_rest, time) = match rest.find(['T', 't', ' ', '\t']) {
-        Some(i) => (&rest[..i], Some(rest[i + 1..].trim_start_matches([' ', '\t']))),
-        None => (rest, None),
+    let mut i = 0;
+    let digits = |i: &mut usize, min: usize, max: usize| -> Option<u32> {
+        let start = *i;
+        while *i < b.len() && *i - start < max && b[*i].is_ascii_digit() {
+            *i += 1;
+        }
+        if *i - start < min {
+            return None;
+        }
+        t[start..*i].parse().ok()
     };
-    let Some((m, day)) = date_rest.split_once('-') else { return false };
-    let num = |s: &str, lens: &[usize]| lens.contains(&s.len()) && s.chars().all(|c| c.is_ascii_digit());
-    match time {
-        None => num(m, &[2]) && num(day, &[2]),
-        Some(time) => {
-            if !(num(m, &[1, 2]) && num(day, &[1, 2])) {
-                return false;
+    let lit = |i: &mut usize, c: u8| -> Option<()> {
+        (b.get(*i) == Some(&c)).then(|| *i += 1)
+    };
+    let year = digits(&mut i, 4, 4)?;
+    lit(&mut i, b'-')?;
+    let month = digits(&mut i, 1, 2)?;
+    lit(&mut i, b'-')?;
+    let day = digits(&mut i, 1, 2)?;
+    if i == b.len() {
+        return (!short || t.len() == 10).then_some(Timestamp { date: (year, month, day), time: None, zone: None });
+    }
+    match b[i] {
+        b'T' | b't' => i += 1,
+        b' ' | b'\t' => {
+            while matches!(b.get(i), Some(b' ' | b'\t')) {
+                i += 1;
             }
-            let mut hms = time.splitn(3, ':');
-            let (Some(h), Some(mi), Some(s)) = (hms.next(), hms.next(), hms.next()) else { return false };
-            let sec_len = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-            num(h, &[1, 2]) && num(mi, &[2]) && sec_len == 2
+        }
+        _ => return None,
+    }
+    let hour = digits(&mut i, 1, 2)?;
+    lit(&mut i, b':')?;
+    let minute = digits(&mut i, 2, 2)?;
+    lit(&mut i, b':')?;
+    let second = digits(&mut i, 2, 2)?;
+    if lit(&mut i, b'.').is_some() {
+        while b.get(i).is_some_and(u8::is_ascii_digit) {
+            i += 1;
         }
     }
+    let before_blanks = i;
+    while matches!(b.get(i), Some(b' ' | b'\t')) {
+        i += 1;
+    }
+    let zone = match b.get(i) {
+        Some(b'Z') => {
+            i += 1;
+            Some((0, 0))
+        }
+        Some(b'-' | b'+') => {
+            i += 1;
+            let h = digits(&mut i, 1, 2)?;
+            let m = if lit(&mut i, b':').is_some() { digits(&mut i, 2, 2)? } else { 0 };
+            Some((h, m))
+        }
+        _ => {
+            i = before_blanks;
+            None
+        }
+    };
+    (i == b.len()).then_some(Timestamp { date: (year, month, day), time: Some((hour, minute, second)), zone })
+}
+
+/// What `datetime` refuses when SafeConstructor builds the value, which
+/// fails the whole load: a date or time out of range, or a zone offset of a
+/// day or more.
+fn timestamp_valid(ts: &Timestamp) -> bool {
+    let (y, m, d) = ts.date;
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    if y == 0 || d == 0 || d > days {
+        return false;
+    }
+    if let Some((h, mi, s)) = ts.time
+        && (h > 23 || mi > 59 || s > 59)
+    {
+        return false;
+    }
+    ts.zone.is_none_or(|(h, m)| h * 60 + m < 24 * 60)
 }
 
 #[cfg(test)]
@@ -478,6 +729,20 @@ mod tests {
 
     fn one(t: &str) -> Value {
         parse(t).unwrap().unwrap()
+    }
+
+    #[test]
+    fn what_panicked_libyaml_safer_is_an_error_as_in_pyyaml() {
+        assert!(parse("[!,").is_err());
+        assert!(parse("a: ''|\n 0").is_err());
+        assert!(parse("[!x,]").is_err(), "PyYAML wants a blank after a tag");
+    }
+
+    #[test]
+    fn nesting_pyyaml_loads_is_read() {
+        let deep = |d: usize| format!("runcmd: [x]\nk: {}{}\n", "[".repeat(d), "]".repeat(d));
+        assert!(parse(&deep(490)).is_ok(), "PyYAML loads 490 levels, so a runcmd beside them runs");
+        assert!(parse(&deep(600)).is_err());
     }
 
     #[test]
@@ -565,14 +830,13 @@ mod tests {
         assert!(parse(&laughs).unwrap_err().contains("nodes"));
         let deep = "[".repeat(100_000);
         assert!(parse(&deep).is_err());
-        let deep_block: String = (0..200).map(|i| format!("{}- \n", "  ".repeat(i))).collect();
+        let deep_block: String = (0..600).map(|i| format!("{}- \n", "  ".repeat(i))).collect();
         assert!(parse(&deep_block).is_err());
-        // Each anchor one level deeper than the last, through aliases.
-        let mut chain = String::from("a0: &a0 x\n");
-        for i in 1..100 {
-            chain.push_str(&format!("a{i}: &a{i} [*a{}]\n", i - 1));
-        }
-        assert!(parse(&chain).unwrap_err().contains("deeper"));
+        // Depth counts what an alias pastes in: 300 levels anchored, pasted
+        // in 300 levels down.
+        let chain = format!("a: &a {}x{}\nb: {}*a{}\n", "[".repeat(300), "]".repeat(300), "[".repeat(300), "]".repeat(300));
+        let e = parse(&chain).unwrap_err();
+        assert!(e.contains("deeper"), "{e}");
     }
 }
 

@@ -504,8 +504,8 @@ Shell text
 tree-sitter, tree-sitter-bash
 The grammar and its C runtime, statically linked, about 1.5 MB. Table-driven, so text nested 50,000 deep parses in linear time; yash-syntax and brush-parser recurse per level and overflow the stack at 1,000 and 10,000
 YAML, for cloud-init
-libyaml-safer
-A safe-Rust port of libyaml, the parser PyYAML wraps, with no dependencies of its own. Events only; the tree is built in-house with a depth and node budget that counts what aliases paste in, and resolves as PyYAML's safe_load does (YAML 1.1 scalars, merge keys, one document), checked against PyYAML on 48,000 generated documents. saphyr-parser 0.1.0 was tried first and silently misread a flow mapping nested in an implicit pair in a flow sequence; yaml-rust2 rejects the same input; serde_yaml is unmaintained
+hand-rolled (src/pyyaml.rs)
+A port of PyYAML's pure-Python reader, scanner and parser, which cloud-init's safe_load runs; they are unchanged from PyYAML 6.0 to 6.0.3. The tree is built in-house with a depth and node budget that counts what aliases paste in, and constructs as SafeConstructor does (YAML 1.1 scalars, merge keys, !!binary, !!set, !!omap, one document). The depth budget, 512, is above the 491 levels Python's recursion limit lets PyYAML reach, so nothing cloud-init loads is refused. As built, checked against PyYAML 6.0.1 on 152,625 inputs (its own test data, cloud-init's examples, their mutations, fuzzer output and a scalar sweep) with no difference in what loads. The YAML crates before it did not hold up: saphyr-parser misread a flow mapping inside an implicit pair, libyaml-safer panicked on `[!,` and on `a: ''|` followed by a line, and yaml-rust2 refuses the valid `[k: {a: b, c: d}]`; serde_yaml is archived.
 Binary constraints
 Single binary, no config file required, no runtime data files. Anything it needs to know about paths and mechanisms is compiled in. The operator copies one file to a host and runs it.
 Size is not a concern but should be watched — a 50 MB binary is awkward to move onto a host over a constrained channel.
