@@ -85,6 +85,9 @@ enum Syntax {
     KeyValue,
     /// `VARIABLE DEFAULT=value OVERRIDE=value`.
     PamEnvConf,
+    /// Another shell's language, reported but not read: sh rules would
+    /// misread it.
+    Opaque(&'static str),
 }
 
 /// Library directories every distribution already searches. A directory
@@ -181,6 +184,7 @@ impl Collector for Shell {
 
         x_session(cx, &mut seen, &mut out);
         plasma_env(cx, &mut seen, &mut out);
+        other_shells(cx, &mut seen, &mut out);
         preload(cx, &mut out);
         library_dirs(cx, &mut out);
         out
@@ -265,6 +269,108 @@ fn x_session(cx: &mut Ctx, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<Entry>) {
                 (false, _) => None,
             };
             add(cx, &rel, Some(u), "the X session, as the session itself", off, out);
+        }
+    }
+}
+
+/// What bash, csh/tcsh, fish and ksh read beyond the profiles above, each
+/// only where that shell is installed, as their packages ship them.
+///
+/// bash: /etc/bash.bash_logout at a login shell's exit; ~/.bash_aliases,
+/// which the skeleton ~/.bashrc sources; and with bash-completion, every
+/// file in /etc/bash_completion.d but its backup names and Makefiles, and
+/// ~/.bash_completion and ~/.config/bash_completion, in every interactive
+/// shell. csh and tcsh (Debian's tcsh): /etc/csh.cshrc, /etc/csh.login,
+/// /etc/csh.logout, every file in /etc/csh/cshrc.d and /etc/csh/login.d,
+/// and ~/.tcshrc, ~/.cshrc, ~/.login and ~/.logout. fish (3.7): config.fish
+/// in /etc/fish and ~/.config/fish, and `*.fish` in the conf.d directories,
+/// the user's, then /etc's, then the vendor ones, the first of a name
+/// winning. ksh93: ~/.kshrc, its default $ENV.
+fn other_shells(cx: &mut Ctx, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<Entry>) {
+    let installed = |cx: &mut Ctx, names: &[&str]| {
+        names.iter().any(|n| ["bin", "usr/bin"].iter().any(|d| cx.root.exists(Path::new(d).join(n))))
+    };
+    let mut files: Vec<(PathBuf, Option<&User>, Syntax, &str)> = Vec::new();
+    let users = cx.users;
+    let sorted = |cx: &mut Ctx, dir: &Path, keep: &dyn Fn(&[u8]) -> bool| -> Vec<PathBuf> {
+        let mut names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir && keep(e.name.as_encoded_bytes())).map(|e| e.name).collect();
+        names.sort();
+        names.into_iter().map(|n| dir.join(n)).collect()
+    };
+
+    files.push((PathBuf::from("etc/bash.bash_logout"), None, Syntax::Shell, "bash, at a login shell's exit"));
+    for u in users {
+        files.push((u.in_home(".bash_aliases"), Some(u), Syntax::Shell, "the skeleton ~/.bashrc"));
+    }
+    if cx.root.exists("usr/share/bash-completion/bash_completion") {
+        // bash-completion's _backup_glob, and its Makefile* exclusion.
+        let keep = |n: &[u8]| {
+            let backup = (n.starts_with(b"#") && n.ends_with(b"#"))
+                || n.ends_with(b"~")
+                || [b".bak".as_slice(), b".orig", b".rej", b".swp", b".rpmorig", b".rpmnew", b".rpmsave"].iter().any(|s| n.ends_with(s))
+                || n.windows(5).any(|w| w == b".dpkg");
+            !backup && !n.starts_with(b"Makefile")
+        };
+        for f in sorted(cx, Path::new("etc/bash_completion.d"), &keep) {
+            files.push((f, None, Syntax::Shell, "bash-completion, in every interactive bash"));
+        }
+        for u in users {
+            for f in [".bash_completion", ".config/bash_completion"] {
+                files.push((u.in_home(f), Some(u), Syntax::Shell, "bash-completion, in every interactive bash"));
+            }
+        }
+    }
+    if installed(cx, &["csh", "tcsh", "bsd-csh"]) {
+        for f in ["etc/csh.cshrc", "etc/csh.login", "etc/csh.logout"] {
+            files.push((PathBuf::from(f), None, Syntax::Opaque("csh"), "csh and tcsh"));
+        }
+        for dir in ["etc/csh/cshrc.d", "etc/csh/login.d"] {
+            for f in sorted(cx, Path::new(dir), &|n: &[u8]| !n.starts_with(b".")) {
+                files.push((f, None, Syntax::Opaque("csh"), "/etc/csh.cshrc or /etc/csh.login"));
+            }
+        }
+        for u in users {
+            for f in [".tcshrc", ".cshrc", ".login", ".logout"] {
+                files.push((u.in_home(f), Some(u), Syntax::Opaque("csh"), "csh and tcsh"));
+            }
+        }
+    }
+    if installed(cx, &["fish"]) {
+        let fish = |n: &[u8]| n.ends_with(b".fish");
+        files.push((PathBuf::from("etc/fish/config.fish"), None, Syntax::Opaque("fish"), "fish, at every start"));
+        // The system snippets, reported once; the first of a name wins. A
+        // user's own snippet of the same name replaces it for that user.
+        let mut taken: BTreeSet<Vec<u8>> = BTreeSet::new();
+        for d in ["etc/fish/conf.d", "usr/local/share/fish/vendor_conf.d", "usr/share/fish/vendor_conf.d"] {
+            for f in sorted(cx, Path::new(d), &fish) {
+                let name = f.file_name().map(|n| n.as_encoded_bytes().to_vec()).unwrap_or_default();
+                let by = if taken.insert(name) { "fish, at every start" } else { "fish, but replaced by a same-named snippet earlier in its order" };
+                files.push((f, None, Syntax::Opaque("fish"), by));
+            }
+        }
+        for u in users {
+            files.push((u.in_home(".config/fish/config.fish"), Some(u), Syntax::Opaque("fish"), "fish, at every start"));
+            for d in [".config/fish/conf.d", ".local/share/fish/vendor_conf.d"] {
+                for f in sorted(cx, &u.in_home(d), &fish) {
+                    files.push((f, Some(u), Syntax::Opaque("fish"), "fish, at every start"));
+                }
+            }
+        }
+    }
+    if installed(cx, &["ksh", "ksh93"]) {
+        for u in users {
+            files.push((u.in_home(".kshrc"), Some(u), Syntax::Opaque("ksh"), "ksh93, as its default $ENV"));
+        }
+    }
+
+    for (rel, user, syntax, by) in files {
+        let at = out.len();
+        profile(cx, &rel, user, syntax, seen, out);
+        if let Some(e) = out.get_mut(at) {
+            e.note("sourced_by", by);
+            if by.contains("replaced by") {
+                e.enabled = Enablement::Disabled;
+            }
         }
     }
 }
@@ -382,12 +488,14 @@ fn profile(
         Syntax::Shell => {}
         Syntax::KeyValue => e.note("syntax", "pam-environment"),
         Syntax::PamEnvConf => e.note("syntax", "pam_env.conf"),
+        Syntax::Opaque(shell) => e.note("syntax", shell),
     }
 
     apply(&mut e, match syntax {
         Syntax::Shell => scan_shell(&bytes),
         Syntax::KeyValue => scan_pam_env(&bytes),
         Syntax::PamEnvConf => scan_pam_env_conf(&bytes),
+        Syntax::Opaque(_) => Scanned::default(),
     });
     out.push(e);
 }
@@ -1286,6 +1394,42 @@ mod tests {
         assert_eq!(env.len(), 2, "only *.sh is sourced");
         let agent = env.iter().find(|e| e.principal.as_deref() == Some("alice")).unwrap();
         assert_eq!(agent.raw["env.LD_PRELOAD"], "/home/alice/.x.so");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn other_shells_are_read_only_where_installed_and_never_as_sh() {
+        let d = tmpdir("other-shells");
+        let put = |rel: &str, body: &[u8]| {
+            let p = d.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, body).unwrap();
+        };
+        put("etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/bash\n");
+        put("etc/csh.cshrc", b"setenv LD_PRELOAD /tmp/c.so\n");
+        put("home/alice/.config/fish/conf.d/x.fish", b"set -gx LD_PRELOAD /tmp/f.so\n");
+        put("home/alice/.bash_aliases", b"export LD_PRELOAD=/tmp/a.so\n");
+        put("usr/share/bash-completion/bash_completion", b"");
+        put("etc/bash_completion.d/tool", b"complete -F _t tool\n");
+        put("etc/bash_completion.d/tool.dpkg-old", b"");
+        put("etc/bash_completion.d/Makefile.am", b"");
+        let has = |s: &Scan, rel: &str| s.entries.iter().any(|e| e.source == d.join(rel));
+        let s = run(&d);
+        assert!(!has(&s, "etc/csh.cshrc") && !has(&s, "home/alice/.config/fish/conf.d/x.fish"), "neither shell is installed");
+        assert!(has(&s, "home/alice/.bash_aliases") && has(&s, "etc/bash_completion.d/tool"));
+        assert!(!has(&s, "etc/bash_completion.d/tool.dpkg-old") && !has(&s, "etc/bash_completion.d/Makefile.am"));
+
+        put("bin/tcsh", b"");
+        put("usr/bin/fish", b"");
+        put("etc/fish/conf.d/a.fish", b"");
+        put("usr/share/fish/vendor_conf.d/a.fish", b"");
+        let s = run(&d);
+        let csh = s.entries.iter().find(|e| e.source == d.join("etc/csh.cshrc")).unwrap();
+        assert_eq!(csh.raw["syntax"], "csh");
+        assert!(!csh.raw.contains_key("env.LD_PRELOAD"), "csh is not read by sh rules");
+        assert!(has(&s, "home/alice/.config/fish/conf.d/x.fish"));
+        let vendor = s.entries.iter().find(|e| e.source == d.join("usr/share/fish/vendor_conf.d/a.fish")).unwrap();
+        assert_eq!(vendor.enabled, Enablement::Disabled, "/etc's a.fish comes first");
         fs::remove_dir_all(&d).unwrap();
     }
 }
