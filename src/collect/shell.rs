@@ -179,9 +179,92 @@ impl Collector for Shell {
             }
         }
 
+        x_session(cx, &mut seen, &mut out);
         preload(cx, &mut out);
         library_dirs(cx, &mut out);
         out
+    }
+}
+
+/// The shell an X11 login sources on its way to the desktop. Wayland
+/// sessions, the default on every supported distribution but Mint, source
+/// none of it, which is noted on each entry.
+///
+/// Debian family (/etc/X11/Xsession, used by LightDM and by GDM's X
+/// sessions): every file in /etc/X11/Xsession.d that `run-parts --list`
+/// selects, then ~/.xsessionrc, which one of those sources, then ~/.xsession
+/// or ~/.Xsession as the session itself where Xsession.options allows it.
+/// Fedora (/etc/X11/xinit/Xsession and xinitrc-common): every file in
+/// /etc/X11/xinit/xinitrc.d but a dotfile, and ~/.xsession or ~/.Xclients as
+/// the session when executable. And the display managers' own session
+/// scripts (GDM, LightDM, SDDM) source /etc/xprofile and ~/.xprofile.
+fn x_session(cx: &mut Ctx, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<Entry>) {
+    const X11_ONLY: &str = "X11 logins; a Wayland session sources none of it";
+    let mut add = |cx: &mut Ctx, rel: &Path, user: Option<&User>, by: &str, off: Option<&str>, out: &mut Vec<Entry>| {
+        let at = out.len();
+        profile(cx, rel, user, Syntax::Shell, seen, out);
+        if let Some(e) = out.get_mut(at) {
+            e.note("sourced_by", by);
+            e.note("session", X11_ONLY);
+            if let Some(why) = off {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", why);
+            }
+        }
+    };
+    let xsession_d = Path::new("etc/X11/Xsession.d");
+    let mut names: Vec<_> = cx.dir(xsession_d).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
+    names.sort();
+    for name in names {
+        let why = super::run_parts_skips(cx, super::RunParts::Debian, xsession_d, name.as_encoded_bytes());
+        add(cx, &xsession_d.join(&name), None, "/etc/X11/Xsession", why, out);
+    }
+    let xinitrc_d = Path::new("etc/X11/xinit/xinitrc.d");
+    let mut names: Vec<_> =
+        cx.dir(xinitrc_d).into_iter().filter(|e| !e.is_dir && !e.name.as_encoded_bytes().starts_with(b".")).map(|e| e.name).collect();
+    names.sort();
+    for name in names {
+        add(cx, &xinitrc_d.join(&name), None, "/etc/X11/xinit/xinitrc-common", None, out);
+    }
+    add(cx, Path::new("etc/xprofile"), None, "the display manager's X session script", None, out);
+
+    // Debian runs the user's own session file only with this option set,
+    // in Xsession.options or a .conf in Xsession.options.d.
+    let mut options = cx.read_capped("etc/X11/Xsession.options", 64 * 1024).unwrap_or_default();
+    for e in cx.dir("etc/X11/Xsession.options.d") {
+        if e.name.as_encoded_bytes().ends_with(b".conf") {
+            options.extend(cx.read_capped(Path::new("etc/X11/Xsession.options.d").join(&e.name), 64 * 1024).unwrap_or_default());
+            options.push(b'\n');
+        }
+    }
+    let allow = options.split(|b| *b == b'\n').map(|l| l.trim_ascii()).any(|l| l == b"allow-user-xsession");
+    let debian = cx.root.exists("etc/X11/Xsession");
+    let users = cx.users;
+    for u in users {
+        if debian {
+            add(cx, &u.in_home(".xsessionrc"), Some(u), "/etc/X11/Xsession.d/40x11-common_xsessionrc", None, out);
+        }
+        add(cx, &u.in_home(".xprofile"), Some(u), "the display manager's X session script", None, out);
+        // The first found becomes the session. Debian's Xsession runs a
+        // non-executable one through the shell; Fedora's only an executable.
+        let has_xsession = cx.root.exists(u.in_home(".xsession"));
+        for f in [".xsession", ".Xsession", ".Xclients"] {
+            let rel = u.in_home(f);
+            let exec = cx.root.stat_follow(&rel).is_ok_and(|m| m.mode & 0o111 != 0);
+            let off = match (debian, f) {
+                (true, ".Xclients") => Some("only Fedora's Xsession runs .Xclients"),
+                (true, _) if !allow => Some("Xsession.options does not allow-user-xsession"),
+                (true, ".Xsession") if has_xsession => Some(".xsession is found first"),
+                (true, _) => None,
+                (false, ".Xsession") => Some("only the Debian family's Xsession runs .Xsession"),
+                (false, _) if !exec => Some("run only when executable"),
+                (false, ".Xclients") if has_xsession && cx.root.stat_follow(u.in_home(".xsession")).is_ok_and(|m| m.mode & 0o111 != 0) => {
+                    Some(".xsession is found first")
+                }
+                (false, _) => None,
+            };
+            add(cx, &rel, Some(u), "the X session, as the session itself", off, out);
+        }
     }
 }
 
@@ -1110,5 +1193,57 @@ mod tests {
         assert_eq!(dirs[0].source, dir.join("etc/ld.so.conf.d/zz-evil.conf"));
         assert_eq!(dirs[0].trigger, Trigger::Always);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_x11_login_sources_its_session_files_by_each_distributions_rules() {
+        use std::os::unix::fs::PermissionsExt;
+        let put = |dir: &Path, rel: &str, body: &[u8]| {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        let state = |s: &Scan, rel: &str, dir: &Path| {
+            s.entries.iter().find(|e| e.source == dir.join(rel)).map(|e| e.enabled).unwrap_or_else(|| panic!("no {rel}"))
+        };
+
+        // Debian family.
+        let d = tmpdir("xsession-deb");
+        put(&d, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/bash\n");
+        put(&d, "etc/X11/Xsession", b"#!/bin/sh\n");
+        put(&d, "etc/X11/Xsession.options", b"# allow-user-xsession\nuse-ssh-agent\n");
+        put(&d, "etc/X11/Xsession.d/40x11-common_xsessionrc", b". \"$USERXSESSIONRC\"\n");
+        put(&d, "etc/X11/Xsession.d/99evil.sh", b"/tmp/x &\n");
+        put(&d, "etc/xprofile", b"export LD_PRELOAD=/tmp/p.so\n");
+        put(&d, "home/alice/.xsessionrc", b"/home/alice/.b &\n");
+        put(&d, "home/alice/.xsession", b"exec cinnamon-session\n");
+        put(&d, "home/alice/.Xclients", b"exec twm\n");
+        let s = run(&d);
+        assert_eq!(state(&s, "etc/X11/Xsession.d/40x11-common_xsessionrc", &d), Enablement::NotApplicable);
+        assert_eq!(state(&s, "etc/X11/Xsession.d/99evil.sh", &d), Enablement::Disabled, "run-parts --list skips a dotted name");
+        assert_eq!(state(&s, "home/alice/.xsessionrc", &d), Enablement::NotApplicable);
+        assert_eq!(state(&s, "home/alice/.xsession", &d), Enablement::Disabled, "allow-user-xsession is commented out");
+        assert_eq!(state(&s, "home/alice/.Xclients", &d), Enablement::Disabled);
+        let xprofile = s.entries.iter().find(|e| e.source == d.join("etc/xprofile")).unwrap();
+        assert_eq!(xprofile.raw["env.LD_PRELOAD"], "/tmp/p.so");
+        assert!(xprofile.raw["session"].contains("Wayland"));
+        put(&d, "etc/X11/Xsession.options.d/local.conf", b"allow-user-xsession\n");
+        assert_eq!(state(&run(&d), "home/alice/.xsession", &d), Enablement::NotApplicable);
+        std::fs::remove_dir_all(&d).unwrap();
+
+        // Fedora.
+        let d = tmpdir("xsession-fed");
+        put(&d, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/bash\n");
+        put(&d, "etc/X11/xinit/xinitrc.d/50-hook.sh", b"/tmp/y &\n");
+        put(&d, "etc/X11/xinit/xinitrc.d/.hidden", b"/tmp/z &\n");
+        put(&d, "home/alice/.xsession", b"exec twm\n");
+        put(&d, "home/alice/.Xclients", b"exec twm\n");
+        std::fs::set_permissions(d.join("home/alice/.Xclients"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let s = run(&d);
+        assert_eq!(state(&s, "etc/X11/xinit/xinitrc.d/50-hook.sh", &d), Enablement::NotApplicable);
+        assert!(!s.entries.iter().any(|e| e.source == d.join("etc/X11/xinit/xinitrc.d/.hidden")));
+        assert_eq!(state(&s, "home/alice/.xsession", &d), Enablement::Disabled, "not executable");
+        assert_eq!(state(&s, "home/alice/.Xclients", &d), Enablement::NotApplicable, "the executable one is used");
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

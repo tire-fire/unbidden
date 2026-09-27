@@ -199,6 +199,8 @@ TCP wrappers
 spawn and twist options in /etc/hosts.allow and /etc/hosts.deny, shell commands libwrap runs on a connection to any program linked against it (tcpd, and daemons such as rpcbind or vsftpd built with it), as tcp_wrapper entries on the network-event trigger. Read as libwrap reads them: a trailing backslash continues a line, fields split at a colon not escaped with a backslash nor inside an IPv6 address's brackets, an option's value after whitespace or =. Off where libwrap is not installed
 crypttab keyscripts
 keyscript= options in /etc/crypttab, a program run as root at boot whose output unlocks the device, as crypttab entries; a name without a slash is a script in /lib/cryptsetup/scripts. Only Debian's cryptsetup scripts run it, in the initramfs or cryptdisks, and systemd-cryptsetup ignores it, so whether it runs is unknown
+X session
+The shell an X11 login sources, as shell_profile entries noting who sources them; a Wayland session, the default on every supported distribution but Mint, sources none of it. Debian family: the files in /etc/X11/Xsession.d that run-parts --list selects, ~/.xsessionrc, and ~/.xsession or else ~/.Xsession as the session itself where Xsession.options (or a .conf in Xsession.options.d) says allow-user-xsession. Fedora: /etc/X11/xinit/xinitrc.d but its dotfiles, and ~/.xsession or else ~/.Xclients when executable. Everywhere: /etc/xprofile and ~/.xprofile, which the display managers' session scripts source
 Tier two — v1, fixed-path collectors
 The original split was "if time allows", which is not a criterion. The real divide is cost class: a collector that reads a bounded set of known paths finishes in milliseconds, while one that must traverse the entire filesystem takes minutes and saturates the disk. Those are different products, not different priorities.
 Everything below reads fixed paths and ships in v1. Three collectors from the first draft do not, and move to the --deep section that follows.
@@ -261,7 +263,7 @@ Three caveats:
 • The gvdb crate is written for GResource. Verified: it reads a real ~/.config/dconf/user, as written by a GNOME and a Cinnamon session booted in CI, and system databases compiled by dconf itself, locks included.
 • zgvariant has very few downloads. Same bus-factor note as rpmdb (§7): be ready to vendor.
 Deferred
-GRUB and initramfs (pre-OS, needs image parsing), container runtimes, web shells (requires content heuristics, out of scope for a mechanical tool), X11 ~/.xinitrc and ~/.xprofile.
+GRUB and initramfs (pre-OS, needs image parsing), container runtimes, web shells (requires content heuristics, out of scope for a mechanical tool), and X11's ~/.xinitrc, which runs when a person runs startx.
 The user-enumeration problem
 Several collectors are per-user. With CGO-free static linking there is no NSS, so accounts come from parsing /etc/passwd directly. That misses LDAP and SSSD accounts.
 Decision: enumerate the union of /etc/passwd entries, directories present under /home, /root, and any account named by a crontab spool file. Record the discovery source per user. Document the LDAP gap explicitly rather than silently under-reporting.
