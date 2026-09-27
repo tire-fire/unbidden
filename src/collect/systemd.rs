@@ -343,6 +343,7 @@ impl Walk {
             out.push(self.unit_entry(cx, f));
         }
         self.note_shadowing(&mut out);
+        self.fold_aliases(cx, &mut out);
 
         for f in &self.dropins {
             out.push(dropin_entry(cx, f));
@@ -360,6 +361,50 @@ impl Walk {
             }
         }
         out
+    }
+
+    /// A unit file that is a symlink to a unit file of another name, which
+    /// is itself found in the search path, is that unit under a second name:
+    /// the Alias= `systemctl enable` writes, such as sshd.service for
+    /// ssh.service. Its enablement is already on the unit it names; the
+    /// link becomes a note there rather than an entry judged as a file no
+    /// package owns. An alias to anything else stays an entry of its own.
+    fn fold_aliases(&self, cx: &mut Ctx, out: &mut Vec<Entry>) {
+        let files: BTreeMap<&Path, usize> = self
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !cx.root.stat(&f.rel).is_ok_and(|m| m.is_symlink))
+            .map(|(i, f)| (f.rel.as_path(), i))
+            .collect();
+        let mut folded: BTreeMap<usize, usize> = BTreeMap::new();
+        for (i, f) in self.units.iter().enumerate() {
+            if !cx.root.stat(&f.rel).is_ok_and(|m| m.is_symlink) {
+                continue;
+            }
+            let Ok(resolved) = cx.root.resolve(&f.rel) else { continue };
+            // A link to a template from one of its instances is that
+            // instance, a unit of its own, not an alias.
+            let template = |u: &str| u.contains("@.");
+            if let Some(&j) = files.get(resolved.as_path())
+                && self.units[j].unit != f.unit
+                && self.units[j].scope == f.scope
+                && template(&self.units[j].unit) == template(&f.unit)
+            {
+                folded.insert(i, j);
+            }
+        }
+        for (&i, &j) in &folded {
+            let alias = out[i].source.to_string_lossy().into_owned();
+            let merged = match out[j].raw.get("aliases") {
+                Some(prev) => format!("{prev}, {alias}"),
+                None => alias,
+            };
+            out[j].note("aliases", merged);
+        }
+        for i in folded.into_keys().rev() {
+            out.remove(i);
+        }
     }
 
     /// Orders each unit name's files by search-path rank and records who
@@ -1429,6 +1474,25 @@ mod tests {
 
         assert_eq!(one(&s, "present.service").enabled, Enablement::Disabled, "presence is not enablement");
         assert_eq!(one(&s, "plumbing.service").enabled, Enablement::Static, "no [Install] is static");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_alias_is_a_second_name_for_the_unit_not_a_file_of_its_own() {
+        let dir = tree("alias");
+        write(&dir, "usr/lib/systemd/system/ssh.service", b"[Service]\nExecStart=/usr/sbin/sshd -D\n[Install]\nWantedBy=multi-user.target\nAlias=sshd.service\n");
+        link(&dir, "/usr/lib/systemd/system/ssh.service", "etc/systemd/system/sshd.service");
+        // A link of another name to a unit outside the search path is not an
+        // alias of anything reported, and stays.
+        write(&dir, "opt/elsewhere/beacon.service", b"[Service]\nExecStart=/opt/b\n");
+        link(&dir, "/opt/elsewhere/beacon.service", "etc/systemd/system/innocent.service");
+
+        let s = scan(&dir);
+        assert!(s.entries.iter().all(|e| e.name != "sshd.service"), "the alias folds into ssh.service");
+        let ssh = one(&s, "ssh.service");
+        assert!(ssh.raw["aliases"].ends_with("etc/systemd/system/sshd.service"));
+        assert_eq!(ssh.enabled, Enablement::Enabled, "an alias enables the unit it names");
+        one(&s, "innocent.service");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
