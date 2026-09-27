@@ -654,3 +654,17 @@ path = "fuzz_targets/firefox_prefs.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tmux_conf"
+path = "fuzz_targets/tmux_conf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "screenrc"
+path = "fuzz_targets/screenrc.rs"
+test = false
+doc = false
+bench = false

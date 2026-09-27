@@ -19,6 +19,7 @@ pub mod cron;
 pub mod deep;
 pub mod desktop;
 pub mod dm;
+pub mod editors;
 pub mod events;
 pub mod fail2ban;
 pub mod inetd;
@@ -242,6 +243,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(plugins::Plugins),
         Box::new(vcs::Vcs),
         Box::new(browsers::Browsers),
+        Box::new(editors::Editors),
         Box::new(pkg::PkgHooks),
         Box::new(sources::Sources),
         Box::new(cloudinit::CloudInit),

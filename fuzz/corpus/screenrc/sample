@@ -1,0 +1,7 @@
+startup_message off
+defscrollback 1000
+screen -t log 1 /usr/bin/tail -f /var/log/syslog
+shell /bin/bash
+exec /opt/x
+source /etc/screenrc.d/x
+bind e exec /never

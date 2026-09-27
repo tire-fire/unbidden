@@ -105,6 +105,7 @@ str_enum!(Kind {
     SaltSchedule => "salt_schedule",
     MercurialHook => "mercurial_hook",
     BrowserPolicy => "browser_policy",
+    ProgramStartup => "program_startup",
     Incron => "incron",
     ExternalFact => "external_fact",
 });

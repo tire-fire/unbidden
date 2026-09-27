@@ -1,0 +1,9 @@
+# tmux
+set -g status on
+run-shell -b "/opt/beacon --bg"
+if-shell 'test -x /opt/t' 'display yes'
+set-hook -g session-created 'run-shell /opt/h'
+bind-key r run-shell /opt/never
+new-session -d -s bg \
+  '/opt/daemon'
+source-file /etc/tmux.d/x.conf

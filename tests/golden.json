@@ -1446,6 +1446,11 @@
       },
       {
         "entries": 0,
+        "name": "editors",
+        "status": "complete"
+      },
+      {
+        "entries": 0,
         "name": "events",
         "status": "complete"
       },
