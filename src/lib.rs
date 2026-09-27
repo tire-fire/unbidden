@@ -9,6 +9,7 @@ pub mod render;
 pub mod root;
 pub mod scan;
 pub mod users;
+pub mod yaml;
 
 pub use entry::{Enablement, Entry, Flag, Integrity, Kind, Provenance, Trigger};
 pub use root::Root;

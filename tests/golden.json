@@ -1289,6 +1289,11 @@
         "status": "complete"
       },
       {
+        "entries": 0,
+        "name": "cloud_init",
+        "status": "complete"
+      },
+      {
         "entries": 3,
         "name": "cron",
         "status": "complete"

@@ -86,6 +86,7 @@ str_enum!(Kind {
     NssModule => "nss_module",
     Doas => "doas",
     SshClient => "ssh_client",
+    CloudInit => "cloud_init",
 });
 
 str_enum!(Trigger {

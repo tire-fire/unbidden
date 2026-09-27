@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::scan::{Collector, Ctx};
 
 pub mod auth;
+pub mod cloudinit;
 pub mod cron;
 pub mod deep;
 pub mod desktop;
@@ -176,6 +177,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(inetd::Inetd),
         Box::new(kernel::Kernel),
         Box::new(pkg::PkgHooks),
+        Box::new(cloudinit::CloudInit),
         Box::new(deep::GitConfig),
         Box::new(deep::Deep),
     ]

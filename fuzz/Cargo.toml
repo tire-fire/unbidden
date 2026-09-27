@@ -416,3 +416,15 @@ path = "fuzz_targets/namespace_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cloud_cfg"
+path = "fuzz_targets/cloud_cfg.rs"
+test = false
+doc = false
+bench = false
+
+# The root crate's saphyr-parser fix; a [patch] applies only in the
+# workspace that declares it. See ../vendor/saphyr-parser/UNBIDDEN-PATCH.md.
+[patch.crates-io]
+saphyr-parser = { path = "../vendor/saphyr-parser" }

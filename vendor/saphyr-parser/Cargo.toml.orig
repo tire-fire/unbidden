@@ -1,0 +1,50 @@
+[package]
+name = "saphyr-parser"
+readme = "README.md"
+authors = { workspace = true }
+categories = { workspace = true }
+description = { workspace = true }
+documentation = { workspace = true }
+edition = { workspace = true }
+keywords = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+rust-version = { workspace = true }
+version = { workspace = true }
+exclude = [
+  # Exclude the `yaml-test-suite` from the package. This removes the need to
+  # add its license to the package.
+  "/tests/yaml-test-suite",
+  # We don't need the documents either.
+  "/documents",
+]
+
+[features]
+debug_prints = []
+
+[dependencies]
+arraydeque = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+libtest-mimic = { workspace = true }
+miette = { workspace = true }
+quickcheck = { workspace = true }
+rustyline = { workspace = true }
+saphyr = { workspace = true }
+
+[[test]]
+name = "yaml-test-suite"
+harness = false
+
+[[bin]]
+name = "dump_events"
+path = "tools/dump_events.rs"
+
+[[bin]]
+name = "time_parser"
+path = "tools/time_parse.rs"
+
+[[bin]]
+name = "run_parser"
+path = "tools/run_bench.rs"

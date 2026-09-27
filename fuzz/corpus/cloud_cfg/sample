@@ -1,0 +1,21 @@
+# A local override of the kind an operator drops in cloud.cfg.d.
+defaults: &defaults
+  mode: "0644"
+merge_how: list(append)+dict(recurse_array)
+cloud_init_modules:
+  - bootcmd
+  - [write_files, once-per-instance]
+cloud_final_modules:
+  - {name: scripts_user, frequency: always}
+  - scripts-per-boot
+bootcmd:
+  - echo booted > /run/booted
+  - [sh, -c, 'echo "$INSTANCE_ID"']
+  -
+runcmd: [[systemctl, restart, "agent.service"], 'touch /var/tmp/ok']
+extra:
+  <<: *defaults
+  on: yes
+  when: 2001-12-14
+  n: 0o17
+  ratio: 1.5
