@@ -3041,4 +3041,30 @@ PKCS11Provider /opt/a.so extra
         assert_eq!((init.enabled, init.raw["not_run"].as_str()), (Enablement::Disabled, "not executable, which fails the session"));
         std::fs::remove_dir_all(&d).unwrap();
     }
+
+    #[test]
+    fn a_dropped_or_weakened_mfa_line_shows_in_a_baseline_diff() {
+        use crate::diff::{Delta, diff};
+        let d = tree("mfa");
+        let stack = |u2f: &str| format!("auth required pam_unix.so\n{u2f}account required pam_unix.so\n");
+        put(&d, "etc/pam.d/sshd", stack("auth required pam_u2f.so cue\n"));
+        let before = scan(&d);
+
+        // Removed outright, or commented out: the same removed row.
+        for gone in ["", "#auth required pam_u2f.so cue\n"] {
+            put(&d, "etc/pam.d/sshd", stack(gone));
+            let rows = diff(&before, &scan(&d)).unwrap();
+            let changed: Vec<_> = rows.iter().filter(|r| r.delta != Delta::Unchanged).collect();
+            assert_eq!(changed.len(), 1, "{:?}", changed.iter().map(|r| &r.entry.name).collect::<Vec<_>>());
+            assert_eq!((changed[0].entry.name.as_str(), &changed[0].delta), ("sshd:auth:pam_u2f.so", &Delta::Removed));
+        }
+
+        // Still there, but no longer able to fail the stack.
+        put(&d, "etc/pam.d/sshd", stack("auth optional pam_u2f.so cue\n"));
+        let rows = diff(&before, &scan(&d)).unwrap();
+        let u2f = rows.iter().find(|r| r.entry.name == "sshd:auth:pam_u2f.so").unwrap();
+        assert!(matches!(&u2f.delta, Delta::Changed { .. }), "{:?}", u2f.delta);
+        assert_eq!(u2f.entry.raw["control"], "optional");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }
