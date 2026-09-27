@@ -47,6 +47,7 @@ impl Collector for CloudInit {
             }
         }
         scripts(cx, &mut out, &modules, &gate);
+        hooks(cx, &mut out, &gate);
         dedup_ids(&mut out);
         out
     }
@@ -59,6 +60,20 @@ struct Gate {
     /// Whether it does on this boot is known: a live root whose generator
     /// has recorded its decision.
     known: bool,
+}
+
+impl Gate {
+    /// An entry that would run is unknown where cloud-init's own decision
+    /// is, and off where cloud-init is.
+    fn apply(&self, e: &mut Entry) {
+        if e.enabled == Enablement::Enabled && !self.known {
+            e.enabled = Enablement::Unknown;
+        }
+        if let Some(why) = &self.off {
+            e.enabled = Enablement::Disabled;
+            e.note("cloud_init_off", why.clone());
+        }
+    }
 }
 
 fn gate(cx: &mut Ctx) -> Gate {
@@ -296,13 +311,7 @@ fn commands(
                 e.note("superseded", format!("{by} sets {key} first"));
             }
         }
-        if e.enabled == Enablement::Enabled && !gate.known {
-            e.enabled = Enablement::Unknown;
-        }
-        if let Some(why) = &gate.off {
-            e.enabled = Enablement::Disabled;
-            e.note("cloud_init_off", why.clone());
-        }
+        gate.apply(&mut e);
         out.push(e);
     }
 }
@@ -346,13 +355,77 @@ fn scripts(cx: &mut Ctx, out: &mut Vec<Entry>, modules: &Modules, gate: &Gate) {
                 e.enabled = Enablement::Disabled;
                 e.note("not_run", "not executable; runparts skips it");
             }
-            if e.enabled == Enablement::Enabled && !gate.known {
-                e.enabled = Enablement::Unknown;
+            gate.apply(&mut e);
+            out.push(e);
+        }
+    }
+}
+
+/// What cloud-init runs from user data on every boot, before any module:
+/// user data is consumed each boot, and in doing so cloud-init imports every
+/// `*.py` in its handlers directory as a part handler (the import runs the
+/// file, handler or not), writes each part handler and boothook the user
+/// data holds and runs it. Both handler directories go on the front of
+/// Python's module path, so a file there can also stand in for a module
+/// cloud-init imports later. The seed directory holds user data a NoCloud
+/// datasource reads from disk, rather than from a cloud, on each boot.
+fn hooks(cx: &mut Ctx, out: &mut Vec<Entry>, gate: &Gate) {
+    const DIRS: [(&str, &str, &str); 3] = [
+        ("var/lib/cloud/handlers", "handler", "imported by cloud-init on every boot"),
+        ("var/lib/cloud/instance/handlers", "part-handler", "written from user data and imported on every boot"),
+        ("var/lib/cloud/instance/boothooks", "boothook", "written from user data and run on every boot"),
+    ];
+    for (dir, what, how) in DIRS {
+        let mut ents = cx.dir(dir);
+        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        for ent in ents {
+            let name = ent.name.to_string_lossy().into_owned();
+            let rel = Path::new(dir).join(&ent.name);
+            let Ok(meta) = cx.root.stat_follow(&rel) else { continue };
+            if !meta.is_file {
+                continue;
             }
-            if let Some(why) = &gate.off {
-                e.enabled = Enablement::Disabled;
-                e.note("cloud_init_off", why.clone());
+            // Python imports `name.py` by module name, so a name with a
+            // dot of its own, or not ending in .py, is never loaded.
+            let module = name.strip_suffix(".py").map(str::trim).filter(|m| !m.is_empty() && !m.contains('.'));
+            if what != "boothook" && module.is_none() {
+                continue;
             }
+            let mut e = cx.entry(Kind::CloudInit, &rel, format!("{what}:{name}"));
+            e.trigger = Trigger::Boot;
+            e.principal = Some("root".into());
+            e.target_path = Some(cx.root.abs(&rel));
+            e.note("hook", what);
+            e.note("frequency", PER_ALWAYS);
+            e.note("runs", how);
+            if let Some(m) = module {
+                e.note("python_module", m);
+            }
+            e.enabled = Enablement::Enabled;
+            gate.apply(&mut e);
+            out.push(e);
+        }
+    }
+
+    for seed in cx.dir("var/lib/cloud/seed") {
+        if !seed.is_dir {
+            continue;
+        }
+        let dir = Path::new("var/lib/cloud/seed").join(&seed.name);
+        for file in ["user-data", "vendor-data"] {
+            let rel = dir.join(file);
+            let Some(bytes) = cx.read_capped(&rel, 4096) else { continue };
+            let mut e = cx.entry(Kind::CloudInit, &rel, format!("seed:{}:{file}", seed.name.to_string_lossy()));
+            e.trigger = Trigger::Boot;
+            e.principal = Some("root".into());
+            e.target_path = Some(cx.root.abs(&rel));
+            e.note("hook", "seed");
+            e.note("datasource", seed.name.to_string_lossy());
+            // What cloud-init makes of it depends on how it starts.
+            let first = bytes.split(|b| *b == b'\n').next().unwrap_or_default();
+            e.note("format", String::from_utf8_lossy(&first[..first.len().min(80)]).trim().to_string());
+            e.enabled = Enablement::Enabled;
+            gate.apply(&mut e);
             out.push(e);
         }
     }
@@ -451,5 +524,31 @@ mod tests {
         assert_eq!(canonical("cc_scripts-user.py").as_deref(), Some("scripts_user"));
         assert_eq!(canonical(" bootcmd ").as_deref(), Some("bootcmd"));
         assert_eq!(canonical("  "), None);
+    }
+
+    #[test]
+    fn handlers_boothooks_and_seed_user_data_run_every_boot() {
+        let d = std::env::temp_dir().join(format!("unbidden-cloudinit-hooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        put(&d, "usr/bin/cloud-init", "#!/usr/bin/python3\n", 0o755);
+        put(&d, "var/lib/cloud/handlers/evil.py", "import os\n", 0o644);
+        put(&d, "var/lib/cloud/handlers/not.a.module.py", "", 0o644);
+        put(&d, "var/lib/cloud/handlers/README", "", 0o644);
+        put(&d, "var/lib/cloud/instance/handlers/part-handler-000.py", "def handle_part(*a): pass\n", 0o600);
+        put(&d, "var/lib/cloud/instance/boothooks/part-001", "#!/bin/sh\necho hi\n", 0o700);
+        put(&d, "var/lib/cloud/seed/nocloud/user-data", "#cloud-config\nruncmd: [id]\n", 0o600);
+        put(&d, "var/lib/cloud/seed/nocloud/meta-data", "instance-id: x\n", 0o600);
+        let s = scan(&d);
+        let mut names: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            ["boothook:part-001", "handler:evil.py", "part-handler:part-handler-000.py", "seed:nocloud:user-data"],
+            "a dotted module name, a non-Python file and meta-data run nothing"
+        );
+        let evil = s.entries.iter().find(|e| e.name == "handler:evil.py").unwrap();
+        assert_eq!((evil.trigger, evil.enabled, evil.raw["python_module"].as_str()), (Trigger::Boot, Enablement::Unknown, "evil"));
+        assert_eq!(s.entries.iter().find(|e| e.name.starts_with("seed")).unwrap().raw["format"], "#cloud-config");
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }
