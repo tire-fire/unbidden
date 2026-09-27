@@ -1,0 +1,65 @@
+# ATT&CK Enterprise 19.2: every technique with Linux or Containers among its platforms and persistence or privilege-escalation among its tactics, plus T1574 and its sub-techniques. Regenerate the first four columns with ci/attack-list.py; the answer is curated. answer is `kinds: a, b` (the entry kinds that report it), `out-of-scope: ` (decided, with the reason in notes) or `gap` (a TODO).
+technique	name	tactics	platforms	answer	notes
+T1037	Boot or Logon Initialization Scripts	persistence,privilege-escalation	Linux	kinds: rc_local, sysv_init, shell_profile, display_manager, systemd_hook	
+T1037.004	RC Scripts	persistence,privilege-escalation	Linux	kinds: rc_local, sysv_init	
+T1053	Scheduled Task/Job	execution,persistence,privilege-escalation	Containers,Linux	kinds: cron, at_job, systemd_timer, logrotate, salt_schedule, monitor_plugin	
+T1053.002	At	execution,persistence,privilege-escalation	Linux	kinds: at_job	
+T1053.003	Cron	execution,persistence,privilege-escalation	Linux	kinds: cron	
+T1053.006	Systemd Timers	execution,persistence,privilege-escalation	Linux	kinds: systemd_timer	
+T1053.007	Container Orchestration Job	execution,persistence,privilege-escalation	Containers	out-of-scope	containers and orchestration are deferred by the spec
+T1055	Process Injection	privilege-escalation,stealth	Linux	out-of-scope	runtime injection leaves no configuration; the tool reads what is on disk
+T1055.008	Ptrace System Calls	privilege-escalation,stealth	Linux	out-of-scope	runtime
+T1055.009	Proc Memory	privilege-escalation,stealth	Linux	out-of-scope	runtime
+T1055.014	VDSO Hijacking	privilege-escalation,stealth	Linux	out-of-scope	runtime
+T1068	Exploitation for Privilege Escalation	privilege-escalation	Containers,Linux	out-of-scope	exploitation is an act, not a mechanism that runs again
+T1078	Valid Accounts	initial-access,persistence,privilege-escalation,stealth	Containers,Linux	kinds: sudoers, doas, ssh_authorized_key	the rights an account is given; the account inventory itself is not reported
+T1078.001	Default Accounts	initial-access,persistence,privilege-escalation,stealth	Containers,Linux	out-of-scope	account inventory; a default account's rights show through sudoers and ssh keys
+T1078.002	Domain Accounts	initial-access,persistence,privilege-escalation,stealth	Linux	out-of-scope	domain accounts live on the directory, not the host
+T1078.003	Local Accounts	initial-access,persistence,privilege-escalation,stealth	Containers,Linux	kinds: sudoers, doas, ssh_authorized_key	the rights side; creation is T1136
+T1098	Account Manipulation	persistence,privilege-escalation	Containers,Linux	kinds: ssh_authorized_key, sudoers, doas, pam	
+T1098.004	SSH Authorized Keys	persistence,privilege-escalation	Linux	kinds: ssh_authorized_key	
+T1098.006	Additional Container Cluster Roles	persistence,privilege-escalation	Containers	out-of-scope	containers
+T1098.007	Additional Local or Domain Groups	persistence,privilege-escalation	Linux	gap	membership of wheel, sudo, docker and the like in /etc/group is not reported; sudoers %group specifications are (TODO)
+T1133	External Remote Services	initial-access,persistence	Containers,Linux	kinds: systemd_unit, inetd_service, sysv_init	the services that offer remote access; their reachability is not judged
+T1136	Create Account	persistence	Containers,Linux	out-of-scope	account inventory: the tool answers what runs, not who exists; an account's rights show through sudoers and ssh keys
+T1136.001	Local Account	persistence	Containers,Linux	out-of-scope	account inventory
+T1136.002	Domain Account	persistence	Linux	out-of-scope	domain
+T1176	Software Extensions	persistence	Linux	kinds: browser_policy, desktop_extension, plugin, program_startup, python_startup, mercurial_hook, git_hook	
+T1176.001	Browser Extensions	persistence	Linux	kinds: browser_policy	policy-forced extensions; a profile's own extensions are the account's business (decided 2026-09-27)
+T1176.002	IDE Extensions	persistence	Linux	kinds: program_startup	system-wide editor startup files; per-account IDE extensions are the account's business (decided 2026-09-27)
+T1205	Traffic Signaling	command-and-control,persistence,stealth	Linux	out-of-scope	runtime network state; what installs a filter at boot shows as the unit or cron job that does
+T1205.001	Port Knocking	command-and-control,persistence,stealth	Linux	out-of-scope	runtime; the knock daemon is a unit
+T1205.002	Socket Filters	command-and-control,persistence,stealth	Linux	out-of-scope	runtime BPF; the installer is a unit or job
+T1505	Server Software Component	persistence	Linux	out-of-scope	server software plug-ins and web shells are deferred by the spec
+T1505.001	SQL Stored Procedures	persistence	Linux	out-of-scope	inside a database
+T1505.002	Transport Agent	persistence	Linux	out-of-scope	Exchange; no Linux mechanism
+T1505.003	Web Shell	persistence	Linux	out-of-scope	web shells are deferred by the spec
+T1525	Implant Internal Image	persistence	Containers	out-of-scope	containers
+T1542	Pre-OS Boot	persistence,stealth	Linux	out-of-scope	pre-OS is deferred by the spec
+T1542.002	Component Firmware	persistence,stealth	Linux	out-of-scope	firmware
+T1542.003	Bootkit	persistence,stealth	Linux	out-of-scope	pre-OS
+T1543	Create or Modify System Process	persistence,privilege-escalation	Containers,Linux	kinds: systemd_unit, sysv_init, inetd_service, dbus_service	
+T1543.002	Systemd Service	persistence,privilege-escalation	Linux	kinds: systemd_unit	
+T1543.005	Container Service	persistence,privilege-escalation	Containers	out-of-scope	containers
+T1546	Event Triggered Execution	persistence,privilege-escalation	Linux	kinds: event_handler, udev, pam, network_dispatcher, incron, systemd_hook, polkit_rule, tcp_wrapper, logrotate, pkg_hook, alternative, dpkg_diversion, kernel_callout	
+T1546.004	Unix Shell Configuration Modification	persistence,privilege-escalation	Linux	kinds: shell_profile, interpreter_env	
+T1546.005	Trap	persistence,privilege-escalation	Linux	kinds: shell_profile, cron, systemd_unit	a trap action in any script an entry runs is re-read as shell text by enrichment
+T1546.016	Installer Packages	persistence,privilege-escalation	Linux	kinds: pkg_hook, pkg_source	
+T1546.017	Udev Rules	persistence,privilege-escalation	Linux	kinds: udev	
+T1546.018	Python Startup Hooks	persistence,privilege-escalation	Linux	kinds: python_startup, interpreter_env	
+T1547	Boot or Logon Autostart Execution	persistence,privilege-escalation	Linux	kinds: systemd_unit, xdg_autostart, kernel_module, ld_preload, display_manager, shell_profile, rc_local, cloud_init	
+T1547.006	Kernel Modules and Extensions	persistence,privilege-escalation	Linux	kinds: kernel_module	
+T1547.013	XDG Autostart Entries	persistence,privilege-escalation	Linux	kinds: xdg_autostart	
+T1548	Abuse Elevation Control Mechanism	privilege-escalation	Linux	kinds: suid_binary, file_capability, sudoers, doas, polkit_rule, polkit_action	
+T1548.001	Setuid and Setgid	privilege-escalation	Linux	kinds: suid_binary, file_capability	
+T1548.003	Sudo and Sudo Caching	privilege-escalation	Linux	kinds: sudoers, sudo_plugin, doas	
+T1554	Compromise Host Software Binary	persistence	Linux	kinds: package_file, alternative, dpkg_diversion, plugin	package_file is behind --deep
+T1556	Modify Authentication Process	credential-access,defense-impairment,persistence	Linux	kinds: pam, nss_module, sudo_plugin	
+T1556.003	Pluggable Authentication Modules	credential-access,defense-impairment,persistence	Linux	kinds: pam	
+T1556.006	Multi-Factor Authentication	credential-access,defense-impairment,persistence	Linux	kinds: pam	an MFA module dropped from a stack reads as the edited PAM file; no separate detector (decided)
+T1574	Hijack Execution Flow	execution,stealth	Linux	kinds: ld_preload, library_dir, alternative, dpkg_diversion, plugin, nss_module	
+T1574.006	Dynamic Linker Hijacking	execution,stealth	Linux	kinds: ld_preload, library_dir	
+T1574.007	Path Interception by PATH Environment Variable	execution,stealth	Linux	kinds: shell_profile, interpreter_env	a PATH set in a profile shows as that file; a bare command an entry runs is resolved on the search path by enrichment; PATH values themselves are not judged
+T1611	Escape to Host	privilege-escalation	Containers,Linux	out-of-scope	containers
+T1653	Power Settings	persistence	Linux	kinds: systemd_hook, event_handler	
+T1668	Exclusive Control	persistence	Linux	out-of-scope	an act against other intruders, not a mechanism that runs
