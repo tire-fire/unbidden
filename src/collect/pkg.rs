@@ -34,9 +34,74 @@ impl Collector for PkgHooks {
         out.extend(dpkg_scripts(cx));
         out.extend(dnf_plugins(cx));
         out.extend(rpm(cx));
+        out.extend(kernel_hooks(cx));
         out.extend(dbus(cx));
         out
     }
+}
+
+/// The directories a kernel package's maintainer scripts hand to run-parts
+/// on the Debian family, with the version and image path as arguments.
+const KERNEL_RUN_PARTS: [&str; 5] =
+    ["etc/kernel/preinst.d", "etc/kernel/postinst.d", "etc/kernel/prerm.d", "etc/kernel/postrm.d", "etc/kernel/header_postinst.d"];
+
+/// Programs run as root each time a kernel is installed or removed: what
+/// the Debian family's kernel packages run through run-parts, selected by
+/// the host's own run-parts rule, and kernel-install's plugins (Fedora, and
+/// wherever systemd's kernel-install is used): `*.install` in
+/// /etc/kernel/install.d and /usr/lib/kernel/install.d, a same-named /etc
+/// one replacing the /usr/lib one, one linked to /dev/null masking it.
+fn kernel_hooks(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let flavour = super::run_parts_flavour(cx);
+    for dir in KERNEL_RUN_PARTS {
+        let mut ents = cx.dir(dir);
+        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        for ent in ents {
+            let rel = Path::new(dir).join(&ent.name);
+            if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
+                continue;
+            }
+            let mut e = kernel_entry(cx, &rel, dir);
+            e.note("run_by", "run-parts");
+            if e.mode & 0o111 == 0 {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "not executable");
+            }
+            if let Some(why) = super::run_parts_skips(cx, flavour, Path::new(dir), ent.name.as_bytes()) {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", why);
+            }
+            out.push(e);
+        }
+    }
+    for (rel, shadowed_by) in super::replaceable(cx, &["etc/kernel/install.d", "usr/lib/kernel/install.d"], ".install") {
+        let mut e = kernel_entry(cx, &rel, "kernel-install");
+        e.note("run_by", "kernel-install");
+        let masked = cx.root.read_link(&rel).is_ok_and(|t| t == Path::new("/dev/null"));
+        if masked {
+            e.enabled = Enablement::Masked;
+        } else if let Some(by) = shadowed_by {
+            e.enabled = Enablement::Disabled;
+            e.note("shadowed_by", cx.root.abs(&by).display().to_string());
+        } else if e.mode & 0o111 == 0 {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", "not executable");
+        }
+        out.push(e);
+    }
+    out
+}
+
+fn kernel_entry(cx: &mut Ctx, rel: &Path, hook: &str) -> Entry {
+    let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut e = cx.entry(Kind::PkgHook, rel, format!("kernel:{name}"));
+    e.trigger = Trigger::PackageOp;
+    e.principal = Some("root".into());
+    e.enabled = Enablement::Enabled;
+    e.target_path = Some(cx.root.abs(rel));
+    e.note("hook", hook);
+    e
 }
 
 /// D-Bus policy files are XML and a large one is still only a few kilobytes;
@@ -1823,5 +1888,42 @@ mod tests {
             use std::os::unix::ffi::OsStringExt;
             OsString::from_vec(v.to_vec())
         }
+    }
+
+    #[test]
+    fn kernel_hooks_run_as_the_hosts_run_parts_and_kernel_install_pick_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tree("kernel");
+        let exe = |d: &Path, rel: &str, mode: u32| {
+            put(d, rel, b"#!/bin/sh\n");
+            std::fs::set_permissions(d.join(rel), std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        exe(&d, "etc/kernel/postinst.d/zz-beacon", 0o755);
+        exe(&d, "etc/kernel/postinst.d/update.sh", 0o755);
+        exe(&d, "etc/kernel/postrm.d/inert", 0o644);
+        exe(&d, "usr/lib/kernel/install.d/50-depmod.install", 0o755);
+        exe(&d, "usr/lib/kernel/install.d/90-loader.install", 0o755);
+        exe(&d, "etc/kernel/install.d/90-loader.install", 0o755);
+        std::fs::create_dir_all(d.join("etc/kernel/install.d")).unwrap();
+        std::os::unix::fs::symlink("/dev/null", d.join("etc/kernel/install.d/50-depmod.install")).unwrap();
+        let state = |s: &Scan, rel: &str| {
+            s.entries.iter().find(|e| e.source == d.join(rel)).map(|e| (e.enabled, e.trigger)).unwrap_or_else(|| panic!("no {rel}"))
+        };
+
+        // No run-parts binary here: debianutils' rule, the default.
+        let s = scan(&d);
+        assert_eq!(state(&s, "etc/kernel/postinst.d/zz-beacon"), (Enablement::Enabled, Trigger::PackageOp));
+        assert_eq!(state(&s, "etc/kernel/postinst.d/update.sh").0, Enablement::Disabled, "a dot is not in debianutils' rule");
+        assert_eq!(state(&s, "etc/kernel/postrm.d/inert").0, Enablement::Disabled);
+        assert_eq!(state(&s, "etc/kernel/install.d/50-depmod.install").0, Enablement::Masked);
+        assert_eq!(state(&s, "etc/kernel/install.d/90-loader.install").0, Enablement::Enabled);
+        assert_eq!(state(&s, "usr/lib/kernel/install.d/90-loader.install").0, Enablement::Disabled, "replaced by /etc");
+
+        // Fedora's run-parts is a script, and runs a dotted name.
+        exe(&d, "usr/bin/run-parts", 0o755);
+        put(&d, "usr/bin/run-parts", b"#!/bin/bash\n");
+        let s = scan(&d);
+        assert_eq!(state(&s, "etc/kernel/postinst.d/update.sh").0, Enablement::Enabled);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

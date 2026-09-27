@@ -193,6 +193,8 @@ systemd manager environment
 DefaultEnvironment= and ManagerEnvironment= in system.conf and user.conf, which set variables for every service the manager starts and for the manager and its generators, so an LD_PRELOAD there reaches all of them. One systemd_hook entry per assignment, the variables as env notes, which enrichment reads as for any unit. Read as systemd reads them: drop-ins under system.conf.d in /etc, /run, /usr/local/lib and /usr/lib, a same-named one in an earlier directory replacing a later one; the main file /etc/systemd/system.conf up to systemd 255, and from 256 the first of the four directories to hold one. The version comes from the name of systemd's shared library; where it is unknown, a main file outside /etc is off, with the reason
 Python startup hooks
 What every Python process runs before its own code, whoever runs it: the import lines of each .pth file in a site-packages directory, and sitecustomize.py and usercustomize.py. Read as CPython 3.10 through 3.14 read them: .pth files not starting with a dot, sorted, # lines and blank ones skipped, a line starting "import " or "import" and a tab executed. The directories are those site.getsitepackages() gives: dist-packages under /usr/local/lib/python3.X, /usr/lib/python3 and /usr/lib/python3.X on the Debian family, site-packages under lib64 and lib for /usr/local and /usr elsewhere, each account's ~/.local/lib/python3.X/site-packages, and the standard library's directory for sitecustomize. A .pth of paths only runs nothing and is not reported
+run-parts
+Every directory of scripts run by run-parts (cron's hourly to monthly, kernel hooks) is read by the rule of the run-parts the host has. debianutils' binary runs only names of letters, digits, _ and -, so a backup.sh in /etc/cron.daily never runs and is reported off. Fedora's run-parts is a shell script that runs any name but a dotfile, one ending in ~ or , or .cfsaved, .rpmsave, .rpmorig, .rpmnew, .swp or ,v, and honours jobs.deny and jobs.allow. Both need the execute bit
 Tier two — v1, fixed-path collectors
 The original split was "if time allows", which is not a criterion. The real divide is cost class: a collector that reads a bounded set of known paths finishes in milliseconds, while one that must traverse the entire filesystem takes minutes and saturates the disk. Those are different products, not different priorities.
 Everything below reads fixed paths and ships in v1. Three collectors from the first draft do not, and move to the --deep section that follows.
@@ -206,7 +208,7 @@ tmpfiles.d
 systemd presets
 /etc, /run, /usr/local/lib and /usr/lib/systemd/system-preset and user-preset. One entry per enable line, the unit it names as the target, so an unpackaged unit a package operation would enable flags the line. The first line whose pattern matches a unit decides it, so an enable after a matching disable or ignore is reported off
 package manager hooks
-/etc/apt/apt.conf.d/*, /etc/dnf/plugins, /etc/yum/pluginconf.d, RPM transaction file triggers
+/etc/apt/apt.conf.d/*, /etc/dnf/plugins, /etc/yum/pluginconf.d, RPM transaction file triggers. Kernel package hooks: what the Debian family's kernel packages hand to run-parts in /etc/kernel/{preinst,postinst,prerm,postrm,header_postinst}.d, and kernel-install's *.install plugins in /etc/kernel/install.d and /usr/lib/kernel/install.d, a same-named /etc one replacing the /usr/lib one and a link to /dev/null masking it; all run as root on each kernel install or removal
 MOTD
 /etc/update-motd.d/*
 NetworkManager

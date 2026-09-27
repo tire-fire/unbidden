@@ -89,6 +89,53 @@ pub(crate) fn expand_glob(cx: &mut Ctx, rel: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Which run-parts a host has: debianutils' binary, or the shell script
+/// Fedora's crontabs package installs. They pick scripts by different rules.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum RunParts {
+    Debian,
+    Script,
+}
+
+pub(crate) fn run_parts_flavour(cx: &mut Ctx) -> RunParts {
+    let head = ["usr/bin/run-parts", "bin/run-parts"].iter().find_map(|p| cx.read_capped(p, 4));
+    match head {
+        Some(h) if h.starts_with(b"#!") => RunParts::Script,
+        _ => RunParts::Debian,
+    }
+}
+
+/// Why run-parts would not run the file `name` in `dir`, or `None` where it
+/// would. debianutils' run-parts runs names of letters, digits, `_` and `-`
+/// only, so `backup.sh` never runs. Fedora's script runs any name but a
+/// dotfile, one ending in `~` or `,`, or `.cfsaved`, `.rpmsave`, `.rpmorig`,
+/// `.rpmnew`, `.swp` or `,v`, and honours `jobs.deny` and `jobs.allow` in the
+/// directory. Both then need the execute bit, checked by the caller.
+pub(crate) fn run_parts_skips(cx: &mut Ctx, flavour: RunParts, dir: &Path, name: &[u8]) -> Option<&'static str> {
+    match flavour {
+        RunParts::Debian => {
+            let ok = !name.is_empty() && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-');
+            (!ok).then_some("run-parts runs only names of letters, digits, _ and -")
+        }
+        RunParts::Script => {
+            const SKIP: [&[u8]; 6] = [b".cfsaved", b".rpmsave", b".rpmorig", b".rpmnew", b".swp", b",v"];
+            if name.starts_with(b".") || name.ends_with(b"~") || name.ends_with(b",") || SKIP.iter().any(|s| name.ends_with(s)) {
+                return Some("run-parts skips a hidden, backup or package-manager copy");
+            }
+            let listed = |cx: &mut Ctx, file: &str| {
+                cx.read_capped(dir.join(file), 64 * 1024).map(|b| b.split(|c| *c == b'\n').any(|l| l == name))
+            };
+            if listed(cx, "jobs.deny") == Some(true) {
+                return Some("named in jobs.deny");
+            }
+            if listed(cx, "jobs.allow") == Some(false) {
+                return Some("not named in jobs.allow");
+            }
+            None
+        }
+    }
+}
+
 /// The directories ldconfig puts in the loader's cache, read from
 /// /etc/ld.so.conf as ldconfig reads it: `#` starts a comment anywhere, an
 /// `include` line names whitespace-separated patterns relative to the file
