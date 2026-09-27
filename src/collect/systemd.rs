@@ -180,6 +180,8 @@ struct Found {
     file_name: OsString,
     /// The unit this is — or, for a drop-in, the unit it modifies.
     unit: String,
+    /// Found where an administrator, not a package, puts units.
+    admin: bool,
 }
 
 /// A symlink inside a `.wants/` or `.requires/` directory.
@@ -290,7 +292,7 @@ impl Walk {
                         }
                     }
                 }
-                self.units.push(Found { scope: scope.clone(), rank, rel, file_name: ent.name, unit: name });
+                self.units.push(Found { scope: scope.clone(), rank, rel, file_name: ent.name, unit: name, admin });
             }
         }
     }
@@ -333,6 +335,7 @@ impl Walk {
                 rel: dir.join(&ent.name),
                 file_name: ent.name,
                 unit: parent.to_string(),
+                admin: false,
             });
         }
     }
@@ -363,10 +366,11 @@ impl Walk {
         out
     }
 
-    /// A unit file that is a symlink to a unit file of another name, which
-    /// is itself found in the search path, is that unit under a second name:
-    /// the Alias= `systemctl enable` writes, such as sshd.service for
-    /// ssh.service. Its enablement is already on the unit it names; the
+    /// A unit file an administrator's directory holds that is a symlink to
+    /// a unit file of another name, itself found in the search path, is
+    /// that unit under a second name: the Alias= `systemctl enable` writes,
+    /// such as sshd.service for ssh.service. An alias a package ships in the
+    /// vendor directories is the package's own file and stays. Its enablement is already on the unit it names; the
     /// link becomes a note there rather than an entry judged as a file no
     /// package owns. An alias to anything else stays an entry of its own.
     fn fold_aliases(&self, cx: &mut Ctx, out: &mut Vec<Entry>) {
@@ -379,7 +383,7 @@ impl Walk {
             .collect();
         let mut folded: BTreeMap<usize, usize> = BTreeMap::new();
         for (i, f) in self.units.iter().enumerate() {
-            if !cx.root.stat(&f.rel).is_ok_and(|m| m.is_symlink) {
+            if !f.admin || !cx.root.stat(&f.rel).is_ok_and(|m| m.is_symlink) {
                 continue;
             }
             let Ok(resolved) = cx.root.resolve(&f.rel) else { continue };
@@ -1486,6 +1490,9 @@ mod tests {
         // alias of anything reported, and stays.
         write(&dir, "opt/elsewhere/beacon.service", b"[Service]\nExecStart=/opt/b\n");
         link(&dir, "/opt/elsewhere/beacon.service", "etc/systemd/system/innocent.service");
+        // A packaged alias in the vendor directory is the package's file.
+        write(&dir, "usr/lib/systemd/system/getty@.service", b"[Service]\nExecStart=/sbin/agetty %I\n");
+        link(&dir, "getty@.service", "usr/lib/systemd/system/autovt@.service");
 
         let s = scan(&dir);
         assert!(s.entries.iter().all(|e| e.name != "sshd.service"), "the alias folds into ssh.service");
@@ -1493,6 +1500,7 @@ mod tests {
         assert!(ssh.raw["aliases"].ends_with("etc/systemd/system/sshd.service"));
         assert_eq!(ssh.enabled, Enablement::Enabled, "an alias enables the unit it names");
         one(&s, "innocent.service");
+        one(&s, "autovt@.service");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
