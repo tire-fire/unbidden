@@ -1,0 +1,11 @@
+Include /etc/ssh/ssh_config.d/*.conf
+Match exec "test -e /run/vpn" host *.lab
+    ProxyJump gw.lab
+Host *.corp !pub.corp
+    ProxyCommand=/usr/bin/nc -X connect -x proxy:3128 %h %p
+    PermitLocalCommand yes
+    LocalCommand /usr/local/bin/log-login %n
+Host *
+    "KnownHostsCommand" /usr/bin/fetch-keys %H
+    PKCS11Provider /usr/lib/opensc-pkcs11.so
+    SendEnv LANG LC_*

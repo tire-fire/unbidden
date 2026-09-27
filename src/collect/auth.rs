@@ -30,6 +30,7 @@ impl Collector for Auth {
         sudoers(cx, &mut out);
         sudo_conf(cx, &mut out);
         doas(cx, &mut out);
+        ssh_client(cx, &mut out);
         dedup_ids(&mut out);
         out
     }
@@ -1609,6 +1610,454 @@ fn doas(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
+// ---------------------------------------------------------------- ssh client
+
+/// OpenSSH's whitespace, for the tokenisers ported from it.
+fn ssh_ws(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\r' | b'\n')
+}
+
+/// The keyword of an ssh_config line and the rest of it, as readconf.c's
+/// strdelim takes them: the keyword ends at whitespace, a quote or one `=`,
+/// a quoted stretch is part of it, and one level of leading whitespace is
+/// skipped. `None` is a line ssh ignores.
+fn ssh_keyword(line: &[u8]) -> Option<(Vec<u8>, &[u8])> {
+    fn delim(s: &[u8]) -> Option<(Vec<u8>, &[u8])> {
+        let Some(p) = s.iter().position(|b| ssh_ws(*b) || *b == b'"' || *b == b'=') else {
+            return Some((s.to_vec(), &[]));
+        };
+        let skip = |r: &[u8]| -> usize { r.iter().take_while(|b| ssh_ws(**b)).count() };
+        if s[p] == b'"' {
+            let q = p + 1 + s[p + 1..].iter().position(|b| *b == b'"')?;
+            let tok = [&s[..p], &s[p + 1..q]].concat();
+            let rest = &s[q + 1..];
+            return Some((tok, &rest[skip(rest)..]));
+        }
+        let mut rest = &s[p + 1..];
+        rest = &rest[skip(rest)..];
+        if s[p] != b'=' && rest.first() == Some(&b'=') {
+            rest = &rest[1..];
+            rest = &rest[skip(rest)..];
+        }
+        Some((s[..p].to_vec(), rest))
+    }
+    let (mut kw, mut rest) = delim(line)?;
+    if kw.is_empty() {
+        (kw, rest) = delim(rest)?;
+    }
+    if kw.is_empty() || kw[0] == b'#' {
+        return None;
+    }
+    kw.make_ascii_lowercase();
+    Some((kw, rest))
+}
+
+/// An ssh_config argument list split by OpenSSH's argv_split: `"` and `'`
+/// quote, a backslash escapes a quote, a backslash or (unquoted) a space,
+/// and a `#` where a word would start ends the line. An unclosed quote is
+/// an error, one ssh treats as a bad option.
+fn ssh_argv(s: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < s.len() {
+        if matches!(s[i], b' ' | b'\t') {
+            i += 1;
+            continue;
+        }
+        if s[i] == b'#' {
+            break;
+        }
+        let (mut arg, mut quote) = (Vec::new(), 0u8);
+        while i < s.len() {
+            let c = s[i];
+            if c == b'\\' {
+                match s.get(i + 1) {
+                    Some(&n @ (b'\'' | b'"' | b'\\')) => {
+                        arg.push(n);
+                        i += 1;
+                    }
+                    Some(b' ') if quote == 0 => {
+                        arg.push(b' ');
+                        i += 1;
+                    }
+                    _ => arg.push(c),
+                }
+            } else if quote == 0 && matches!(c, b' ' | b'\t') {
+                break;
+            } else if quote == 0 && matches!(c, b'"' | b'\'') {
+                quote = c;
+            } else if quote != 0 && c == quote {
+                quote = 0;
+            } else {
+                arg.push(c);
+            }
+            i += 1;
+        }
+        if i >= s.len() && quote != 0 {
+            return None;
+        }
+        out.push(arg);
+    }
+    Some(out)
+}
+
+/// The options that make ssh run a program or load a library: the three
+/// commands, which take the rest of the line; the two providers and
+/// XAuthLocation, which take one word.
+const SSH_CLIENT_RUNS: [(&str, &str, bool); 6] = [
+    ("proxycommand", "ProxyCommand", true),
+    ("localcommand", "LocalCommand", true),
+    ("knownhostscommand", "KnownHostsCommand", true),
+    ("pkcs11provider", "PKCS11Provider", false),
+    ("securitykeyprovider", "SecurityKeyProvider", false),
+    ("xauthlocation", "XAuthLocation", false),
+];
+
+/// One option line read out of a client configuration, with the Host and
+/// Match lines it sits under.
+struct SshOpt {
+    rel: PathBuf,
+    line: usize,
+    /// The canonical keyword; `Match exec` for an exec criterion.
+    directive: &'static str,
+    value: Vec<u8>,
+    /// Host and Match lines in force, outermost first, each with whether
+    /// it applies to every connection: `Host *` with nothing negated, or
+    /// `Match all`. Empty is global.
+    scope: Vec<(String, bool)>,
+}
+
+impl SshOpt {
+    /// The conditions that decide whether this option applies.
+    fn conditions(&self) -> impl Iterator<Item = &str> {
+        self.scope.iter().filter(|(_, all)| !all).map(|(t, _)| t.as_str())
+    }
+
+    /// Whether this option, being earlier, applies wherever `later` does,
+    /// so that `later` never takes effect. A Host or Match line decides
+    /// the same way each time it is read, except one that runs a command.
+    fn covers(&self, later: &SshOpt) -> bool {
+        let mut conds = self.conditions();
+        conds.all(|c| !c.contains("exec") && later.conditions().any(|l| l == c))
+    }
+}
+
+/// What reading one configuration chain found: its options in the order ssh
+/// meets them, the first thing that makes ssh give up, and the included
+/// files not owned by root, which ssh refuses unless the user running it
+/// owns them. Positions count the options read before.
+#[derive(Default)]
+struct SshChain {
+    opts: Vec<SshOpt>,
+    refused: Option<(usize, String)>,
+    owned: Vec<(usize, u32, PathBuf)>,
+    reads: usize,
+}
+
+/// Files one chain may read. ssh reads an Include as often as it is named,
+/// so a file naming itself twice is read 2^16 times before the depth limit
+/// stops it; past this the chain is cut short and the scan says so.
+const SSH_CLIENT_READS: usize = 256;
+
+impl SshChain {
+    /// Where ssh, run by `uid`, gives up on this chain, and why.
+    fn refusal(&self, uid: Option<u32>) -> Option<(usize, String)> {
+        let owner = self
+            .owned
+            .iter()
+            .find(|(_, o, _)| uid.is_some_and(|u| u != *o))
+            .map(|(at, _, f)| (*at, format!("bad owner on /{}", f.display())));
+        [self.refused.clone(), owner].into_iter().flatten().min_by_key(|(at, _)| *at)
+    }
+}
+
+/// A Host or Match line's condition, and whether it holds for every
+/// connection.
+fn ssh_block(keyword: &[u8], args: &[Vec<u8>]) -> (String, bool) {
+    let text = format!(
+        "{} {}",
+        if keyword == b"host" { "Host" } else { "Match" },
+        args.iter().map(|a| lossy(a)).collect::<Vec<_>>().join(" ")
+    );
+    let all = if keyword == b"host" {
+        args.iter().any(|a| a == b"*") && !args.iter().any(|a| a.starts_with(b"!"))
+    } else {
+        args.first().is_some_and(|a| a.eq_ignore_ascii_case(b"all"))
+    };
+    (text, all)
+}
+
+/// Reads one ssh_config file into `chain` as readconf.c's
+/// read_config_file_depth does. `user` is the account whose ~/.ssh/config
+/// this chain started from, which decides how a relative or `~` Include
+/// resolves.
+#[allow(clippy::too_many_arguments)]
+fn ssh_client_file(
+    cx: &mut Ctx,
+    chain: &mut SshChain,
+    rel: &Path,
+    user: Option<&crate::users::User>,
+    check_perm: bool,
+    outer: &[(String, bool)],
+    depth: usize,
+) {
+    // READCONF_MAX_DEPTH: ssh gives up past it, which also ends a loop.
+    if depth > 16 {
+        chain.refused.get_or_insert((chain.opts.len(), "too many recursive includes".into()));
+        return;
+    }
+    chain.reads += 1;
+    if chain.reads > SSH_CLIENT_READS {
+        if chain.reads == SSH_CLIENT_READS + 1 {
+            cx.note_limited(format!("{}: more than {SSH_CLIENT_READS} ssh_config includes, rest not read", rel.display()));
+        }
+        return;
+    }
+    let Some(bytes) = cx.read(rel) else { return };
+    if check_perm && let Ok(m) = cx.root.stat_follow(rel) {
+        if m.mode & 0o022 != 0 {
+            chain.refused.get_or_insert((chain.opts.len(), format!("bad permissions on /{}", rel.display())));
+        }
+        if m.uid != 0 {
+            chain.owned.push((chain.opts.len(), m.uid, rel.to_path_buf()));
+        }
+    }
+    let mut block: Option<(String, bool)> = None;
+    let mut bad = false;
+    for (n, raw) in bytes.split(|b| *b == b'\n').enumerate() {
+        let mut line = raw;
+        while let Some((last, rest)) = line.split_last()
+            && (ssh_ws(*last) || *last == 0x0c)
+        {
+            line = rest;
+        }
+        let Some((kw, rest)) = ssh_keyword(line) else { continue };
+        if rest.is_empty() {
+            bad = true;
+            continue;
+        }
+        let Some(args) = ssh_argv(rest) else {
+            bad = true;
+            continue;
+        };
+        let scope_of = |block: &Option<(String, bool)>| -> Vec<(String, bool)> { outer.iter().chain(block.iter()).cloned().collect() };
+        match kw.as_slice() {
+            b"host" => block = Some(ssh_block(&kw, &args)),
+            b"match" => {
+                // An exec criterion runs as the line is read, under the
+                // blocks around this one, whatever came before it.
+                let scope = scope_of(&None);
+                let mut it = args.iter();
+                while let Some(a) = it.next() {
+                    if a.starts_with(b"#") {
+                        break;
+                    }
+                    let attr = a.strip_prefix(b"!").unwrap_or(a).to_ascii_lowercase();
+                    match attr.as_slice() {
+                        b"all" => break,
+                        b"canonical" | b"final" => continue,
+                        _ => {}
+                    }
+                    let Some(arg) = it.next() else { break };
+                    if attr == b"exec" {
+                        chain.opts.push(SshOpt {
+                            rel: rel.to_path_buf(),
+                            line: n + 1,
+                            directive: "Match exec",
+                            value: arg.clone(),
+                            scope: [scope.clone(), vec![ssh_block(&kw, &args)]].concat(),
+                        });
+                    }
+                }
+                block = Some(ssh_block(&kw, &args));
+            }
+            b"include" => {
+                let here: Vec<(String, bool)> = outer.iter().cloned().chain(block.clone()).collect();
+                for spec in &args {
+                    let target = match (spec.strip_prefix(b"~/"), user) {
+                        (Some(tail), Some(u)) => u.home.join(Path::new(OsStr::from_bytes(tail))),
+                        // A `~` in a system file is an error to ssh.
+                        (Some(_), None) => {
+                            bad = true;
+                            continue;
+                        }
+                        _ => match user {
+                            Some(u) => include_rel(&u.in_home(".ssh"), spec),
+                            None => include_rel(Path::new("etc/ssh"), spec),
+                        },
+                    };
+                    for f in expand_glob(cx, &target) {
+                        ssh_client_file(cx, chain, &f, user, true, &here, depth + 1);
+                    }
+                }
+            }
+            _ => {
+                let (directive, whole) = match SSH_CLIENT_RUNS.iter().find(|(k, _, _)| k.as_bytes() == kw) {
+                    Some(&(_, directive, whole)) => (directive, whole),
+                    None if kw == b"proxyjump" => ("ProxyJump", true),
+                    None if kw == b"permitlocalcommand" => ("PermitLocalCommand", false),
+                    None => continue,
+                };
+                let value = if whole {
+                    let skip = rest.iter().take_while(|b| ssh_ws(**b) || **b == b'=').count();
+                    rest[skip..].to_vec()
+                } else {
+                    // One word, and nothing after it: after a quoted keyword a
+                    // `=` is a word of its own, and so an error.
+                    let flag = |v: &[u8]| ["yes", "no", "true", "false"].iter().any(|f| v.eq_ignore_ascii_case(f.as_bytes()));
+                    if args.len() != 1 || (directive == "PermitLocalCommand" && !flag(&args[0])) {
+                        bad = true;
+                        continue;
+                    }
+                    args[0].clone()
+                };
+                let scope = scope_of(&block);
+                chain.opts.push(SshOpt { rel: rel.to_path_buf(), line: n + 1, directive, value, scope });
+            }
+        }
+    }
+    // ssh reads the whole file, then refuses to go on if any line was bad.
+    if bad {
+        chain.refused.get_or_insert((chain.opts.len(), format!("bad configuration line in /{}", rel.display())));
+    }
+}
+
+/// The client configuration: /etc/ssh/ssh_config for every account and each
+/// account's ~/.ssh/config, read before it. ssh runs the three commands and
+/// loads the two providers each time it is used, and runs a `Match exec`
+/// while it reads the file. An option takes the first value ssh obtains, so
+/// a later one is reported off only where an earlier one applied to every
+/// connection; one under a Host or Match line is reported with it. ssh
+/// refuses to run on a file it will not trust, a user file or any included
+/// one writable by group or other or owned by neither root nor the user,
+/// and on a line it cannot parse; what would have run after that point is
+/// reported off.
+fn ssh_client(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let system = Path::new("etc/ssh/ssh_config");
+    let mut sys = SshChain::default();
+    ssh_client_file(cx, &mut sys, system, None, false, &[], 0);
+
+    let users = cx.users;
+    let mut homes: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut chains: Vec<(&crate::users::User, SshChain)> = Vec::new();
+    for u in users {
+        if !homes.insert(u.home.clone()) {
+            continue;
+        }
+        let rel = u.in_home(".ssh/config");
+        if !cx.root.exists(&rel) {
+            continue;
+        }
+        let mut chain = SshChain::default();
+        ssh_client_file(cx, &mut chain, &rel, Some(u), true, &[], 0);
+        chains.push((u, chain));
+    }
+
+    // LocalCommand runs only where PermitLocalCommand is yes, and a user's
+    // file can say so for the system one's command.
+    let permits = |c: &SshChain| {
+        c.opts.iter().any(|o| {
+            o.directive == "PermitLocalCommand"
+                && (o.value.eq_ignore_ascii_case(b"yes") || o.value.eq_ignore_ascii_case(b"true"))
+        })
+    };
+    let any_permit = permits(&sys) || chains.iter().any(|(_, c)| permits(c));
+    // Run by an account with no file of its own. Who that is is unknown,
+    // so an included file some other account owns is noted, not refused.
+    let caveat = sys
+        .owned
+        .first()
+        .map(|(at, uid, f)| (*at, format!("bad owner on /{} for every account but uid {uid}", f.display())));
+    ssh_client_entries(cx, out, &sys, sys.refusal(None), caveat, None, any_permit);
+    for (u, c) in &chains {
+        // ssh reads the system file after the user's, so a refusal there
+        // stops the user's ssh too, after the user's own Match exec ran.
+        let refused = c.refusal(u.uid).or_else(|| sys.refusal(u.uid).map(|(at, why)| (c.opts.len() + at, why)));
+        ssh_client_entries(cx, out, c, refused, None, Some(u), permits(c) || permits(&sys));
+    }
+}
+
+/// Entries for the options of one chain, given where ssh gives up on it,
+/// and where it may, depending on who runs it.
+#[allow(clippy::too_many_arguments)]
+fn ssh_client_entries(
+    cx: &mut Ctx,
+    out: &mut Vec<Entry>,
+    chain: &SshChain,
+    refused: Option<(usize, String)>,
+    caveat: Option<(usize, String)>,
+    user: Option<&crate::users::User>,
+    permit: bool,
+) {
+    for (i, o) in chain.opts.iter().enumerate() {
+        // The first value ssh obtains is the one it keeps. A ProxyJump
+        // ssh takes fills ProxyCommand's place too, except as `none`,
+        // which ssh 9.6 lets a later ProxyCommand fill; one ssh ignored,
+        // after either, takes nothing.
+        let jump_taken = |k: usize| {
+            let p = &chain.opts[k];
+            !p.value.eq_ignore_ascii_case(b"none")
+                && !chain.opts[..k].iter().any(|q| matches!(q.directive, "ProxyJump" | "ProxyCommand") && q.covers(p))
+        };
+        let earlier = chain.opts[..i].iter().enumerate().find_map(|(k, p)| {
+            let same = p.directive == o.directive && p.directive != "Match exec";
+            let jump = o.directive == "ProxyCommand" && p.directive == "ProxyJump" && jump_taken(k);
+            ((same || jump) && p.covers(o)).then_some(p)
+        });
+        if matches!(o.directive, "ProxyJump" | "PermitLocalCommand") {
+            continue;
+        }
+        let name = match user {
+            Some(u) => format!("{}:{}:{}", o.directive, u.name, hash12(&o.value)),
+            None => format!("{}:{}", o.directive, hash12(&o.value)),
+        };
+        let mut e = cx.entry(Kind::SshClient, &o.rel, name);
+        e.trigger = Trigger::Always;
+        e.enabled = Enablement::Enabled;
+        e.principal = user.map(|u| u.name.clone());
+        e.note("directive", o.directive);
+        e.note("line", o.line.to_string());
+        let scope: Vec<&str> = o.scope.iter().map(|(t, _)| t.as_str()).collect();
+        e.note("match", if scope.is_empty() { "(global)".to_string() } else { scope.join(" / ") });
+        e.note("value", lossy(&o.value));
+        let runs = o.directive.ends_with("Command") || o.directive == "Match exec";
+        if runs {
+            e.command = Some(o.value.clone());
+            e.target_path = first_path(&o.value);
+        } else if o.value.starts_with(b"/") {
+            e.target_path = Some(bpath(&o.value));
+        }
+        let none = o.value.eq_ignore_ascii_case(b"none")
+            || (o.directive == "SecurityKeyProvider" && o.value.eq_ignore_ascii_case(b"internal"));
+        if none {
+            e.enabled = Enablement::Disabled;
+            e.target_path = None;
+            e.command = None;
+        } else if o.directive != "Match exec"
+            && let Some(p) = earlier
+        {
+            e.enabled = Enablement::Disabled;
+            e.note("superseded", format!("/{}:{} sets it first wherever this applies", p.rel.display(), p.line));
+        } else if o.directive == "LocalCommand" && !permit {
+            e.enabled = Enablement::Disabled;
+            e.note("depends_on", "PermitLocalCommand, which nothing sets");
+        }
+        // A Match exec before the point ssh gives up has already run.
+        if let Some((at, why)) = &refused
+            && (o.directive != "Match exec" || i >= *at)
+        {
+            e.enabled = Enablement::Disabled;
+            e.note("ssh_refuses", why.clone());
+        } else if let Some((at, why)) = &caveat
+            && (o.directive != "Match exec" || i >= *at)
+        {
+            e.note("ssh_may_refuse", why.clone());
+        }
+        flag_non_utf8(&mut e, &o.value);
+        out.push(e);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2253,5 +2702,127 @@ mod tests {
         assert_eq!(named(&s, "permit:alice").pop().unwrap().raw["doas_refuses"], "writable by group or other");
         std::fs::remove_dir_all(&d).unwrap();
     }
-}
 
+    #[test]
+    fn ssh_config_lines_split_the_way_readconf_splits_them() {
+        let kw = |l: &[u8]| ssh_keyword(l).map(|(k, r)| (String::from_utf8(k).unwrap(), String::from_utf8(r.to_vec()).unwrap()));
+        assert_eq!(kw(b"ProxyCommand=nc %h %p"), Some(("proxycommand".into(), "nc %h %p".into())));
+        assert_eq!(kw(b"  PROXYCOMMAND = =nc"), Some(("proxycommand".into(), "=nc".into())), "one = is the separator");
+        assert_eq!(kw(b"\"Proxy\"Command x"), Some(("proxy".into(), "Command x".into())), "a quote ends the keyword");
+        assert_eq!(kw(b"# ProxyCommand x"), None);
+        assert_eq!(kw(b"\"ProxyCommand x"), None, "an unclosed quote in the keyword is a line ssh ignores");
+        let argv = |l: &[u8]| ssh_argv(l).map(|v| v.into_iter().map(|a| String::from_utf8(a).unwrap()).collect::<Vec<_>>());
+        assert_eq!(argv(b"exec \"test -f /x\" host 'a b' c\\ d # rest"), Some(vec!["exec".into(), "test -f /x".into(), "host".into(), "a b".into(), "c d".into()]));
+        assert_eq!(argv(b"a\\q \"b\\\"c\""), Some(vec!["a\\q".into(), "b\"c".into()]));
+        assert_eq!(argv(b"x#y z"), Some(vec!["x#y".into(), "z".into()]), "# ends the line only where a word starts");
+        assert_eq!(argv(b"\"open"), None);
+    }
+
+    #[test]
+    fn ssh_client_config_is_read_as_ssh_reads_it() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let d = tree("sshclient");
+        let uid = std::fs::metadata(d.join("etc/passwd")).unwrap().uid();
+        put(&d, "etc/passwd", format!("root:x:0:0::/root:/bin/sh\nalice:x:{uid}:{uid}::/home/alice:/bin/sh\nbob:x:{uid}:{uid}::/home/bob:/bin/sh\n"));
+        put(&d, "etc/ssh/ssh_config", "Include /etc/ssh/ssh_config.d/*.conf\n\
+             Host *\n\
+             \x20   ProxyCommand /usr/bin/later %h\n\
+             \x20   LocalCommand /usr/local/bin/lc\n\
+             \x20   XAuthLocation /opt/xauth\n");
+        put(&d, "etc/ssh/ssh_config.d/10-corp.conf", "Host *.corp\n  ProxyCommand /usr/local/bin/corp %h %p\nHost *\n  ProxyCommand=/usr/local/bin/first %h\n");
+        put(&d, "home/alice/.ssh/config", "Match exec \"/home/alice/.cache/beacon %h\"\n\
+             Host *\n\
+             \x20 ProxyJump bastion\n\
+             \x20 ProxyCommand /tmp/p\n\
+             \x20 PermitLocalCommand yes\n\
+             \x20 SecurityKeyProvider internal\n\
+             Host db\n\
+             \x20 KnownHostsCommand /opt/khc %H\n\
+             \x20 PKCS11Provider /opt/pkcs11.so\n\
+             Include extra\n");
+        put(&d, "home/alice/.ssh/extra", "Host *\nLocalCommand ~/bin/notify %n\n");
+        put(&d, "home/bob/.ssh/config", "Match exec \"/tmp/bob-first\"\nProxyCommand /tmp/bob\n");
+        for f in ["etc/ssh/ssh_config", "etc/ssh/ssh_config.d/10-corp.conf", "home/alice/.ssh/config", "home/alice/.ssh/extra"] {
+            std::fs::set_permissions(d.join(f), PermissionsExt::from_mode(0o644)).unwrap();
+        }
+        std::fs::set_permissions(d.join("home/bob/.ssh/config"), PermissionsExt::from_mode(0o664)).unwrap();
+        let s = scan(&d);
+        let get = |dir: &str, principal: Option<&str>, value: &str| -> &Entry {
+            s.entries
+                .iter()
+                .find(|e| e.kind == Kind::SshClient && e.raw["directive"] == dir && e.principal.as_deref() == principal && e.raw["value"] == value)
+                .unwrap_or_else(|| panic!("no {dir} {value}"))
+        };
+
+        let corp = get("ProxyCommand", None, "/usr/local/bin/corp %h %p");
+        assert_eq!((corp.enabled, corp.raw["match"].as_str()), (Enablement::Enabled, "Host *.corp"));
+        assert_eq!(corp.target_path, Some(PathBuf::from("/usr/local/bin/corp")));
+        assert_eq!(get("ProxyCommand", None, "/usr/local/bin/first %h").enabled, Enablement::Enabled);
+        let later = get("ProxyCommand", None, "/usr/bin/later %h");
+        assert_eq!(later.enabled, Enablement::Disabled, "the included Host * value came first");
+        assert!(later.raw["superseded"].starts_with("/etc/ssh/ssh_config.d/10-corp.conf:4"));
+        assert_eq!(get("XAuthLocation", None, "/opt/xauth").target_path, Some(PathBuf::from("/opt/xauth")));
+        // alice's file permits local commands, so the system one may run.
+        assert_eq!(get("LocalCommand", None, "/usr/local/bin/lc").enabled, Enablement::Enabled);
+
+        let beacon = get("Match exec", Some("alice"), "/home/alice/.cache/beacon %h");
+        assert_eq!((beacon.enabled, beacon.trigger), (Enablement::Enabled, Trigger::Always));
+        assert_eq!(beacon.command.as_deref(), Some(&b"/home/alice/.cache/beacon %h"[..]));
+        let p = get("ProxyCommand", Some("alice"), "/tmp/p");
+        assert_eq!(p.enabled, Enablement::Disabled, "ProxyJump took the slot");
+        assert_eq!(get("SecurityKeyProvider", Some("alice"), "internal").enabled, Enablement::Disabled);
+        let khc = get("KnownHostsCommand", Some("alice"), "/opt/khc %H");
+        assert_eq!((khc.enabled, khc.raw["match"].as_str()), (Enablement::Enabled, "Host db"));
+        assert_eq!(get("PKCS11Provider", Some("alice"), "/opt/pkcs11.so").target_path, Some(PathBuf::from("/opt/pkcs11.so")));
+        let notify = get("LocalCommand", Some("alice"), "~/bin/notify %n");
+        assert_eq!((notify.enabled, notify.raw["match"].as_str()), (Enablement::Enabled, "Host db / Host *"), "an Include inside a block is under it");
+        assert_eq!(notify.source, d.join("home/alice/.ssh/extra"));
+
+        // bob's file is group-writable: ssh refuses before running anything.
+        for e in s.entries.iter().filter(|e| e.principal.as_deref() == Some("bob")) {
+            assert_eq!(e.enabled, Enablement::Disabled, "{}", e.name);
+            assert!(e.raw["ssh_refuses"].contains("bad permissions"));
+        }
+        std::fs::remove_dir_all(&d).unwrap();
+
+        // An earlier value under the same condition wins wherever the later
+        // one would apply; `ProxyJump none` holds ProxyJump but lets a later
+        // ProxyCommand through, as ssh 9.6 does.
+        let d = tree("sshclient-cover");
+        put(&d, "etc/ssh/ssh_config", "Host db
+  ProxyJump bastion
+Host web
+  ProxyJump none
+  ProxyJump bastion
+Host db web
+  ProxyCommand /opt/pc %h
+Host db
+  ProxyCommand /opt/db
+Host web
+  ProxyCommand /opt/web
+PKCS11Provider /opt/a.so extra
+");
+        let s = scan(&d);
+        let named_value = |v: &str| s.entries.iter().find(|e| e.kind == Kind::SshClient && e.raw["value"] == v).unwrap();
+        let superseded = |v: &str| named_value(v).raw.contains_key("superseded");
+        assert!(!superseded("/opt/pc %h"), "Host db web is not only db");
+        assert!(named_value("/opt/db").raw["superseded"].ends_with("ssh_config:2 sets it first wherever this applies"));
+        assert!(!superseded("/opt/web"), "none held the slot, and the jump after it was ignored");
+        assert!(named_value("/opt/pc %h").raw["ssh_refuses"].contains("bad configuration line"), "one word, and nothing after it");
+        std::fs::remove_dir_all(&d).unwrap();
+
+        // No PermitLocalCommand anywhere: a LocalCommand never runs. A bad
+        // system line stops every ssh once the file is read, and a Match
+        // exec anywhere in it has run by then.
+        let d = tree("sshclient-local");
+        put(&d, "etc/ssh/ssh_config", "Match exec /opt/early\nLocalCommand /opt/lc\nProxyCommand \"unclosed\nMatch exec /opt/late\n");
+        let s = scan(&d);
+        let named_value = |v: &str| s.entries.iter().find(|e| e.kind == Kind::SshClient && e.raw["value"] == v).unwrap();
+        assert_eq!(named_value("/opt/early").enabled, Enablement::Enabled);
+        let lc = named_value("/opt/lc");
+        assert_eq!(lc.enabled, Enablement::Disabled);
+        assert!(lc.raw["ssh_refuses"].contains("bad configuration line"));
+        assert_eq!(named_value("/opt/late").enabled, Enablement::Enabled, "ssh reads the whole file before it gives up");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+}

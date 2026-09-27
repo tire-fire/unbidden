@@ -402,3 +402,10 @@ path = "fuzz_targets/doas_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ssh_config"
+path = "fuzz_targets/ssh_config.rs"
+test = false
+doc = false
+bench = false

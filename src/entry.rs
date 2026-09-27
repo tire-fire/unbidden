@@ -85,6 +85,7 @@ str_enum!(Kind {
     SystemdPreset => "systemd_preset",
     NssModule => "nss_module",
     Doas => "doas",
+    SshClient => "ssh_client",
 });
 
 str_enum!(Trigger {
