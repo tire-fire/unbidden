@@ -19,7 +19,7 @@ T1078.003	Local Accounts	initial-access,persistence,privilege-escalation,stealth
 T1098	Account Manipulation	persistence,privilege-escalation	Containers,Linux	kinds: ssh_authorized_key, sudoers, doas, pam	
 T1098.004	SSH Authorized Keys	persistence,privilege-escalation	Linux	kinds: ssh_authorized_key	
 T1098.006	Additional Container Cluster Roles	persistence,privilege-escalation	Containers	out-of-scope	containers
-T1098.007	Additional Local or Domain Groups	persistence,privilege-escalation	Linux	gap	membership of wheel, sudo, docker and the like in /etc/group is not reported; sudoers %group specifications are (TODO)
+T1098.007	Additional Local or Domain Groups	persistence,privilege-escalation	Linux	kinds: group_member, sudoers	membership of wheel, sudo, docker and the like; domain groups live on the directory
 T1133	External Remote Services	initial-access,persistence	Containers,Linux	kinds: systemd_unit, inetd_service, sysv_init	the services that offer remote access; their reachability is not judged
 T1136	Create Account	persistence	Containers,Linux	out-of-scope	account inventory: the tool answers what runs, not who exists; an account's rights show through sudoers and ssh keys
 T1136.001	Local Account	persistence	Containers,Linux	out-of-scope	account inventory

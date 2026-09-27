@@ -29,6 +29,7 @@ impl Collector for Auth {
         nss(cx, &mut out);
         ssh(cx, &mut out);
         sudoers(cx, &mut out);
+        groups(cx, &mut out);
         sudo_conf(cx, &mut out);
         doas(cx, &mut out);
         ssh_client(cx, &mut out);
@@ -1535,6 +1536,79 @@ fn finish_sudoers(e: &mut Entry, line: &[u8], inert: bool) {
         Enablement::Enabled
     };
     flag_non_utf8(e, line);
+}
+
+// -------------------------------------------------------------------- groups
+
+/// Groups whose members can become root or read what only root reads,
+/// and how. Membership is /etc/group's member list, /etc/gshadow's, and
+/// each account's primary group in passwd.
+const RIGHTS_GROUPS: [(&str, &str); 13] = [
+    ("root", "root's own group"),
+    ("wheel", "sudo's default %wheel rule on Fedora"),
+    ("sudo", "sudo's default %sudo rule on Debian"),
+    ("admin", "the older Debian %admin rule"),
+    ("adm", "reads every log"),
+    ("shadow", "reads /etc/shadow"),
+    ("disk", "reads and writes every block device"),
+    ("docker", "root on the host through the Docker daemon"),
+    ("lxd", "root on the host through LXD"),
+    ("libvirt", "root on the host through libvirtd"),
+    ("kvm", "/dev/kvm"),
+    ("systemd-journal", "reads every journal"),
+    ("staff", "writes /usr/local and /home on Debian"),
+];
+
+/// A colon-separated database's rows.
+fn colon_rows(bytes: &[u8]) -> Vec<Vec<String>> {
+    String::from_utf8_lossy(bytes).lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).map(|l| l.split(':').map(str::to_string).collect()).collect()
+}
+
+fn groups(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let rel = Path::new("etc/group");
+    let Some(group) = cx.read(rel) else { return };
+    let mut members: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut gids: BTreeMap<String, String> = BTreeMap::new();
+    for row in colon_rows(&group) {
+        let (Some(name), Some(gid)) = (row.first(), row.get(2)) else { continue };
+        gids.insert(gid.clone(), name.clone());
+        let set = members.entry(name.clone()).or_default();
+        set.extend(row.get(3).map(|m| m.split(',').filter(|u| !u.is_empty()).map(str::to_string)).into_iter().flatten());
+    }
+    if let Some(gshadow) = cx.read("etc/gshadow") {
+        for row in colon_rows(&gshadow) {
+            if let (Some(name), Some(m)) = (row.first(), row.get(3)) {
+                members.entry(name.clone()).or_default().extend(m.split(',').filter(|u| !u.is_empty()).map(str::to_string));
+            }
+        }
+    }
+    if let Some(passwd) = cx.read("etc/passwd") {
+        for row in colon_rows(&passwd) {
+            if let (Some(user), Some(gid)) = (row.first(), row.get(3))
+                && let Some(g) = gids.get(gid)
+            {
+                members.entry(g.clone()).or_default().insert(user.clone());
+            }
+        }
+    }
+    for (g, why) in RIGHTS_GROUPS {
+        let Some(set) = members.get(g) else { continue };
+        for user in set {
+            // root in root's group, and a system group's own service
+            // account, are how the groups are made.
+            if user == "root" || user == g {
+                continue;
+            }
+            let mut e = cx.entry(Kind::GroupMember, rel, format!("{g}:{user}"));
+            e.trigger = Trigger::Always;
+            e.enabled = Enablement::Enabled;
+            e.principal = Some(user.clone());
+            e.note("group", g);
+            e.note("grants", why);
+            e.note("target_unverifiable", "a right, not a program");
+            out.push(e);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------- doas
@@ -3176,6 +3250,26 @@ PKCS11Provider /opt/a.so extra
         let carol = s.entries.iter().find(|e| e.name.starts_with("carol:")).expect("a file two includes deep is read");
         assert!(carol.raw["commands_resolved"].contains("/bin/true"), "a self-referential alias ends: {}", carol.raw["commands_resolved"]);
         assert_eq!(s.entries.iter().filter(|e| e.source.ends_with("etc/sudoers")).count(), 7, "a file including itself is read once");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+    #[test]
+    fn members_of_root_granting_groups_are_reported() {
+        let d = std::env::temp_dir().join(format!("unbidden-groups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let put = |rel: &str, body: &[u8]| {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        put("etc/group", b"root:x:0:\nsudo:x:27:alice,bob\ndocker:x:999:\naudio:x:29:alice\nstaff:x:50:\n");
+        put("etc/gshadow", b"docker:!::carol\n");
+        put("etc/passwd", b"root:x:0:0::/root:/bin/sh\ndave:x:1003:50::/home/dave:/bin/sh\n");
+        let root = Root::at(&d).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Auth)];
+        let s = crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors);
+        let mut got: Vec<&str> = s.entries.iter().filter(|e| e.kind == Kind::GroupMember).map(|e| e.name.as_str()).collect();
+        got.sort();
+        assert_eq!(got, ["docker:carol", "staff:dave", "sudo:alice", "sudo:bob"], "gshadow members and a primary group count; audio does not");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

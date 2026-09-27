@@ -106,6 +106,7 @@ str_enum!(Kind {
     MercurialHook => "mercurial_hook",
     BrowserPolicy => "browser_policy",
     ProgramStartup => "program_startup",
+    GroupMember => "group_member",
     Incron => "incron",
     ExternalFact => "external_fact",
 });
