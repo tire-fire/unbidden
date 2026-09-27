@@ -909,7 +909,7 @@
         "verdict": "unpackaged"
       },
       "raw": {
-        "analysis": "line-level",
+        "analysis": "line-level, aliases resolved",
         "commands": "/usr/bin/systemctl",
         "host_list": "ALL",
         "line": "alice ALL=(ALL) NOPASSWD: /usr/bin/systemctl",
@@ -946,7 +946,7 @@
         "verdict": "unpackaged"
       },
       "raw": {
-        "analysis": "line-level",
+        "analysis": "line-level, aliases resolved",
         "commands": "ALL",
         "host_list": "ALL",
         "line": "root ALL=(ALL:ALL) ALL",

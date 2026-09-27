@@ -42,6 +42,8 @@ const TAG_NAME: u32 = 1000;
 const TAG_VERSION: u32 = 1001;
 const TAG_RELEASE: u32 = 1002;
 const TAG_EPOCH: u32 = 1003;
+const TAG_SUMMARY: u32 = 1004;
+const TAG_DESCRIPTION: u32 = 1005;
 const TAG_ARCH: u32 = 1022;
 const TAG_FILEMODES: u32 = 1030;
 const TAG_FILEDIGESTS: u32 = 1035;
@@ -324,6 +326,37 @@ fn nevr(header: &Header) -> String {
         _ => format!("{version}-{release}"),
     };
     if arch.is_empty() { base } else { format!("{base}.{arch}") }
+}
+
+/// A public key `rpm --import` wrote into the database as a `gpg-pubkey`
+/// header: what every package a repository serves is checked against.
+pub struct ImportedKey {
+    /// The low 32 bits of the key id, rpm's version for it.
+    pub key_id: String,
+    /// The key's creation time in hex, rpm's release for it.
+    pub created: String,
+    /// `gpg(Name <email>)`, the user id.
+    pub summary: String,
+    /// The armored key as imported.
+    pub armored: String,
+}
+
+pub fn imported_keys(root: &Root) -> Option<(&'static str, Vec<ImportedKey>)> {
+    let db = db_path(root)?;
+    let mut out = Vec::new();
+    for blob in read_blobs(root)? {
+        let Some(h) = Header::parse(&blob) else { continue };
+        if h.string(TAG_NAME).as_deref() != Some("gpg-pubkey") {
+            continue;
+        }
+        out.push(ImportedKey {
+            key_id: h.string(TAG_VERSION).unwrap_or_default(),
+            created: h.string(TAG_RELEASE).unwrap_or_default(),
+            summary: h.string(TAG_SUMMARY).unwrap_or_default(),
+            armored: h.string(TAG_DESCRIPTION).unwrap_or_default(),
+        });
+    }
+    Some((db, out))
 }
 
 /// A script rpm keeps inside a package header and runs as root during a

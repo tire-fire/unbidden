@@ -1266,15 +1266,99 @@ fn sudo_conf(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
+/// How deep an include may nest. sudo's own limit is 128; a loop is caught
+/// by the set of files already read long before either.
+const SUDO_INCLUDE_DEPTH: u32 = 16;
+
 fn sudoers(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let start = out.len();
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
-    sudoers_file(cx, out, Path::new("etc/sudoers"), 1, false, &mut seen);
+    sudoers_file(cx, out, Path::new("etc/sudoers"), SUDO_INCLUDE_DEPTH, false, &mut seen);
     for ent in cx.dir("etc/sudoers.d") {
         if ent.is_dir {
             continue;
         }
         let rel = Path::new("etc/sudoers.d").join(&ent.name);
-        sudoers_file(cx, out, &rel, 0, true, &mut seen);
+        sudoers_file(cx, out, &rel, SUDO_INCLUDE_DEPTH - 1, true, &mut seen);
+    }
+    resolve_sudo_aliases(&mut out[start..]);
+}
+
+/// A sudoers alias name: upper-case letters, digits and `_`, starting with
+/// a letter.
+fn is_alias_name(s: &str) -> bool {
+    s.as_bytes().first().is_some_and(u8::is_ascii_uppercase) && s.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// A comma-separated list with each alias of `kind` replaced by its
+/// members, as sudo resolves it once every file is read: aliases nest, and
+/// a negated alias negates each member. Expansion is bounded, so a cycle,
+/// which sudo rejects outright, ends rather than recurses. The flag says
+/// whether anything was an alias: a list with none is left as written.
+fn expand_sudo_aliases(aliases: &BTreeMap<(String, String), String>, kind: &str, list: &str, depth: usize) -> (String, bool) {
+    let mut changed = false;
+    let members: Vec<String> = list
+        .split(',')
+        .map(|m| {
+            let m = m.trim();
+            let (neg, name) = match m.strip_prefix('!') {
+                Some(n) => (true, n.trim()),
+                None => (false, m),
+            };
+            match aliases.get(&(kind.to_string(), name.to_string())) {
+                Some(v) if depth < 16 && is_alias_name(name) => {
+                    changed = true;
+                    let (inner, _) = expand_sudo_aliases(aliases, kind, v, depth + 1);
+                    if neg { inner.split(", ").map(|x| format!("!{x}")).collect::<Vec<_>>().join(", ") } else { inner }
+                }
+                _ => m.to_string(),
+            }
+        })
+        .collect();
+    (members.join(", "), changed)
+}
+
+/// Fills each user specification's lists in from the aliases every file
+/// defined. Only an alias sudo would read counts: one in a file sudo
+/// ignores defines nothing.
+fn resolve_sudo_aliases(entries: &mut [Entry]) {
+    let mut aliases: BTreeMap<(String, String), String> = BTreeMap::new();
+    for e in entries.iter() {
+        if e.enabled != Enablement::Enabled {
+            continue;
+        }
+        if let (Some(t), Some(n), Some(v)) = (e.raw.get("alias_type"), e.raw.get("alias_name"), e.raw.get("alias_value")) {
+            aliases.insert((t.clone(), n.clone()), v.clone());
+        }
+    }
+    for e in entries.iter_mut() {
+        e.note("analysis", "line-level, aliases resolved");
+        if aliases.is_empty() || !e.raw.contains_key("commands") {
+            continue;
+        }
+        for (key, kind, resolved_key) in [("commands", "cmnd_alias", "commands_resolved"), ("user_list", "user_alias", "user_list_resolved"), ("host_list", "host_alias", "host_list_resolved")] {
+            let Some(list) = e.raw.get(key).cloned() else { continue };
+            let (resolved, changed) = expand_sudo_aliases(&aliases, kind, &list, 0);
+            if changed {
+                e.note(resolved_key, resolved.clone());
+                if key == "commands" {
+                    e.target_path = resolved.split(',').next().and_then(|m| first_path(m.trim().trim_start_matches('!').as_bytes()));
+                    e.command = Some(resolved.into_bytes());
+                }
+            }
+        }
+        // Runas is `user` or `user:group`, either an alias.
+        if let Some(p) = e.principal.clone() {
+            let (user, group) = p.split_once(':').map(|(u, g)| (u.trim(), Some(g))).unwrap_or((p.trim(), None));
+            let (resolved, changed) = expand_sudo_aliases(&aliases, "runas_alias", user, 0);
+            if changed {
+                e.note("runas_resolved", resolved.clone());
+                e.principal = Some(match group {
+                    Some(g) => format!("{resolved}:{g}"),
+                    None => resolved,
+                });
+            }
+        }
     }
 }
 
@@ -1332,7 +1416,7 @@ fn sudoers_file(
             finish_sudoers(&mut e, t, inert);
             out.push(e);
 
-            // ponytail: one level, per spec §5. Deeper needs a cycle guard.
+            // Includes nest as sudo follows them; `seen` ends a loop.
             if depth > 0 && !spec.contains(&b'%') {
                 let base = rel.parent().unwrap_or(Path::new(""));
                 let target = include_rel(base, spec);
@@ -1340,11 +1424,11 @@ fn sudoers_file(
                     for ent in cx.dir(&target) {
                         if !ent.is_dir {
                             let f = target.join(&ent.name);
-                            sudoers_file(cx, out, &f, 0, true, seen);
+                            sudoers_file(cx, out, &f, depth - 1, true, seen);
                         }
                     }
                 } else {
-                    sudoers_file(cx, out, &target, 0, false, seen);
+                    sudoers_file(cx, out, &target, depth - 1, false, seen);
                 }
             }
             continue;
@@ -1364,8 +1448,8 @@ fn sudoers_file(
             lower.as_str(),
             "user_alias" | "cmnd_alias" | "host_alias" | "runas_alias"
         ) {
-            // Recorded, never expanded: v1 has no alias resolver, and a
-            // half-resolved policy is worse than an honest unresolved one.
+            // Recorded here; resolved into the user specifications once every
+            // file is read, as sudo does it.
             let (lhs, rhs) = split_once(t, b'=').unwrap_or((t, b""));
             let alias = words(lhs).into_iter().nth(1).unwrap_or(b"");
             let mut e = cx.entry(
@@ -1442,7 +1526,7 @@ fn finish_sudoers(e: &mut Entry, line: &[u8], inert: bool) {
     e.trigger = Trigger::Always;
     // The spec ships a line scan, not a resolved policy. Saying so on every
     // entry is what stops the output being read as one.
-    e.note("analysis", "line-level");
+    e.note("analysis", "line-level, aliases resolved");
     e.note("line", lossy(line));
     e.enabled = if inert {
         e.note("ignored_by_sudo", "filename holds a dot or ends in ~");
@@ -1742,7 +1826,7 @@ fn doas(cx: &mut Ctx, out: &mut Vec<Entry>) {
         e.trigger = Trigger::Always;
         e.enabled = Enablement::Enabled;
         e.principal = Some(r.target.as_deref().map_or_else(|| "root".to_string(), lossy));
-        e.note("analysis", "line-level");
+        e.note("analysis", "line-level, aliases resolved");
         e.note("action", action);
         e.note("identity", lossy(&r.ident));
         e.note("line", r.line.to_string());
@@ -2528,7 +2612,7 @@ mod tests {
 
         for e in &s.entries {
             if e.kind == Kind::Sudoers {
-                assert_eq!(e.raw["analysis"], "line-level");
+                assert_eq!(e.raw["analysis"], "line-level, aliases resolved");
                 assert_eq!(e.trigger, Trigger::Always);
             }
         }
@@ -3065,6 +3149,33 @@ PKCS11Provider /opt/a.so extra
         let u2f = rows.iter().find(|r| r.entry.name == "sshd:auth:pam_u2f.so").unwrap();
         assert!(matches!(&u2f.delta, Delta::Changed { .. }), "{:?}", u2f.delta);
         assert_eq!(u2f.entry.raw["control"], "optional");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+    #[test]
+    fn sudoers_aliases_resolve_and_includes_nest() {
+        let d = std::env::temp_dir().join(format!("unbidden-sudoers-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let put = |rel: &str, body: &[u8]| {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        put("etc/sudoers", b"Cmnd_Alias SHELLS = /bin/bash, /bin/sh\nCmnd_Alias ALLSH = SHELLS, /opt/tool\nUser_Alias ADMINS = alice, bob\nRunas_Alias DB = postgres\nHost_Alias WEB = www1, www2\nADMINS WEB = (DB) NOPASSWD: ALLSH, !SHELLS\n@include /etc/sudoers.one\n");
+        put("etc/sudoers.one", b"@include /etc/sudoers.two\n");
+        put("etc/sudoers.two", b"carol ALL = LOOP\nCmnd_Alias LOOP = LOOP, /bin/true\n@include /etc/sudoers\n");
+        put("etc/sudoers.d/evil.conf", b"Cmnd_Alias SHELLS = /tmp/x\n");
+        let root = Root::at(&d).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Auth)];
+        let s = crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors);
+        let admins = s.entries.iter().find(|e| e.name.starts_with("ADMINS:")).unwrap();
+        assert_eq!(admins.raw["commands_resolved"], "/bin/bash, /bin/sh, /opt/tool, !/bin/bash, !/bin/sh", "nested aliases, a negation applied to each member, and the ignored .conf's redefinition not used");
+        assert_eq!(admins.raw["user_list_resolved"], "alice, bob");
+        assert_eq!(admins.raw["host_list_resolved"], "www1, www2");
+        assert_eq!(admins.principal.as_deref(), Some("postgres"));
+        assert_eq!(admins.target_path.as_deref(), Some(Path::new("/bin/bash")));
+        let carol = s.entries.iter().find(|e| e.name.starts_with("carol:")).expect("a file two includes deep is read");
+        assert!(carol.raw["commands_resolved"].contains("/bin/true"), "a self-referential alias ends: {}", carol.raw["commands_resolved"]);
+        assert_eq!(s.entries.iter().filter(|e| e.source.ends_with("etc/sudoers")).count(), 7, "a file including itself is read once");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -44,6 +44,7 @@ impl Collector for Sources {
             keys.extend(apt_dir(cx, Path::new("etc/apt/keyrings"), &["gpg", "asc"]));
         }
         dnf(cx, &mut out, &mut keys);
+        rpmdb_keys(cx, &mut out, &mut keys);
         // Read either way, and off where the tool that would use them is not
         // installed.
         for e in &mut out {
@@ -238,6 +239,67 @@ fn deb822_stanzas(text: &str) -> Vec<Repo> {
     out
 }
 
+/// The keys `rpm --import` wrote into the database, which every package a
+/// dnf repository serves is checked against, whatever the repository's
+/// gpgkey names. Each is matched against the key files in /etc/pki/rpm-gpg
+/// and the ones repositories name, so a distribution's own key, imported at
+/// install from its packaged file, is vouched for by that file; a key
+/// matching no file on the host was imported from somewhere else.
+fn rpmdb_keys(cx: &mut Ctx, out: &mut Vec<Entry>, keys: &mut BTreeSet<PathBuf>) {
+    let Some((db, imported)) = crate::provenance::rpm::imported_keys(cx.root) else { return };
+    if imported.is_empty() {
+        return;
+    }
+    let mut files: Vec<PathBuf> = keys.iter().cloned().collect();
+    let dir = Path::new("etc/pki/rpm-gpg");
+    let mut names: Vec<PathBuf> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| dir.join(e.name)).collect();
+    names.sort();
+    files.extend(names);
+    let bodies: Vec<(PathBuf, String)> =
+        files.iter().filter_map(|f| cx.read_capped(f, CAP).map(|b| (f.clone(), armored_body(&String::from_utf8_lossy(&b))))).collect();
+    for k in imported {
+        let mut e = entry(cx, Path::new(db), format!("key:rpmdb:{}", k.key_id));
+        e.note("source_type", "imported signing key");
+        e.note("key_id", k.key_id.clone());
+        e.note("created", k.created.clone());
+        e.note("user_id", k.summary.clone());
+        e.note("target_unverifiable", "a key in the rpm database, not a file");
+        let body = armored_body(&k.armored);
+        if let Some((f, _)) = bodies.iter().find(|(_, b)| !body.is_empty() && b.contains(&body)) {
+            let abs = cx.root.abs(f).display().to_string();
+            e.note("matches_key_file", abs.clone());
+            e.note("trusts", abs);
+            keys.insert(f.clone());
+        }
+        out.push(e);
+    }
+}
+
+/// An armored key's base64, without its headers, line breaks or checksum,
+/// so a key can be recognised however it was wrapped.
+fn armored_body(text: &str) -> String {
+    let mut out = String::new();
+    let mut in_body = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("-----BEGIN") {
+            in_body = true;
+            continue;
+        }
+        if t.starts_with("-----END") {
+            in_body = false;
+            continue;
+        }
+        // Armor headers (`Version:`), the blank line after them, and the
+        // `=XXXX` CRC line are not the key.
+        if !in_body || t.is_empty() || t.contains(':') || t.starts_with('=') {
+            continue;
+        }
+        out.push_str(t);
+    }
+    out
+}
+
 fn dnf(cx: &mut Ctx, out: &mut Vec<Entry>, keys: &mut BTreeSet<PathBuf>) {
     for dir in ["etc/yum.repos.d", "etc/distro.repos.d", "usr/share/dnf5/repos.d"] {
         let mut names: Vec<_> =
@@ -346,6 +408,37 @@ mod tests {
         let x = s.entries.iter().find(|e| e.name == "dnf:x").unwrap();
         assert_eq!((x.raw["signature_checking"].as_str(), x.trigger), ("off (gpgcheck=0)", Trigger::PackageOp));
         assert_eq!(s.entries.iter().find(|e| e.name == "dnf:y").unwrap().enabled, Enablement::Disabled);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+    #[test]
+    fn an_imported_key_is_vouched_for_by_the_packaged_file_it_came_from() {
+        use crate::provenance::rpm::tests::{HeaderBuilder, write_rpmdb};
+        let d = std::env::temp_dir().join(format!("unbidden-rpmkeys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let put = |rel: &str, body: &[u8]| {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        let armored = |body: &str| format!("-----BEGIN PGP PUBLIC KEY BLOCK-----\nVersion: rpm-4.19\n\n{body}\n=abcd\n-----END PGP PUBLIC KEY BLOCK-----\n");
+        // The distribution's key, imported from its packaged file; the file
+        // wraps the same base64 differently.
+        put("etc/pki/rpm-gpg/RPM-GPG-KEY-fedora", format!("-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmQINBF\nabc123\n=zzzz\n-----END PGP PUBLIC KEY BLOCK-----\n").as_bytes());
+        put("usr/bin/dnf", b"");
+        let mut fedora = HeaderBuilder::default();
+        fedora.string(1000, "gpg-pubkey").string(1001, "e99d6ad1").string(1002, "64d2612c").string(1004, "gpg(Fedora (44) <fedora-44-primary@fedoraproject.org>)").string(1005, &armored("mQINBFabc123"));
+        let mut stray = HeaderBuilder::default();
+        stray.string(1000, "gpg-pubkey").string(1001, "deadbeef").string(1002, "00000001").string(1004, "gpg(Nobody <x@example.org>)").string(1005, &armored("ZZZZ"));
+        let mut pkg = HeaderBuilder::default();
+        pkg.string(1000, "bash").string(1001, "5.2").string(1002, "1");
+        std::fs::create_dir_all(d.join("var/lib/rpm")).unwrap();
+        write_rpmdb(&d.join("var/lib/rpm/rpmdb.sqlite"), &[fedora.build(), stray.build(), pkg.build()]);
+        let s = scan(&d);
+        let mut keys: Vec<(&str, Option<&str>)> = s.entries.iter().filter(|e| e.name.starts_with("key:rpmdb:")).map(|e| (e.name.as_str(), e.raw.get("trusts").map(String::as_str))).collect();
+        keys.sort();
+        let file = d.join("etc/pki/rpm-gpg/RPM-GPG-KEY-fedora");
+        assert_eq!(keys, [("key:rpmdb:deadbeef", None), ("key:rpmdb:e99d6ad1", Some(file.to_str().unwrap()))]);
+        assert!(s.entries.iter().any(|e| e.name == "key:RPM-GPG-KEY-fedora"), "the matched file is reported as a key in its own right");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

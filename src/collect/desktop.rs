@@ -31,8 +31,71 @@ impl Collector for Desktop {
     fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
         let mut out = autostart(cx);
         out.append(&mut extensions(cx));
+        out.append(&mut file_manager_extensions(cx));
         out
     }
+}
+
+/// Whether a library sits in any library directory: the multiarch one,
+/// /usr/lib64 or /usr/lib.
+fn in_libdir(cx: &mut Ctx, suffix: &str) -> bool {
+    let mut dirs: Vec<PathBuf> = vec!["usr/lib64".into(), "usr/lib".into()];
+    for ent in cx.dir(Path::new("usr/lib")) {
+        if ent.is_dir && ent.name.to_string_lossy().contains("-linux-") {
+            dirs.push(Path::new("usr/lib").join(&ent.name));
+        }
+    }
+    dirs.iter().any(|d| cx.root.exists(d.join(suffix)))
+}
+
+/// The Python nautilus-python and nemo-python import into the file manager
+/// when it starts (nautilus-python.c, nemo-python.c): every name ending
+/// `.py` in ~/.local/share/<tool>-python/extensions and in the system data
+/// directories' <tool>-python/extensions. Nothing but the suffix is
+/// checked: a dotfile counts, and so does a link. The user's file manager
+/// runs it as the user, at login.
+fn file_manager_extensions(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let tools: [(&str, &[&str], &str, bool); 2] = [
+        (
+            "nautilus",
+            &["usr/share/nautilus-python/extensions", "usr/local/share/nautilus-python/extensions"],
+            ".local/share/nautilus-python/extensions",
+            in_libdir(cx, "nautilus/extensions-4/libnautilus-python.so"),
+        ),
+        ("nemo", &["usr/share/nemo-python/extensions"], ".local/share/nemo-python/extensions", in_libdir(cx, "nemo/extensions-3.0/libnemo-python.so")),
+    ];
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    for (tool, system, home, installed) in tools {
+        let mut dirs: Vec<(PathBuf, Option<String>)> = system.iter().map(|d| (PathBuf::from(d), None)).collect();
+        for u in cx.users {
+            dirs.push((u.in_home(home), Some(u.name.clone())));
+        }
+        for (dir, principal) in dirs {
+            if !seen.insert(dir.clone()) {
+                continue;
+            }
+            let mut names: Vec<OsString> = cx.dir(&dir).into_iter().map(|e| e.name).filter(|n| n.as_encoded_bytes().ends_with(b".py")).collect();
+            names.sort();
+            for name in names {
+                let rel = dir.join(&name);
+                let stem = name.to_string_lossy().trim_end_matches(".py").to_string();
+                let mut e = cx.entry(Kind::DesktopExtension, &rel, format!("{tool}-python:{stem}"));
+                name_from_os(&mut e, &name);
+                e.trigger = Trigger::Login;
+                e.enabled = Enablement::Enabled;
+                e.principal = principal.clone();
+                e.note("loaded_by", format!("{tool}-python, into the file manager"));
+                e.target_path = Some(cx.root.abs(&rel));
+                if !installed {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", format!("{tool}-python is not installed"));
+                }
+                out.push(e);
+            }
+        }
+    }
+    out
 }
 
 /// A .desktop file is a few hundred bytes; anything past this is not one.
@@ -1414,5 +1477,43 @@ mod tests {
         assert_eq!(get("wipe").raw["runs"], "at logout");
         assert_eq!(get("inert").enabled, Enablement::Disabled);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn file_manager_python_extensions_are_read_by_suffix() {
+        let d = std::env::temp_dir().join(format!("unbidden-fmext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let put = |rel: &str, body: &[u8]| {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        };
+        put("etc/passwd", b"root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n");
+        put("usr/lib/x86_64-linux-gnu/nemo/extensions-3.0/libnemo-python.so", b"\x7fELF");
+        put("usr/share/nemo-python/extensions/vendor.py", b"import nemo\n");
+        put("usr/share/nemo-python/extensions/.hidden.py", b"import os\n");
+        put("usr/share/nemo-python/extensions/README", b"x\n");
+        put("home/alice/.local/share/nemo-python/extensions/mine.py", b"import os\n");
+        put("home/alice/.local/share/nautilus-python/extensions/nautilus.py", b"import os\n");
+        let root = Root::at(&d).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Desktop)];
+        let s = crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors);
+        let mut got: Vec<(&str, Option<&str>, Enablement)> = s
+            .entries
+            .iter()
+            .filter(|e| e.name.contains("-python:"))
+            .map(|e| (e.name.as_str(), e.principal.as_deref(), e.enabled))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("nautilus-python:nautilus", Some("alice"), Enablement::Disabled),
+                ("nemo-python:.hidden", None, Enablement::Enabled),
+                ("nemo-python:mine", Some("alice"), Enablement::Enabled),
+                ("nemo-python:vendor", None, Enablement::Enabled),
+            ],
+            "every .py is imported, a dotfile included; nautilus-python is not installed here"
+        );
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }
