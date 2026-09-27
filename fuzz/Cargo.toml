@@ -521,3 +521,17 @@ path = "fuzz_targets/rsyslog_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "alternatives"
+path = "fuzz_targets/alternatives.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dpkg_diversions"
+path = "fuzz_targets/dpkg_diversions.rs"
+test = false
+doc = false
+bench = false

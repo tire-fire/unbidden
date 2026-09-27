@@ -96,6 +96,8 @@ str_enum!(Kind {
     EventHandler => "event_handler",
     InterpreterEnv => "interpreter_env",
     PkgSource => "pkg_source",
+    Alternative => "alternative",
+    DpkgDiversion => "dpkg_diversion",
 });
 
 str_enum!(Trigger {

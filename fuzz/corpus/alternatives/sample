@@ -1,0 +1,12 @@
+auto
+/usr/bin/editor
+editor.1.gz
+/usr/share/man/man1/editor.1.gz
+
+/usr/bin/vim.basic
+30
+/usr/share/man/man1/vim.1.gz
+/bin/nano
+40
+
+

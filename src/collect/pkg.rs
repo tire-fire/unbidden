@@ -37,6 +37,8 @@ impl Collector for PkgHooks {
         out.extend(kernel_hooks(cx));
         out.extend(dpkg_cfg(cx));
         out.extend(hook_dirs(cx));
+        out.extend(alternatives(cx));
+        out.extend(diversions(cx));
         out.extend(dbus(cx));
         out
     }
@@ -212,6 +214,84 @@ fn hook_dirs(cx: &mut Ctx) -> Vec<Entry> {
             }
             out.push(e);
         }
+    }
+    out
+}
+
+/// An alternative (dpkg's update-alternatives, and Fedora's) whose link
+/// points somewhere its registration does not list: `editor` or `pager`, or
+/// one of their slave links, turned to a file no package registered, which
+/// every command naming it then runs. The registration is
+/// /var/lib/dpkg/alternatives/NAME or /var/lib/alternatives/NAME: the mode,
+/// the link, slave name and link pairs to a blank line, then per choice its
+/// path, its priority and one line per slave.
+fn alternatives(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for dir in ["var/lib/dpkg/alternatives", "var/lib/alternatives"] {
+        let mut ents = cx.dir(dir);
+        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        for ent in ents {
+            let rel = Path::new(dir).join(&ent.name);
+            let Some(bytes) = cx.read_capped(&rel, 256 * 1024) else { continue };
+            let text = String::from_utf8_lossy(&bytes);
+            let lines: Vec<&str> = text.lines().collect();
+            let Some(sep) = lines.iter().skip(2).position(|l| l.is_empty()).map(|p| p + 2) else { continue };
+            let slaves: Vec<&str> = lines[2..sep].chunks(2).map(|c| c[0]).collect();
+            // name -> the paths registered for it.
+            let master = ent.name.to_string_lossy().into_owned();
+            let mut choices: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+            let mut i = sep + 1;
+            while i + 1 < lines.len() && !lines[i].is_empty() {
+                choices.entry(master.clone()).or_default().insert(lines[i].to_string());
+                for (k, slave) in slaves.iter().enumerate() {
+                    if let Some(p) = lines.get(i + 2 + k).filter(|p| !p.is_empty()) {
+                        choices.entry(slave.to_string()).or_default().insert(p.to_string());
+                    }
+                }
+                i += 2 + slaves.len();
+            }
+            for (name, registered) in choices {
+                let link = Path::new("etc/alternatives").join(&name);
+                let Ok(target) = cx.root.read_link(&link) else { continue };
+                let target = target.to_string_lossy().into_owned();
+                if registered.contains(&target) {
+                    continue;
+                }
+                let mut e = cx.entry(Kind::Alternative, &link, name.clone());
+                e.trigger = Trigger::Always;
+                e.enabled = Enablement::Enabled;
+                e.target_path = Some(PathBuf::from(&target));
+                e.note("registered", registered.into_iter().collect::<Vec<_>>().join(", "));
+                e.note("registration", cx.root.abs(&rel).display().to_string());
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
+/// dpkg diversions made by hand (`dpkg-divert --local`, recorded with `:`
+/// as the package): a packaged file moved aside, so that what sits at its
+/// path, and what upgrades leave alone, is someone else's. The file is
+/// /var/lib/dpkg/diversions, a path, where it went and who diverted it.
+fn diversions(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let rel = Path::new("var/lib/dpkg/diversions");
+    let Some(bytes) = cx.read_capped(rel, 4 << 20) else { return out };
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    for chunk in lines.chunks(3) {
+        let [from, to, by] = chunk else { continue };
+        if *by != ":" {
+            continue;
+        }
+        let mut e = cx.entry(Kind::DpkgDiversion, rel, from.to_string());
+        e.trigger = Trigger::Always;
+        e.enabled = Enablement::Enabled;
+        e.target_path = Some(PathBuf::from(from));
+        e.note("diverted_to", to.to_string());
+        e.note("diverted_by", "dpkg-divert --local");
+        out.push(e);
     }
     out
 }
@@ -2078,6 +2158,29 @@ mod tests {
         assert_eq!(state("needrestart:notify.d/200-mail.dpkg-old"), Enablement::Disabled);
         assert_eq!(state("etckeeper:pre-install.d/50-hook"), Enablement::Enabled);
         assert_eq!(state("etckeeper:pre-install.d/60_under"), Enablement::Disabled, "etckeeper runs no underscore");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_hijacked_alternative_and_a_local_diversion_are_found() {
+        let d = tree("alternatives");
+        put(
+            &d,
+            "var/lib/dpkg/alternatives/editor",
+            b"auto\n/usr/bin/editor\neditor.1.gz\n/usr/share/man/man1/editor.1.gz\n\n/usr/bin/vim.basic\n30\n/usr/share/man/man1/vim.1.gz\n/bin/nano\n40\n\n\n",
+        );
+        std::fs::create_dir_all(d.join("etc/alternatives")).unwrap();
+        std::os::unix::fs::symlink("/tmp/evil", d.join("etc/alternatives/editor")).unwrap();
+        std::os::unix::fs::symlink("/usr/share/man/man1/vim.1.gz", d.join("etc/alternatives/editor.1.gz")).unwrap();
+        put(&d, "var/lib/dpkg/diversions", b"/usr/sbin/sshd\n/usr/sbin/sshd.real\n:\n/lib/x/libfoo.so\n/lib/x/libfoo.so.usr-is-merged\nlibfoo1\n");
+        let s = scan(&d);
+        let alts: Vec<&Entry> = s.entries.iter().filter(|e| e.kind == Kind::Alternative).collect();
+        assert_eq!(alts.len(), 1, "the slave points where it was registered to");
+        assert_eq!((alts[0].name.as_str(), alts[0].target_path.as_deref()), ("editor", Some(Path::new("/tmp/evil"))));
+        assert!(alts[0].raw["registered"].contains("/bin/nano"));
+        let div: Vec<&Entry> = s.entries.iter().filter(|e| e.kind == Kind::DpkgDiversion).collect();
+        assert_eq!(div.len(), 1, "a package's own diversion is not reported");
+        assert_eq!(div[0].raw["diverted_to"], "/usr/sbin/sshd.real");
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
