@@ -503,4 +503,17 @@ mod tests {
         assert!(run().entries.iter().all(|e| e.enabled == Enablement::Enabled && e.trigger == Trigger::NetworkEvent));
         std::fs::remove_dir_all(&d).unwrap();
     }
+
+    #[test]
+    fn minus_equals_takes_an_id_off_a_defaults_list() {
+        let d = tree("xinetd-minus");
+        put(&d, "usr/sbin/xinetd", b"");
+        put(&d, "etc/xinetd.conf", b"defaults\n{\n\tdisabled = listed other\n\tdisabled -= listed\n}\nincludedir /etc/xinetd.d\n");
+        put(&d, "etc/xinetd.d/listed", &service("listed", "/tmp/listed", ""));
+        put(&d, "etc/xinetd.d/other", &service("other", "/tmp/other", ""));
+        let s = scan(&d);
+        assert_eq!(one(&s, "listed").enabled, Enablement::Enabled, "-= removed it from the list");
+        assert_eq!(one(&s, "other").enabled, Enablement::Disabled);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
 }
