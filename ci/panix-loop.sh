@@ -92,6 +92,7 @@ plant_args() {
         authorized-keys)   echo "--default --key '$(cat /tmp/panix-key.pub)'" ;;
         cap)               echo "--default" ;;
         generator)         echo "$DIAL" ;;
+        initramfs)         echo "--dracut --username panix --password secret --snapshot yes" ;;
         git)               echo "--default $DIAL --hook" ;;
         ld-preload)        echo "$DIAL --binary /usr/bin/ls" ;;
         malicious-package) echo "$DIAL $PKG_FLAG" ;;
@@ -150,6 +151,16 @@ for m in "${modules[@]}"; do
         MATRIX+=("$(printf '%-20s %-10s %s' "$m" "$technique" "out of scope: $why")")
         out_of_scope=$((out_of_scope + 1))
         continue
+    fi
+    # A module whose method needs a tool this image lacks is not run: PANIX's
+    # initramfs module plants a dracut module (its other method edits the
+    # built image, which §5 leaves unparsed), so it needs dracut.
+    unavailable=""
+    case "$m" in
+        initramfs) command -v dracut >/dev/null 2>&1 || unavailable="no dracut here; PANIX's dracut method needs it, and its binwalk method edits the built image" ;;
+    esac
+    if [ -n "$unavailable" ]; then
+        UNBIDDEN_PANIX_SKIP="${UNBIDDEN_PANIX_SKIP:-} $m"; UNBIDDEN_PANIX_SKIP_REASON="$unavailable"
     fi
     if [[ " ${UNBIDDEN_PANIX_SKIP:-} " == *" $m "* ]]; then
         echo "-- $m ($technique): not run here — ${UNBIDDEN_PANIX_SKIP_REASON:-no reason given}"

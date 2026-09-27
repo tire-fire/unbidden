@@ -50,7 +50,7 @@ password-change	T1098	OUT_OF_SCOPE	-	-	-	§1: a credential change is a way in, n
 bind-shell	T1059.004	OUT_OF_SCOPE	-	-	-	§1: a process running now, which survives nothing
 reverse-shell	T1059.004	OUT_OF_SCOPE	-	-	-	§1: a process running now, which survives nothing
 grub	T1542	OUT_OF_SCOPE	-	-	-	§5 defers GRUB: pre-OS, needs image parsing
-initramfs	T1542	OUT_OF_SCOPE	-	-	-	§5 defers initramfs: pre-OS, needs image parsing
+initramfs	T1542	initramfs_hook	^/usr/lib/dracut/modules.d/99panix/	unpackaged	-	the dracut method plants a module, read as what builds the image; the binwalk method edits the built image, which §5 leaves unparsed
 rootkit	T1014	OUT_OF_SCOPE	-	-	-	§2: a module that hides itself defeats userspace enumeration by construction
 web-shell	T1505.003	OUT_OF_SCOPE	-	-	-	§5 defers web shells: finding one needs content heuristics
 malicious-container	T1610	OUT_OF_SCOPE	-	-	-	§5 defers container runtimes
