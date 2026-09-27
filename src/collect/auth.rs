@@ -25,6 +25,7 @@ impl Collector for Auth {
     fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
         let mut out = Vec::new();
         pam(cx, &mut out);
+        namespace_init(cx, &mut out);
         nss(cx, &mut out);
         ssh(cx, &mut out);
         sudoers(cx, &mut out);
@@ -494,6 +495,183 @@ fn pam(cx: &mut Ctx, out: &mut Vec<Entry>) {
             flag_non_utf8(&mut e, &line);
             out.push(e);
         }
+    }
+}
+
+// ------------------------------------------------------------ pam_namespace
+
+/// A namespace.conf line split the way pam_namespace's argv_parse splits
+/// it: whitespace separates, `"` quotes without being kept, and a
+/// backslash takes the next byte, `\n`, `\t` and `\b` as their controls.
+/// Everything from the first `#` on is gone before it is split.
+fn namespace_words(line: &[u8]) -> Vec<Vec<u8>> {
+    let line = &line[..line.iter().position(|b| *b == b'#').unwrap_or(line.len())];
+    let mut out: Vec<Vec<u8>> = Vec::new();
+    let (mut word, mut quoted, mut open) = (Vec::new(), false, false);
+    let mut i = 0;
+    while i < line.len() {
+        let c = line[i];
+        i += 1;
+        if quoted {
+            if c == b'"' {
+                quoted = false;
+            } else {
+                word.push(c);
+            }
+            continue;
+        }
+        if c.is_ascii_whitespace() || c == 0x0b {
+            if open {
+                out.push(std::mem::take(&mut word));
+                open = false;
+            }
+            continue;
+        }
+        open = true;
+        match c {
+            b'"' => quoted = true,
+            b'\\' => match line.get(i) {
+                None => word.push(b'\\'),
+                Some(&n) => {
+                    i += 1;
+                    word.push(match n {
+                        b'n' => b'\n',
+                        b't' => b'\t',
+                        b'b' => 0x08,
+                        _ => n,
+                    });
+                }
+            },
+            _ => word.push(c),
+        }
+    }
+    if open {
+        out.push(word);
+    }
+    out
+}
+
+/// A polyinstantiated directory pam_namespace would set up: the line that
+/// names it, and the script it runs for it, `None` for the default one or
+/// for none at all under `noinit`.
+struct Polydir {
+    rel: PathBuf,
+    dir: String,
+    script: Option<Vec<u8>>,
+    noinit: bool,
+}
+
+/// The directories namespace.conf and namespace.d/*.conf set up, as
+/// pam_namespace's process_line accepts them: a polydir, an instance
+/// prefix and a method, the method one it knows with its flags after
+/// colons, matched by prefix as the module matches them. A line it would
+/// skip, with a relative path or a `..`, is not a directory.
+fn polydirs(cx: &mut Ctx) -> Vec<Polydir> {
+    let mut files = vec![PathBuf::from("etc/security/namespace.conf")];
+    let dir = Path::new("etc/security/namespace.d");
+    let mut drop_ins: Vec<PathBuf> =
+        cx.dir(dir).into_iter().filter(|e| !e.is_dir && e.name.as_encoded_bytes().ends_with(b".conf")).map(|e| dir.join(e.name)).collect();
+    drop_ins.sort();
+    files.extend(drop_ins);
+    let mut out = Vec::new();
+    for rel in files {
+        let Some(bytes) = cx.read_capped(&rel, 256 * 1024) else { continue };
+        for line in bytes.split(|b| *b == b'\n') {
+            let w = namespace_words(line);
+            let [polydir, prefix, method, ..] = w.as_slice() else { continue };
+            let mut parts = method.split(|b| *b == b':');
+            let kind = parts.next().unwrap_or_default();
+            if !["user", "context", "level", "tmpdir", "tmpfs"].iter().any(|m| kind == m.as_bytes()) {
+                continue;
+            }
+            // $HOME and $USER expand to an absolute home and a name.
+            let absolute = |p: &[u8]| p.starts_with(b"/") || p.starts_with(b"$HOME");
+            if !absolute(polydir) || (kind != b"tmpfs" && !absolute(prefix)) || polydir.windows(2).any(|w| w == b"..") || prefix.windows(2).any(|w| w == b"..") {
+                continue;
+            }
+            let (mut script, mut noinit) = (None, false);
+            for flag in parts {
+                if flag.starts_with(b"noinit") {
+                    noinit = true;
+                } else if let Some(rest) = flag.strip_prefix(b"iscript") {
+                    // Relative to namespace.d; an empty one leaves the default.
+                    match rest.strip_prefix(b"=") {
+                        Some(p) if p.starts_with(b"/") => script = Some(p.to_vec()),
+                        Some(p) if !p.is_empty() => script = Some([b"/etc/security/namespace.d/".as_slice(), p].concat()),
+                        _ => {}
+                    }
+                }
+            }
+            out.push(Polydir { rel: rel.clone(), dir: lossy(polydir), script, noinit });
+        }
+    }
+    out
+}
+
+/// The scripts pam_namespace runs as root, each login, for every directory
+/// it polyinstantiates: /etc/security/namespace.init, or the one a
+/// directory's `iscript=` names instead, unless `noinit` says none. They run
+/// only where a session stack loads pam_namespace.so and a directory uses
+/// them, and only when executable; the module fails the session otherwise.
+fn namespace_init(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let services: BTreeSet<String> = out
+        .iter()
+        .filter(|e| {
+            e.kind == Kind::Pam
+                && e.enabled == Enablement::Enabled
+                && e.raw.get("module_type").is_some_and(|t| t == "session")
+                && e.raw.get("module").is_some_and(|m| m.rsplit('/').next() == Some("pam_namespace.so"))
+        })
+        .filter_map(|e| e.raw.get("service").cloned())
+        .collect();
+    let dirs = polydirs(cx);
+
+    let mut scripts: BTreeMap<Vec<u8>, (PathBuf, Vec<String>)> = BTreeMap::new();
+    let default = b"/etc/security/namespace.init".to_vec();
+    scripts.insert(default.clone(), (PathBuf::from("etc/security/namespace.init"), Vec::new()));
+    for d in &dirs {
+        if d.noinit {
+            continue;
+        }
+        let script = d.script.clone().unwrap_or_else(|| default.clone());
+        scripts.entry(script).or_insert_with(|| (d.rel.clone(), Vec::new())).1.push(d.dir.clone());
+    }
+
+    for (script, (source, used_by)) in scripts {
+        let target = bpath(&script);
+        let target_rel = target.strip_prefix("/").unwrap_or(&target).to_path_buf();
+        let exists = cx.root.exists(&target_rel);
+        // The default script is reported where it exists; one a line names,
+        // whether or not it does.
+        if script == default && !exists {
+            continue;
+        }
+        let name = if script == default { "namespace.init".to_string() } else { format!("namespace.init:{}", lossy(&script)) };
+        let mut e = cx.entry(Kind::Pam, &source, name);
+        e.trigger = Trigger::Login;
+        e.principal = Some("root".into());
+        e.target_path = Some(cx.root.abs(&target_rel));
+        e.command = Some(script.clone());
+        e.note("pam_mechanism", "namespace.init");
+        e.enabled = Enablement::Enabled;
+        if services.is_empty() {
+            e.enabled = Enablement::Disabled;
+            append_note(&mut e, "not_run", "no session stack loads pam_namespace.so");
+        } else {
+            e.note("services", services.iter().cloned().collect::<Vec<_>>().join(","));
+        }
+        if used_by.is_empty() {
+            e.enabled = Enablement::Disabled;
+            append_note(&mut e, "not_run", "no polyinstantiated directory uses it");
+        } else {
+            e.note("polydirs", used_by.join(","));
+        }
+        if exists && cx.root.stat_follow(&target_rel).is_ok_and(|m| m.mode & 0o111 == 0) {
+            e.enabled = Enablement::Disabled;
+            append_note(&mut e, "not_run", "not executable, which fails the session");
+        }
+        flag_non_utf8(&mut e, &script);
+        out.push(e);
     }
 }
 
@@ -2823,6 +3001,44 @@ PKCS11Provider /opt/a.so extra
         assert_eq!(lc.enabled, Enablement::Disabled);
         assert!(lc.raw["ssh_refuses"].contains("bad configuration line"));
         assert_eq!(named_value("/opt/late").enabled, Enablement::Enabled, "ssh reads the whole file before it gives up");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn namespace_init_runs_where_pam_namespace_and_a_polydir_use_it() {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            namespace_words(b"  /tmp \"/tmp/inst a\"/ tmpdir:iscript=x\\ y  # root,adm"),
+            [b"/tmp".to_vec(), b"/tmp/inst a/".to_vec(), b"tmpdir:iscript=x y".to_vec()]
+        );
+        let d = tree("pamns");
+        put(&d, "etc/security/namespace.init", "#!/bin/sh\n");
+        std::fs::set_permissions(d.join("etc/security/namespace.init"), PermissionsExt::from_mode(0o755)).unwrap();
+        put(&d, "etc/security/namespace.conf", "# $HOME/tmp $HOME/tmp.inst/ user root\n/tmp /tmp-inst/ level root,adm\n");
+        let s = scan(&d);
+        let init = named(&s, "namespace.init").pop().unwrap();
+        assert_eq!((init.enabled, init.trigger), (Enablement::Disabled, Trigger::Login));
+        assert_eq!(init.raw["not_run"], "no session stack loads pam_namespace.so");
+        assert_eq!(init.target_path, Some(d.join("etc/security/namespace.init")));
+
+        put(&d, "etc/pam.d/login", "session required pam_namespace.so\n");
+        put(&d, "etc/security/namespace.conf", "/tmp /tmp-inst/ tmpdir:noinit root\n$HOME/x $HOME/x.inst/ user:iscriptx\n/var/tmp /var/tmp/inst/ user:iscript=/opt/evil.sh\ntmp rel/ user\n/a/../b /i/ user:iscript=/opt/skipped\n");
+        put(&d, "etc/security/namespace.d/10-web.conf", "/srv/tmp /srv/inst/ tmpfs:create=0700:iscript=web.sh\n");
+        let s = scan(&d);
+        let init = named(&s, "namespace.init").into_iter().find(|e| e.name == "namespace.init").unwrap();
+        assert_eq!(init.enabled, Enablement::Enabled);
+        assert_eq!((init.raw["services"].as_str(), init.raw["polydirs"].as_str()), ("login", "$HOME/x"), "iscript with no = keeps the default");
+        let evil = named(&s, "namespace.init:/opt/evil.sh").pop().unwrap();
+        assert_eq!((evil.enabled, evil.principal.as_deref()), (Enablement::Enabled, Some("root")));
+        assert_eq!(evil.source, d.join("etc/security/namespace.conf"));
+        let web = named(&s, "namespace.init:/etc/security/namespace.d/web.sh").pop().unwrap();
+        assert_eq!(web.source, d.join("etc/security/namespace.d/10-web.conf"));
+        assert!(named(&s, "/opt/skipped").is_empty(), "pam_namespace skips a path with ..");
+
+        std::fs::set_permissions(d.join("etc/security/namespace.init"), PermissionsExt::from_mode(0o644)).unwrap();
+        let s = scan(&d);
+        let init = named(&s, "namespace.init").into_iter().find(|e| e.name == "namespace.init").unwrap();
+        assert_eq!((init.enabled, init.raw["not_run"].as_str()), (Enablement::Disabled, "not executable, which fails the session"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }

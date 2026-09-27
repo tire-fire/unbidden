@@ -1,0 +1,4 @@
+# polydir  instance-prefix  method  list_of_uids
+$HOME/tmp  /tmp/tmp-inst/  level  root,adm
+/var/tmp  "/var/tmp/tmp inst/"  tmpdir:create=1777,root,root:iscript=vartmp.sh  root
+/srv/cache  /srv/inst/  tmpfs:mntopts=size=64m:noinit  ~alice

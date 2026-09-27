@@ -409,3 +409,10 @@ path = "fuzz_targets/ssh_config.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "namespace_conf"
+path = "fuzz_targets/namespace_conf.rs"
+test = false
+doc = false
+bench = false
