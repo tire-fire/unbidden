@@ -591,3 +591,10 @@ path = "fuzz_targets/zabbix_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cron_apt_action"
+path = "fuzz_targets/cron_apt_action.rs"
+test = false
+doc = false
+bench = false
