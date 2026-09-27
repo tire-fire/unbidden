@@ -26,14 +26,10 @@ sha2 = "0.10"
 # instead of exhausting the stack, as the recursive-descent parsers did.
 tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"
-saphyr-parser = "0.1.0"
+# YAML, for cloud-init: a safe-Rust port of libyaml, the parser PyYAML
+# wraps, so it reads what cloud-init reads. No dependencies of its own.
+libyaml-safer = "0.3.0"
 
 [profile.release]
 lto = true
 strip = true
-
-# saphyr-parser 0.1.0 with one fix: the scanner's implicit-mapping state is
-# kept per flow level, so a `,` inside `{}` within `[k: ...]` no longer ends
-# the outer implicit mapping. See vendor/saphyr-parser/UNBIDDEN-PATCH.md.
-[patch.crates-io]
-saphyr-parser = { path = "vendor/saphyr-parser" }

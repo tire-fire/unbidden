@@ -4,14 +4,15 @@
 //! replacing an earlier one; an unhashable key, an unknown tag or a second
 //! document refusing the whole stream.
 //!
-//! saphyr-parser supplies the events and nothing else. The tree is built
-//! here so that what a hostile file can cost is bounded here: nesting past
-//! [`MAX_DEPTH`], or more than [`MAX_NODES`] nodes counting every copy an
-//! alias makes, is an error rather than a stack overflow or a billion laughs.
+//! libyaml-safer, a port of the libyaml that PyYAML wraps, supplies the
+//! events and nothing else. The tree is built here so that what a hostile
+//! file can cost is bounded here: nesting past [`MAX_DEPTH`], or more than
+//! [`MAX_NODES`] nodes counting every copy an alias makes, is an error rather
+//! than a stack overflow or a billion laughs.
 
 use std::collections::HashMap;
 
-use saphyr_parser::{Event, Parser, ScalarStyle};
+use libyaml_safer::{EventData, Parser, ScalarStyle};
 
 pub const MAX_DEPTH: usize = 64;
 pub const MAX_NODES: usize = 100_000;
@@ -64,30 +65,40 @@ impl Value {
 pub fn parse(text: &str) -> Result<Option<Value>, String> {
     let mut b = Builder::default();
     let mut docs = 0;
-    for ev in Parser::new_from_str(text) {
-        let (ev, _) = ev.map_err(|e| e.to_string())?;
-        match ev {
-            Event::DocumentStart(_) => {
+    let mut input = text.as_bytes();
+    let mut parser = Parser::new();
+    parser.set_input_string(&mut input);
+    for ev in parser {
+        let ev = ev.map_err(|e| e.to_string())?;
+        match ev.data {
+            EventData::DocumentStart { .. } => {
                 docs += 1;
                 if docs > 1 {
                     return Err("more than one document".into());
                 }
             }
-            Event::SequenceStart(anchor, _) => b.open(Frame::Seq(Vec::new()), anchor)?,
-            Event::MappingStart(anchor, _) => b.open(Frame::Map(Vec::new(), None), anchor)?,
-            Event::SequenceEnd | Event::MappingEnd => b.close()?,
-            Event::Scalar(text, style, anchor, tag) => {
-                let tag = tag.map(|t| format!("{}{}", t.handle, t.suffix));
-                let plain = style == ScalarStyle::Plain && tag.is_none();
+            EventData::SequenceStart { anchor, .. } => {
+                let anchor = b.anchor_id(anchor);
+                b.open(Frame::Seq(Vec::new()), anchor)?;
+            }
+            EventData::MappingStart { anchor, .. } => {
+                let anchor = b.anchor_id(anchor);
+                b.open(Frame::Map(Vec::new(), None), anchor)?;
+            }
+            EventData::SequenceEnd | EventData::MappingEnd => b.close()?,
+            EventData::Scalar { anchor, tag, value, style, .. } => {
+                let anchor = b.anchor_id(anchor);
+                let plain = style == ScalarStyle::Plain;
                 b.count(1)?;
-                let item = match &*text {
-                    "<<" if plain => Item::Merge,
-                    "=" if plain => Item::Equals,
-                    _ => Item::Value(scalar(&text, style, tag.as_deref())?),
+                let item = match &*value {
+                    "<<" if plain && tag.is_none() => Item::Merge,
+                    "=" if plain && tag.is_none() => Item::Equals,
+                    _ => Item::Value(scalar(&value, plain, tag.as_deref())?),
                 };
                 b.push(item, anchor)?;
             }
-            Event::Alias(id) => {
+            EventData::Alias { anchor } => {
+                let id = b.names.get(&anchor).copied().ok_or("alias to an undefined anchor")?;
                 let (v, depth) = b.anchors.get(&id).cloned().ok_or("alias to an undefined anchor")?;
                 // What an alias pastes in counts towards the depth too, or a
                 // chain of anchors each one level deeper would nest without
@@ -98,7 +109,7 @@ pub fn parse(text: &str) -> Result<Option<Value>, String> {
                 b.count(size(&v))?;
                 b.push(Item::Value(v), 0)?;
             }
-            _ => {}
+            EventData::StreamStart { .. } | EventData::StreamEnd | EventData::DocumentEnd { .. } => {}
         }
     }
     Ok(b.done)
@@ -123,13 +134,23 @@ enum Item {
 #[derive(Default)]
 struct Builder {
     stack: Vec<(Frame, usize)>,
-    /// Each anchored value and how deeply it nests.
+    /// Each anchored value and how deeply it nests, by anchor id.
     anchors: HashMap<usize, (Value, usize)>,
+    /// Anchor names to ids. A name defined again refers to its latest
+    /// value, as in PyYAML.
+    names: HashMap<String, usize>,
     nodes: usize,
     done: Option<Value>,
 }
 
 impl Builder {
+    /// An anchor's id; 0 is none.
+    fn anchor_id(&mut self, name: Option<String>) -> usize {
+        let Some(name) = name else { return 0 };
+        let next = self.names.len() + 1;
+        *self.names.entry(name).or_insert(next)
+    }
+
     fn count(&mut self, n: usize) -> Result<(), String> {
         self.nodes = self.nodes.saturating_add(n);
         if self.nodes > MAX_NODES {
@@ -207,27 +228,48 @@ fn flatten(pairs: Vec<(Item, Value)>) -> Result<Vec<(Value, Value)>, String> {
         }
     }
     let mut out: Vec<(Value, Value)> = Vec::new();
+    let mut index: HashMap<Key, usize> = HashMap::new();
     for (k, v) in merged.into_iter().chain(own) {
-        if matches!(k, Value::Seq(_) | Value::Map(_)) {
-            return Err("unhashable key".into());
-        }
-        match out.iter_mut().find(|(e, _)| same_key(e, &k)) {
-            Some(slot) => slot.1 = v,
-            None => out.push((k, v)),
+        let key = Key::of(&k).ok_or("unhashable key")?;
+        match index.get(&key) {
+            Some(&i) => out[i].1 = v,
+            None => {
+                index.insert(key, out.len());
+                out.push((k, v));
+            }
         }
     }
     Ok(out)
 }
 
-/// Python dict key equality, where `True == 1 == 1.0`.
-fn same_key(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Int(x), Value::Int(y)) => x == y,
-        // PyYAML builds every .nan from one object, so they are one key.
-        _ => match (number(a), number(b)) {
-            (Some(x), Some(y)) => x == y || (x.is_nan() && y.is_nan()),
-            _ => a == b,
-        },
+/// A mapping key as Python's dict compares it: `True == 1 == 1.0`, and every
+/// `.nan` one key, since PyYAML builds them all from one object.
+#[derive(PartialEq, Eq, Hash)]
+enum Key {
+    Null,
+    Int(i128),
+    Float(u64),
+    Nan,
+    Str(String),
+    Other(String),
+}
+
+impl Key {
+    /// `None` for a sequence or mapping, which is unhashable.
+    fn of(v: &Value) -> Option<Key> {
+        Some(match v {
+            Value::Null => Key::Null,
+            Value::Int(i) => Key::Int(*i),
+            Value::Str(s) => Key::Str(s.clone()),
+            Value::Seq(_) | Value::Map(_) => return None,
+            _ => match number(v) {
+                Some(n) if n.is_nan() => Key::Nan,
+                // An integral float is the int it equals.
+                Some(n) if n.fract() == 0.0 && n.abs() < 1e36 => Key::Int(n as i128),
+                Some(n) => Key::Float(n.to_bits()),
+                None => Key::Other(v.python_str().unwrap_or_default()),
+            },
+        })
     }
 }
 
@@ -277,9 +319,9 @@ const TAG: &str = "tag:yaml.org,2002:";
 /// A scalar as PyYAML's SafeLoader resolves and constructs it. A plain
 /// scalar is resolved, and so is one tagged `!`; a quoted one, or one
 /// tagged `!!str`, is a string. A tag SafeLoader has no constructor for fails the load.
-fn scalar(text: &str, style: ScalarStyle, tag: Option<&str>) -> Result<Value, String> {
+fn scalar(text: &str, plain: bool, tag: Option<&str>) -> Result<Value, String> {
     let kind = match tag {
-        None if style == ScalarStyle::Plain => resolve(text),
+        None if plain => resolve(text),
         // PyYAML resolves under the non-specific tag, quoted or not.
         Some("!") => resolve(text),
         None => "str",
@@ -490,7 +532,7 @@ mod tests {
     #[test]
     fn implicit_pairs_in_flow_sequences_hold_nested_collections() {
         // saphyr-parser 0.1.0 ended `k:`'s mapping at the first `,` inside
-        // the `{}`; the vendored patch keeps the state per flow level.
+        // the `{}`, silently; libyaml does not.
         let s = |t: &str| Value::Str(t.into());
         let m = |pairs: Vec<(Value, Value)>| Value::Map(pairs);
         assert_eq!(one("[k: {a: b, c: d}]"), Value::Seq(vec![m(vec![(s("k"), m(vec![(s("a"), s("b")), (s("c"), s("d"))]))])]));
@@ -501,6 +543,15 @@ mod tests {
             one("[\n  k: {a: \"b\", c: d}, x]"),
             Value::Seq(vec![m(vec![(s("k"), m(vec![(s("a"), s("b")), (s("c"), s("d"))]))]), s("x")])
         );
+    }
+
+    #[test]
+    fn many_keys_are_not_quadratic() {
+        let many: String = (0..30_000).map(|i| format!("k{i}: v\n")).collect();
+        let started = std::time::Instant::now();
+        let Some(Value::Map(m)) = parse(&many).unwrap() else { panic!() };
+        assert_eq!(m.len(), 30_000);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{:?}", started.elapsed());
     }
 
     #[test]

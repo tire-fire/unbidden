@@ -470,8 +470,8 @@ Shell text
 tree-sitter, tree-sitter-bash
 The grammar and its C runtime, statically linked, about 1.5 MB. Table-driven, so text nested 50,000 deep parses in linear time; yash-syntax and brush-parser recurse per level and overflow the stack at 1,000 and 10,000
 YAML, for cloud-init
-saphyr-parser, vendored with one fix
-Events only; the tree is built in-house with a depth and node budget that counts what aliases paste in, and resolves as PyYAML's safe_load does (YAML 1.1 scalars, merge keys, one document), checked against PyYAML on 30,000 generated documents. 0.1.0 ended an implicit mapping in a flow sequence at the first comma of a flow mapping nested in it, silently; vendor/saphyr-parser carries the fix until upstream does. yaml-rust2 rejects the same input outright; serde_yaml is unmaintained
+libyaml-safer
+A safe-Rust port of libyaml, the parser PyYAML wraps, with no dependencies of its own. Events only; the tree is built in-house with a depth and node budget that counts what aliases paste in, and resolves as PyYAML's safe_load does (YAML 1.1 scalars, merge keys, one document), checked against PyYAML on 48,000 generated documents. saphyr-parser 0.1.0 was tried first and silently misread a flow mapping nested in an implicit pair in a flow sequence; yaml-rust2 rejects the same input; serde_yaml is unmaintained
 Binary constraints
 Single binary, no config file required, no runtime data files. Anything it needs to know about paths and mechanisms is compiled in. The operator copies one file to a host and runs it.
 Size is not a concern but should be watched — a 50 MB binary is awkward to move onto a host over a constrained channel.
