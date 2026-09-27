@@ -1483,6 +1483,11 @@
         "status": "complete"
       },
       {
+        "entries": 0,
+        "name": "plugins",
+        "status": "complete"
+      },
+      {
         "entries": 2,
         "name": "polkit",
         "status": "complete"

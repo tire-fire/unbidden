@@ -67,6 +67,22 @@ pub fn suppressed(e: &Entry) -> bool {
         let source_only = e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
         return source_only && target_verified && !e.raw.contains_key("after_hash");
     }
+    // A plug-in registry file is machinery; the library it names is the
+    // payload. A packaged, intact registry (glibc's gconv-modules, a
+    // distribution's ICD or .module file) is judged by that library: hidden
+    // when the library is packaged and intact, or simply absent — an
+    // optional module package not installed names hundreds of modules whose
+    // .so is not there, and nothing loads. A library present but unpackaged
+    // or modified is a hijack the packaged registry already points at, and
+    // shows; so does a registry file no package owns or one edited.
+    if e.kind == Kind::Plugin {
+        if !e.provenance.is_verified() {
+            return false;
+        }
+        let target_ok = target_verified || e.has_flag(Flag::TargetMissing);
+        let source_only = e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged | Flag::TargetMissing));
+        return target_ok && source_only;
+    }
     // A repository whose sources file no package owns, but whose every
     // trusted key is packaged and intact, can install only what a package
     // already vouched for: the distribution's own, as its installer wrote it.

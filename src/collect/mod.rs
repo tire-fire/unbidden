@@ -25,6 +25,7 @@ pub mod initscripts;
 pub mod kernel;
 pub mod logrotate;
 pub mod pkg;
+pub mod plugins;
 pub mod polkit;
 pub mod python;
 pub mod shell;
@@ -235,6 +236,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(events::Events),
         Box::new(agents::Agents),
         Box::new(fail2ban::Fail2ban),
+        Box::new(plugins::Plugins),
         Box::new(pkg::PkgHooks),
         Box::new(sources::Sources),
         Box::new(cloudinit::CloudInit),

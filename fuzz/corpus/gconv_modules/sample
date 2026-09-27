@@ -1,0 +1,5 @@
+# c
+alias	ISO-IR-99//		ANSI_X3.110//
+module	INTERNAL		ANSI_X3.110//	ANSI_X3.110	1
+module	ANSI_X3.110//	INTERNAL		ANSI_X3.110	1
+module FOO// BAR// /opt/abs.so

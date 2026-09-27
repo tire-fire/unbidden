@@ -100,6 +100,7 @@ str_enum!(Kind {
     DpkgDiversion => "dpkg_diversion",
     AuditPlugin => "audit_plugin",
     MonitorPlugin => "monitor_plugin",
+    Plugin => "plugin",
     Incron => "incron",
     ExternalFact => "external_fact",
 });

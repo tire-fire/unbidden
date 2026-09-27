@@ -626,3 +626,17 @@ path = "fuzz_targets/fail2ban_jail.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "icd_json"
+path = "fuzz_targets/icd_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gconv_modules"
+path = "fuzz_targets/gconv_modules.rs"
+test = false
+doc = false
+bench = false
