@@ -1,0 +1,11 @@
+source /etc/network/interfaces.d/*
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet static
+    address 192.0.2.10/24
+    pre-up /usr/local/sbin/fw-load
+    post-up ip route add 10.0.0.0/8 via 192.0.2.1
+    down /usr/local/sbin/fw-flush

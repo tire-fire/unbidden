@@ -458,3 +458,17 @@ path = "fuzz_targets/logrotate_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "network_interfaces"
+path = "fuzz_targets/network_interfaces.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wireguard_conf"
+path = "fuzz_targets/wireguard_conf.rs"
+test = false
+doc = false
+bench = false

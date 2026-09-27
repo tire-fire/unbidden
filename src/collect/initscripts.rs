@@ -60,11 +60,251 @@ impl Collector for InitScripts {
         out.extend(dhclient_hooks(cx));
         out.extend(dhcpcd_hooks(cx));
         out.extend(crypttab(cx));
+        out.extend(networkd_dispatcher(cx));
+        out.extend(ifupdown(cx));
+        out.extend(ppp(cx));
+        out.extend(wireguard(cx));
         out
     }
 }
 
 
+
+// ------------------------------------------------------- network hooks ----
+
+/// networkd-dispatcher runs, on each state change systemd-networkd reports,
+/// the files in `<state>.d` under /etc/networkd-dispatcher and then
+/// /usr/lib/networkd-dispatcher, by name, the first of a name to pass its
+/// checks winning: the directory exactly 0755 root:root, not following
+/// links, and the file, after following them, the same. Anything else it
+/// passes over.
+const NETWORKD_STATES: [&str; 16] = [
+    "configured", "configuring", "failed", "pending", "unmanaged", "linger", "initialized", "carrier", "degraded",
+    "degraded-carrier", "dormant", "enslaved", "missing", "no-carrier", "off", "routable",
+];
+
+fn networkd_dispatcher(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let exact = |m: &crate::root::Meta| m.uid == 0 && m.gid == 0 && m.mode & 0o7777 == 0o755;
+    for state in NETWORKD_STATES {
+        let dirs: Vec<PathBuf> =
+            ["etc/networkd-dispatcher", "usr/lib/networkd-dispatcher"].iter().map(|d| Path::new(d).join(format!("{state}.d"))).collect();
+        let mut names: BTreeSet<std::ffi::OsString> = BTreeSet::new();
+        for d in &dirs {
+            names.extend(cx.dir(d).into_iter().filter(|e| !e.is_dir).map(|e| e.name));
+        }
+        for name in names {
+            let mut chosen = false;
+            for d in &dirs {
+                let rel = d.join(&name);
+                let Ok(meta) = cx.root.stat_follow(&rel) else { continue };
+                if !meta.is_file {
+                    continue;
+                }
+                let mut e = script_entry(cx, Kind::NetworkDispatcher, &rel, &name, Trigger::NetworkEvent);
+                e.note("dispatcher", "networkd-dispatcher");
+                e.note("hook_phase", state);
+                let dir_ok = cx.root.stat(d).is_ok_and(|m| exact(&m));
+                e.enabled = if chosen {
+                    e.note("shadowed", "an earlier directory's file of this name runs instead");
+                    Enablement::Disabled
+                } else if !dir_ok || !exact(&meta) {
+                    e.note("not_run", "networkd-dispatcher runs only mode 0755 root:root, in a 0755 root:root directory");
+                    Enablement::Disabled
+                } else {
+                    chosen = true;
+                    Enablement::Enabled
+                };
+                out.push(e);
+            }
+        }
+    }
+    out
+}
+
+/// ifupdown (0.8), off where it is not installed: what `run-parts` selects in
+/// /etc/network/if-{pre-up,up,down,post-down}.d, run as root around each
+/// interface, and the commands the `pre-up`, `up`, `post-up`, `pre-down`,
+/// `down` and `post-down` options of /etc/network/interfaces give, with
+/// the files its `source` lines name.
+fn ifupdown(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let installed = ["sbin/ifup", "usr/sbin/ifup"].iter().any(|p| cx.root.exists(p));
+    let flavour = super::run_parts_flavour(cx);
+    for phase in ["pre-up", "up", "down", "post-down"] {
+        let dir = PathBuf::from(format!("etc/network/if-{phase}.d"));
+        let mut ents = cx.dir(&dir);
+        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        for ent in ents {
+            let rel = dir.join(&ent.name);
+            if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
+                continue;
+            }
+            let mut e = script_entry(cx, Kind::NetworkDispatcher, &rel, &ent.name, Trigger::NetworkEvent);
+            e.note("dispatcher", "ifupdown");
+            e.note("hook_phase", phase);
+            e.enabled = if exec_mode(cx, &rel) != 0 { Enablement::Enabled } else { Enablement::Disabled };
+            if let Some(why) = super::run_parts_skips(cx, flavour, &dir, ent.name.as_encoded_bytes()) {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", why);
+            }
+            out.push(e);
+        }
+    }
+    let mut seen = BTreeSet::new();
+    interfaces(cx, Path::new("etc/network/interfaces"), 0, &mut seen, &mut out);
+    if !installed {
+        for e in &mut out {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", "ifupdown is not installed");
+        }
+    }
+    out
+}
+
+fn interfaces(cx: &mut Ctx, rel: &Path, depth: usize, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<Entry>) {
+    if depth > 8 || !seen.insert(rel.to_path_buf()) {
+        return;
+    }
+    let Some(bytes) = cx.read_capped(rel, 256 * 1024) else { return };
+    let mut iface = String::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        let t = line.trim_ascii();
+        if t.is_empty() || t[0] == b'#' {
+            continue;
+        }
+        let word_end = t.iter().position(|b| b.is_ascii_whitespace()).unwrap_or(t.len());
+        let (word, rest) = (&t[..word_end], t[word_end..].trim_ascii());
+        match word {
+            b"iface" => iface = String::from_utf8_lossy(rest.split(|b| b.is_ascii_whitespace()).next().unwrap_or_default()).into_owned(),
+            b"source" | b"source-directory" => {
+                let spec = rest.strip_prefix(b"/").unwrap_or(rest);
+                let target = if rest.starts_with(b"/") { PathBuf::from(OsStr::from_bytes(spec)) } else { rel.parent().unwrap_or(Path::new("")).join(OsStr::from_bytes(spec)) };
+                let files = if word == b"source-directory" {
+                    // Like run-parts: names of letters, digits, _ and -.
+                    let mut v: Vec<PathBuf> = cx
+                        .dir(&target)
+                        .into_iter()
+                        .filter(|e| !e.is_dir && e.name.as_encoded_bytes().iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-'))
+                        .map(|e| target.join(e.name))
+                        .collect();
+                    v.sort();
+                    v
+                } else {
+                    super::expand_glob(cx, &target)
+                };
+                for f in files {
+                    interfaces(cx, &f, depth + 1, seen, out);
+                }
+            }
+            b"pre-up" | b"up" | b"post-up" | b"pre-down" | b"down" | b"post-down" if !rest.is_empty() => {
+                let phase = String::from_utf8_lossy(word).into_owned();
+                let mut e = cx.entry(Kind::NetworkDispatcher, rel, format!("{iface}:{phase}:{}", hex(&blake3::hash(rest).as_bytes()[..6])));
+                e.trigger = Trigger::NetworkEvent;
+                e.principal = Some("root".into());
+                e.enabled = Enablement::Enabled;
+                e.note("dispatcher", "ifupdown");
+                e.note("interface", iface.clone());
+                e.note("hook_phase", phase);
+                e.command = Some(rest.to_vec());
+                out.push(e);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// pppd's /etc/ppp/ip-up and ip-down (Debian's ppp) run `run-parts` over
+/// their `.d` directories, IPv6 likewise, unless an executable ip-up.local
+/// or ip-down.local exists, which they exec instead.
+fn ppp(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    if !["usr/sbin/pppd", "sbin/pppd"].iter().any(|p| cx.root.exists(p)) {
+        return out;
+    }
+    let flavour = super::run_parts_flavour(cx);
+    for phase in ["ip-up", "ip-down", "ipv6-up", "ipv6-down"] {
+        let local = PathBuf::from(format!("etc/ppp/{phase}.local"));
+        let local_runs = exec_mode(cx, &local) != 0 && phase.starts_with("ip-");
+        if cx.root.exists(&local) {
+            let mut e = script_entry(cx, Kind::NetworkDispatcher, &local, OsStr::new(&format!("{phase}.local")), Trigger::NetworkEvent);
+            e.note("dispatcher", "pppd");
+            e.note("hook_phase", phase);
+            e.enabled = if local_runs { Enablement::Enabled } else { Enablement::Disabled };
+            out.push(e);
+        }
+        let dir = PathBuf::from(format!("etc/ppp/{phase}.d"));
+        let mut ents = cx.dir(&dir);
+        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        for ent in ents {
+            let rel = dir.join(&ent.name);
+            if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
+                continue;
+            }
+            let mut e = script_entry(cx, Kind::NetworkDispatcher, &rel, &ent.name, Trigger::NetworkEvent);
+            e.note("dispatcher", "pppd");
+            e.note("hook_phase", phase);
+            e.enabled = if exec_mode(cx, &rel) != 0 { Enablement::Enabled } else { Enablement::Disabled };
+            if let Some(why) = super::run_parts_skips(cx, flavour, &dir, ent.name.as_encoded_bytes()) {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", why);
+            } else if local_runs {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", format!("{phase}.local runs instead"));
+            }
+            out.push(e);
+        }
+    }
+    out
+}
+
+/// wg-quick runs an interface's PreUp, PostUp, PreDown and PostDown with
+/// bash, as root, from /etc/wireguard/<name>.conf. It runs where
+/// wg-quick@<name>.service is enabled, and wherever someone runs wg-quick,
+/// which is left unknown.
+fn wireguard(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let dir = Path::new("etc/wireguard");
+    let mut ents = cx.dir(dir);
+    ents.sort_by(|a, b| a.name.cmp(&b.name));
+    for ent in ents {
+        let Some(iface) = ent.name.to_str().and_then(|n| n.strip_suffix(".conf")).map(str::to_string) else { continue };
+        let rel = dir.join(&ent.name);
+        let Some(bytes) = cx.read_capped(&rel, 256 * 1024) else { continue };
+        let unit = format!("wg-quick@{iface}.service");
+        let enabled = cx.dir("etc/systemd/system").into_iter().filter(|e| e.is_dir && e.name.as_encoded_bytes().ends_with(b".wants")).any(|w| {
+            cx.root.exists(Path::new("etc/systemd/system").join(&w.name).join(&unit))
+        });
+        let mut section = Vec::new();
+        for line in bytes.split(|b| *b == b'\n') {
+            let t = line.trim_ascii();
+            if t.starts_with(b"[") {
+                section = t.to_vec();
+                continue;
+            }
+            let Some(eq) = t.iter().position(|b| *b == b'=') else { continue };
+            let key = t[..eq].trim_ascii();
+            let value = t[eq + 1..].trim_ascii();
+            if section != b"[Interface]" || !matches!(key, b"PreUp" | b"PostUp" | b"PreDown" | b"PostDown") || value.is_empty() {
+                continue;
+            }
+            let key = String::from_utf8_lossy(key).into_owned();
+            let mut e = cx.entry(Kind::NetworkDispatcher, &rel, format!("{iface}:{key}:{}", hex(&blake3::hash(value).as_bytes()[..6])));
+            e.trigger = Trigger::NetworkEvent;
+            e.principal = Some("root".into());
+            e.note("dispatcher", "wg-quick");
+            e.note("interface", iface.clone());
+            e.note("hook_phase", key);
+            e.command = Some(value.to_vec());
+            e.enabled = if enabled { Enablement::Enabled } else { Enablement::Unknown };
+            if !enabled {
+                e.note("depends_on", format!("{unit}, not enabled, or wg-quick run by hand"));
+            }
+            out.push(e);
+        }
+    }
+    out
+}
 // ------------------------------------------------------------ crypttab ----
 
 /// `keyscript=` in /etc/crypttab: a program run as root at boot, its output
@@ -1169,6 +1409,58 @@ exec /usr/sbin/sshd\n";
                 ("keyscript:root_crypt", Some(Path::new("/lib/cryptsetup/scripts/decrypt_keyctl")), Enablement::Unknown),
             ]
         );
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn network_hooks_follow_each_tools_rules() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("unbidden-nethooks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let put = |rel: &str, body: &[u8], mode: u32| {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        for dir in ["etc/networkd-dispatcher/routable.d", "usr/lib/networkd-dispatcher/routable.d"] {
+            std::fs::create_dir_all(d.join(dir)).unwrap();
+            std::fs::set_permissions(d.join(dir), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        put("etc/networkd-dispatcher/routable.d/50-a", b"#!/bin/sh\n", 0o755);
+        put("usr/lib/networkd-dispatcher/routable.d/50-a", b"#!/bin/sh\n", 0o755);
+        put("etc/networkd-dispatcher/routable.d/60-loose", b"#!/bin/sh\n", 0o775);
+        put("sbin/ifup", b"", 0o755);
+        put("etc/network/if-up.d/beacon", b"#!/bin/sh\n", 0o755);
+        put("etc/network/if-up.d/x.sh", b"#!/bin/sh\n", 0o755);
+        put("etc/network/interfaces", b"source /etc/network/interfaces.d/*\niface eth0 inet dhcp\n  post-up /opt/pu --now\n", 0o644);
+        put("etc/network/interfaces.d/wlan", b"iface wlan0 inet dhcp\n  pre-up /opt/wl\n", 0o644);
+        put("usr/sbin/pppd", b"", 0o755);
+        put("etc/ppp/ip-up.d/route", b"#!/bin/sh\n", 0o755);
+        put("etc/ppp/ip-up.local", b"#!/bin/sh\n", 0o755);
+        put("etc/wireguard/wg0.conf", b"[Interface]\nPrivateKey = x\nPostUp = /opt/wg-up %i\n[Peer]\nPostUp = /not/interface\n", 0o600);
+        std::fs::create_dir_all(d.join("etc/systemd/system/multi-user.target.wants")).unwrap();
+        std::os::unix::fs::symlink("/lib/systemd/system/wg-quick@.service", d.join("etc/systemd/system/multi-user.target.wants/wg-quick@wg0.service")).unwrap();
+
+        let root = crate::root::Root::at(&d).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(InitScripts)];
+        let s = crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors);
+        let state = |rel: &str| s.entries.iter().find(|e| e.source == d.join(rel)).map(|e| e.enabled).unwrap_or_else(|| panic!("no {rel}"));
+        let cmd = |c: &str| s.entries.iter().find(|e| e.command.as_deref() == Some(c.as_bytes())).unwrap_or_else(|| panic!("no {c}"));
+        // The fixture is owned by whoever runs the test; root only when root does.
+        let root_run = rustix::process::geteuid().is_root();
+        assert_eq!(state("etc/networkd-dispatcher/routable.d/50-a"), if root_run { Enablement::Enabled } else { Enablement::Disabled });
+        assert_eq!(state("usr/lib/networkd-dispatcher/routable.d/50-a"), Enablement::Disabled);
+        assert_eq!(state("etc/networkd-dispatcher/routable.d/60-loose"), Enablement::Disabled, "0775 is not 0755");
+        assert_eq!(state("etc/network/if-up.d/beacon"), Enablement::Enabled);
+        assert_eq!(state("etc/network/if-up.d/x.sh"), Enablement::Disabled);
+        assert_eq!(cmd("/opt/pu --now").raw["interface"], "eth0");
+        assert_eq!(cmd("/opt/wl").raw["hook_phase"], "pre-up", "a sourced file's stanzas count");
+        assert_eq!(state("etc/ppp/ip-up.local"), Enablement::Enabled);
+        assert_eq!(state("etc/ppp/ip-up.d/route"), Enablement::Disabled, "ip-up.local runs instead");
+        let wg = cmd("/opt/wg-up %i");
+        assert_eq!((wg.enabled, wg.raw["hook_phase"].as_str()), (Enablement::Enabled, "PostUp"));
+        assert!(s.entries.iter().all(|e| e.command.as_deref() != Some(&b"/not/interface"[..])));
         std::fs::remove_dir_all(&d).unwrap();
     }
 }
