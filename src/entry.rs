@@ -92,6 +92,7 @@ str_enum!(Kind {
     TcpWrapper => "tcp_wrapper",
     Crypttab => "crypttab",
     DisplayManager => "display_manager",
+    Logrotate => "logrotate",
 });
 
 str_enum!(Trigger {

@@ -20,6 +20,7 @@ pub mod dm;
 pub mod inetd;
 pub mod initscripts;
 pub mod kernel;
+pub mod logrotate;
 pub mod pkg;
 pub mod polkit;
 pub mod python;
@@ -226,6 +227,7 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(polkit::Polkit),
         Box::new(inetd::Inetd),
         Box::new(kernel::Kernel),
+        Box::new(logrotate::Logrotate),
         Box::new(pkg::PkgHooks),
         Box::new(cloudinit::CloudInit),
         Box::new(python::Python),

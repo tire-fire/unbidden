@@ -451,3 +451,10 @@ path = "fuzz_targets/lightdm_conf.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "logrotate_conf"
+path = "fuzz_targets/logrotate_conf.rs"
+test = false
+doc = false
+bench = false

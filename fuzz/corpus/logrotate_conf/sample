@@ -1,0 +1,15 @@
+weekly
+rotate 4
+include /etc/logrotate.d
+/var/log/app/*.log
+/var/log/app/extra.log
+{
+    daily
+    sharedscripts
+    prerotate
+        test -d /run/app || exit 0
+    endscript
+    postrotate
+        systemctl kill -s HUP app.service
+    endscript
+}

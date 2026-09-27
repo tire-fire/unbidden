@@ -1459,6 +1459,11 @@
       },
       {
         "entries": 0,
+        "name": "logrotate",
+        "status": "complete"
+      },
+      {
+        "entries": 0,
         "name": "pkg",
         "status": "complete"
       },
