@@ -1,0 +1,4 @@
+// prefs
+pref("general.config.filename", "mozilla.cfg");
+lockPref("general.config.obscure_value", 0);
+defaultPref("app.update.auto", false);

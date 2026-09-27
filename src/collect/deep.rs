@@ -403,6 +403,51 @@ const CORE_KEYS: [(&str, &str); 5] = [
     ("hookspath", "core.hooksPath"),
 ];
 
+/// Hooks in git's template directory are copied into every repository
+/// `git init` or `git clone` creates: a hook there without the `.sample`
+/// suffix git ships is live in each new repository. The directory is
+/// /usr/share/git-core/templates, or what `init.templateDir` names.
+fn template_hooks(cx: &mut Ctx, configs: &[Entry]) -> Vec<Entry> {
+    let mut dirs: Vec<(PathBuf, String)> = vec![(PathBuf::from("usr/share/git-core/templates"), "git's default template directory".into())];
+    for e in configs.iter().filter(|e| e.name == "init.templateDir") {
+        let Some(v) = e.command.as_deref() else { continue };
+        let v = String::from_utf8_lossy(v).trim().to_string();
+        if let Some(rel) = v.strip_prefix('/') {
+            dirs.push((PathBuf::from(rel), format!("init.templateDir in {}", e.source.display())));
+        }
+    }
+    let installed = cx.root.exists("usr/bin/git");
+    let mut out = Vec::new();
+    for (dir, why) in dirs {
+        let hooks = dir.join("hooks");
+        let mut names: Vec<_> = cx.dir(&hooks).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
+        names.sort();
+        for n in names {
+            let name = n.to_string_lossy().into_owned();
+            if name.ends_with(".sample") {
+                continue;
+            }
+            let rel = hooks.join(&n);
+            let Ok(meta) = cx.root.stat_follow(&rel) else { continue };
+            if !meta.is_file || meta.mode & 0o111 == 0 {
+                continue;
+            }
+            let mut e = cx.entry(Kind::GitHook, &rel, format!("template:{name}"));
+            e.trigger = Trigger::Always;
+            e.enabled = Enablement::Enabled;
+            e.note("template", why.clone());
+            e.note("copied_into", "every repository git init or clone creates");
+            e.target_path = Some(cx.root.abs(&rel));
+            if !installed {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "git is not installed");
+            }
+            out.push(e);
+        }
+    }
+    out
+}
+
 fn repository(cx: &mut Ctx, w: &mut Walk, gitdir: &Path, worktree: &Path) -> Vec<Entry> {
     // Keyed on identity rather than on the path: a submodule's `.git` file and
     // the walk itself reach one directory under two names, and two entries for
@@ -535,6 +580,8 @@ impl Collector for GitConfig {
                 scan(cx, home.join(name), &user.name, &mut out, &mut seen);
             }
         }
+        let templates = template_hooks(cx, &out);
+        out.extend(templates);
         out
     }
 }
@@ -599,6 +646,9 @@ fn executing_keys(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
                 Some((_, canonical)) => (*canonical).to_string(),
                 None => continue,
             },
+            // Not a command either, but the hooks under it are copied into
+            // every repository created from then on.
+            ("init", None, "templatedir") => "init.templateDir".to_string(),
             ("diff", Some(sub), "textconv") => format!("diff.{sub}.textconv"),
             ("filter", Some(sub), "clean") => format!("filter.{sub}.clean"),
             ("filter", Some(sub), "smudge") => format!("filter.{sub}.smudge"),
@@ -1081,5 +1131,30 @@ http://x/y
         assert_eq!(named(&s, "x").kind, Kind::GitHook);
         assert!(!named(&s, "x").raw.contains_key("interpreter"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn template_hooks_land_in_every_new_repository() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("unbidden-gittpl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let put = |rel: &str, body: &[u8], mode: u32| {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        put("usr/bin/git", b"", 0o755);
+        put("usr/share/git-core/templates/hooks/pre-commit.sample", b"#!/bin/sh\n", 0o755);
+        put("usr/share/git-core/templates/hooks/post-checkout", b"#!/bin/sh\n/opt/beacon\n", 0o755);
+        put("usr/share/git-core/templates/hooks/notes", b"x", 0o644);
+        put("etc/gitconfig", b"[init]\n\ttemplateDir = /opt/tpl\n", 0o644);
+        put("opt/tpl/hooks/pre-push", b"#!/bin/sh\n", 0o755);
+        let root = crate::root::Root::at(&d).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(GitConfig)];
+        let s = crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors);
+        let mut got: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
+        got.sort();
+        assert_eq!(got, ["init.templateDir", "template:post-checkout", "template:pre-push"], "a live hook in either template directory; not a .sample, not a data file");
+        std::fs::remove_dir_all(&d).unwrap();
     }
 }

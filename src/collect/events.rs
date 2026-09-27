@@ -48,7 +48,9 @@
 //! /etc/spamassassin/sa-update-hooks.d. Kea: each `"library"` of a
 //! `"hooks-libraries"` list in the kea-dhcp4, kea-dhcp6, kea-dhcp-ddns and
 //! kea-ctrl-agent configurations, loaded into that daemon; Kea's JSON takes
-//! `#`, `//` and `/* */` comments and `<?include "file"?>`.
+//! `#`, `//` and `/* */` comments and `<?include "file"?>`. X2Go: every
+//! readable file in /etc/x2go/x2go_logout.d, which x2go_logout sources from
+//! x2goruncommand, as the session's user, when an X2Go session ends.
 
 use std::path::{Path, PathBuf};
 
@@ -98,6 +100,9 @@ impl Collector for Events {
             spamassassin(cx, &mut out);
         }
         kea(cx, &mut out);
+        if cx.root.exists("usr/bin/x2goruncommand") {
+            x2go(cx, &mut out);
+        }
         out
     }
 }
@@ -405,6 +410,17 @@ fn kea(cx: &mut Ctx, out: &mut Vec<Entry>) {
                 out.push(e);
             }
         }
+    }
+}
+
+fn x2go(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    for rel in sorted(cx, Path::new("etc/x2go/x2go_logout.d")) {
+        let name = file_name(&rel);
+        let mut e = entry(cx, &rel, format!("x2go:logout:{name}"), "x2goruncommand", Trigger::Login);
+        e.principal = None;
+        e.note("runs_when", "an X2Go session ends, sourced as the session's user");
+        e.target_path = Some(cx.root.abs(&rel));
+        out.push(e);
     }
 }
 
@@ -784,7 +800,10 @@ mod tests {
         put(&d, "etc/cron-apt/action.d/3-download", b"# comment\ndist-upgrade -d -y # trailing\n\n-o APT::Update::Pre-Invoke::=/opt/x update\n", 0o644);
         put(&d, "etc/cron-apt/action.d/9.bak", b"install evil\n", 0o644);
         put(&d, "etc/cron-apt/config.d/3-download", b"OPTIONS=-q\n", 0o644);
+        put(&d, "usr/bin/x2goruncommand", b"", 0o755);
+        put(&d, "etc/x2go/x2go_logout.d/010_userscripts.sh", b"echo bye\n", 0o644);
         let s = scan(&d);
+        assert!(s.entries.iter().any(|e| e.name == "x2go:logout:010_userscripts.sh" && e.principal.is_none()));
         let names = |p: &str| s.entries.iter().filter(|e| e.name.starts_with(p)).map(|e| e.name.clone()).collect::<Vec<_>>();
         assert_eq!(names("schroot:"), ["schroot:00check", "schroot:15binfmt", "schroot:_x.y-z1", "schroot:a-"], "schroot's LSB names only");
         let mm: Vec<(&str, Enablement)> = s.entries.iter().filter(|e| e.name.starts_with("ModemManager:")).map(|e| (e.name.as_str(), e.enabled)).collect();

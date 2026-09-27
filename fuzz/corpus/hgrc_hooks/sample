@@ -1,0 +1,8 @@
+[ui]
+username = x
+[hooks]
+# c
+pretxncommit.lint = /opt/lint
+  --strict
+update = python:mod.fn
+changegroup.notify = /usr/local/bin/notify %HG_NODE

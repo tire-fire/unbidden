@@ -1415,6 +1415,11 @@
       },
       {
         "entries": 0,
+        "name": "browsers",
+        "status": "complete"
+      },
+      {
+        "entries": 0,
         "name": "cloud_init",
         "status": "complete"
       },
@@ -1516,6 +1521,11 @@
       {
         "entries": 5,
         "name": "systemd",
+        "status": "complete"
+      },
+      {
+        "entries": 0,
+        "name": "vcs",
         "status": "complete"
       }
     ],

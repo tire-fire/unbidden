@@ -13,6 +13,7 @@ use crate::scan::{Collector, Ctx};
 
 pub mod agents;
 pub mod auth;
+pub mod browsers;
 pub mod cloudinit;
 pub mod cron;
 pub mod deep;
@@ -32,6 +33,7 @@ pub mod python;
 pub mod shell;
 pub mod sources;
 pub mod systemd;
+pub mod vcs;
 
 /// The command word of shell text, cut where the shell cuts it. A `;`, `|`,
 /// `&`, `<`, `>` or parenthesis ends a word as surely as a space does, so
@@ -238,6 +240,8 @@ pub fn all() -> Vec<Box<dyn Collector>> {
         Box::new(agents::Agents),
         Box::new(fail2ban::Fail2ban),
         Box::new(plugins::Plugins),
+        Box::new(vcs::Vcs),
+        Box::new(browsers::Browsers),
         Box::new(pkg::PkgHooks),
         Box::new(sources::Sources),
         Box::new(cloudinit::CloudInit),

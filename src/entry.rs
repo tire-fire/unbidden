@@ -102,6 +102,9 @@ str_enum!(Kind {
     MonitorPlugin => "monitor_plugin",
     Plugin => "plugin",
     PackageFile => "package_file",
+    SaltSchedule => "salt_schedule",
+    MercurialHook => "mercurial_hook",
+    BrowserPolicy => "browser_policy",
     Incron => "incron",
     ExternalFact => "external_fact",
 });

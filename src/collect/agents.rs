@@ -86,6 +86,12 @@
 //! `.`. `command[name]=line` runs `line`, after any `command_prefix`,
 //! through popen as `nrpe_user`, when a client asks for `name`; with
 //! `dont_blame_nrpe=1` the client supplies its `$ARGn$` values.
+//!
+//! Salt minion (3007): the `schedule:` of /etc/salt/minion and of the files
+//! its default include names, minion.d/*.conf, each job a function the
+//! minion runs on its schedule as root. For cmd.run, cmd.shell and
+//! cmd.script the arguments are the command; any other function's payload
+//! is the module's own or comes from the master, and is not read.
 
 use std::path::{Path, PathBuf};
 
@@ -114,6 +120,7 @@ impl Collector for Agents {
         monit(cx, &mut out);
         zabbix(cx, &mut out);
         nrpe(cx, &mut out);
+        salt(cx, &mut out);
         crate::entry::dedup_ids(&mut out);
         out
     }
@@ -788,6 +795,55 @@ fn nrpe(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
+fn salt(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    use crate::yaml::Value;
+    let installed = cx.root.exists("usr/bin/salt-minion");
+    let mut files = vec![PathBuf::from("etc/salt/minion")];
+    files.extend(sorted(cx, Path::new("etc/salt/minion.d")).into_iter().filter(|f| f.to_string_lossy().ends_with(".conf")));
+    for rel in files {
+        let Some(bytes) = cx.read_capped(&rel, CAP) else { continue };
+        let Ok(Some(doc)) = crate::yaml::parse(&String::from_utf8_lossy(&bytes)) else { continue };
+        let Some(Value::Map(jobs)) = doc.get("schedule") else { continue };
+        for (name, job) in jobs {
+            let (Some(name), Value::Map(_)) = (name.python_str(), job) else { continue };
+            let function = job.get("function").and_then(Value::python_str).unwrap_or_default();
+            let mut e = cx.entry(Kind::SaltSchedule, &rel, format!("salt:{name}"));
+            e.trigger = Trigger::Schedule;
+            e.principal = Some("root".into());
+            e.enabled = Enablement::Enabled;
+            e.note("run_by", "salt-minion");
+            e.note("function", function.clone());
+            let mut args: Vec<String> = match job.get("args") {
+                Some(Value::Seq(a)) => a.iter().filter_map(Value::python_str).collect(),
+                Some(v) => v.python_str().into_iter().collect(),
+                None => Vec::new(),
+            };
+            if let Some(cmd) = job.get("kwargs").and_then(|k| k.get("cmd")).and_then(Value::python_str) {
+                args.insert(0, cmd);
+            }
+            if matches!(function.as_str(), "cmd.run" | "cmd.shell" | "cmd.script" | "cmd.run_all") && !args.is_empty() {
+                e.command = Some(args.join(" ").into_bytes());
+                if function == "cmd.script" {
+                    e.note("target_unverifiable", "a script the minion fetches from the master or a URL");
+                }
+            } else {
+                e.note("target_unverifiable", "a salt execution module, its payload not in this file");
+                if !args.is_empty() {
+                    e.note("args", args.join(" "));
+                }
+            }
+            if job.get("enabled").is_some_and(|v| matches!(v, Value::Bool(false))) {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "enabled: false");
+            } else if !installed {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "salt-minion is not installed");
+            }
+            out.push(e);
+        }
+    }
+}
+
 /// One collectd statement: `Key values`, `<Key values>` or `</Key>`.
 #[derive(Debug, PartialEq)]
 enum Stmt {
@@ -1282,6 +1338,27 @@ mod tests {
             ]
         );
         assert!(s.entries.iter().all(|e| e.raw.contains_key("arguments") && e.principal.as_deref() == Some("nagios")));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn salt_schedules_run_what_their_jobs_name() {
+        let d = fixture("salt");
+        put(&d, "usr/bin/salt-minion", b"");
+        put(&d, "etc/salt/minion", b"master: salt\nschedule:\n  beacon:\n    function: cmd.run\n    args: ['/opt/b --quiet']\n    minutes: 5\n  states:\n    function: state.apply\n    hours: 1\n");
+        put(&d, "etc/salt/minion.d/extra.conf", b"schedule:\n  paused:\n    function: cmd.shell\n    kwargs: {cmd: /tmp/x}\n    enabled: false\n");
+        put(&d, "etc/salt/minion.d/notes.txt", b"schedule:\n  never:\n    function: cmd.run\n    args: [/never]\n");
+        let s = scan(&d);
+        let mut got: Vec<(&str, &str, Enablement)> = s
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.command.as_deref().map(|c| std::str::from_utf8(c).unwrap()).unwrap_or("-"), e.enabled))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            [("salt:beacon", "/opt/b --quiet", Enablement::Enabled), ("salt:paused", "/tmp/x", Enablement::Disabled), ("salt:states", "-", Enablement::Enabled)]
+        );
         std::fs::remove_dir_all(&d).unwrap();
     }
 

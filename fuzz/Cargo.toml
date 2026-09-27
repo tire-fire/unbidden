@@ -640,3 +640,17 @@ path = "fuzz_targets/gconv_modules.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hgrc_hooks"
+path = "fuzz_targets/hgrc_hooks.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "firefox_prefs"
+path = "fuzz_targets/firefox_prefs.rs"
+test = false
+doc = false
+bench = false
