@@ -428,6 +428,21 @@ if [ "$FAMILY" = apk ]; then
 else
     printf 'uc:2345:respawn:/tmp/not-a-real-payload\n' | plant_check /etc/inittab inittab '"name":"uc"'
 fi
+# BusyBox crond: a line appended to root's packaged crontab, which is the
+# one file it reads, and a periodic script the crontab's run-parts line
+# reaches.
+if [ "$FAMILY" = apk ] && [ -f /etc/crontabs/root ]; then
+    cp -p /etc/crontabs/root /etc/crontabs/root.unbidden-backup
+    printf '*/5 * * * * /tmp/not-a-real-payload --cron\n' >> /etc/crontabs/root
+    job=$("$BIN" --json --all | tail -n +2 | grep '"kind":"cron"' | grep -F 'not-a-real-payload --cron' || true)
+    cp -p /etc/crontabs/root.unbidden-backup /etc/crontabs/root; rm -f /etc/crontabs/root.unbidden-backup
+    [ -n "$job" ] || fail "a line appended to /etc/crontabs/root was not reported"
+    case "$job" in
+        *'"enabled":"enabled"'*'"crond":"busybox"'*|*'"crond":"busybox"'*'"enabled":"enabled"'*) note "a line appended to root's crontab reports as one BusyBox crond runs" ;;
+        *) fail "the appended crontab line is not an enabled BusyBox crond job: $job" ;;
+    esac
+    printf '#!/bin/sh\n/tmp/not-a-real-payload\n' | plant_check /etc/periodic/daily/unbidden-check cron '"schedule":"@daily"'
+fi
 # OpenRC: a service a runlevel names, and a local.d script the local
 # service runs. Both planted the way rc-update and an administrator would.
 if [ "$FAMILY" = apk ] && command -v rc-update >/dev/null; then
