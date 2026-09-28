@@ -578,10 +578,13 @@ fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
     let mut out = BTreeSet::new();
     for e in entries {
         let source = root.rel(&e.source);
-        if is_kernel_interface(&source) {
-            continue;
+        // A kernel interface is not asked about, but what it names is: a
+        // loaded module's .ko, a callout's program. Skipping the whole entry
+        // here left every loaded module on every live host unknown, and in
+        // the default view.
+        if !is_kernel_interface(&source) {
+            out.insert(source);
         }
-        out.insert(source);
         // A line copied from a packaged template is judged by the template.
         if let Some(t) = e.raw.get("matches_template") {
             out.insert(root.rel(Path::new(t)));
@@ -1759,6 +1762,52 @@ mod tests {
         assert_eq!(entries[1].raw["enrichment_failed"], "encoding: hostile bytes");
         assert_eq!(failed.len(), 1);
         assert!(failed[0].contains(entries[1].short_id()));
+    }
+
+    #[test]
+    fn an_entry_read_from_a_kernel_interface_is_judged_by_its_target() {
+        // /proc/modules is nobody's file, but the .ko it names is packaged
+        // like any other. Skipping the whole entry in the provenance pass
+        // left every loaded module on every live host unknown, and shown.
+        let dir = std::env::temp_dir().join(format!("unbidden-kernel-target-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["proc/sys/kernel", "lib/modules/6.1/kernel/fs/9p", "sbin", "var/lib/dpkg/info"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("proc/modules"), b"9p 12345 0 - Live 0x0\n").unwrap();
+        std::fs::write(dir.join("proc/sys/kernel/modprobe"), b"/sbin/modprobe\n").unwrap();
+        std::fs::write(dir.join("lib/modules/6.1/kernel/fs/9p/9p.ko"), b"ko").unwrap();
+        std::fs::write(dir.join("sbin/modprobe"), b"elf").unwrap();
+        let md5 = |b: &[u8]| {
+            use md5::Digest as _;
+            crate::entry::hex(&md5::Md5::digest(b))
+        };
+        std::fs::write(
+            dir.join("var/lib/dpkg/status"),
+            b"Package: linux-modules\nStatus: install ok installed\nVersion: 6.1\n\nPackage: kmod\nStatus: install ok installed\nVersion: 30\n\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/linux-modules.list"), b"/lib/modules/6.1/kernel/fs/9p/9p.ko\n").unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/linux-modules.md5sums"), format!("{}  lib/modules/6.1/kernel/fs/9p/9p.ko\n", md5(b"ko"))).unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/kmod.list"), b"/sbin/modprobe\n").unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/kmod.md5sums"), format!("{}  sbin/modprobe\n", md5(b"elf"))).unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let mut scan = scan::run(&root, &Options { deep: false }, &[]);
+        let mut module = Entry::new(Kind::KernelModule, dir.join("proc/modules"), "9p");
+        module.target_path = Some(dir.join("lib/modules/6.1/kernel/fs/9p/9p.ko"));
+        let mut callout = Entry::new(Kind::KernelCallout, dir.join("proc/sys/kernel/modprobe"), "modprobe");
+        callout.target_path = Some(dir.join("sbin/modprobe"));
+        callout.command = Some(b"/sbin/modprobe".to_vec());
+        scan.entries.extend([module, callout]);
+        enrich(&root, &mut scan);
+
+        let module = scan.entries.iter().find(|e| e.name == "9p").unwrap();
+        assert!(module.provenance.is_packaged_intact(), "{:?}", module.provenance);
+        assert!(!module.raw.contains_key("provenance_caveat"));
+        let callout = scan.entries.iter().find(|e| e.name == "modprobe").unwrap();
+        assert!(callout.provenance.is_packaged_intact(), "{:?}", callout.provenance);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
