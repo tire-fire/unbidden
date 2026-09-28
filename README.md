@@ -6,7 +6,7 @@ Finds what runs automatically on Linux.
 [![crates.io](https://img.shields.io/crates/v/unbidden.svg)](https://crates.io/crates/unbidden)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-![unbidden finding planted persistence on a Debian host](docs/scan.svg)
+![unbidden's default view on a Debian 12 VM with three planted mechanisms: a service, a cron job and a preloaded library](docs/scan.svg)
 
 What it reads, grouped by when each thing runs:
 
@@ -51,8 +51,13 @@ If it runs without a person typing something, it should turn up here.
 
 Most of what turns up is noise. A desktop has well over a thousand autostart
 entries, nearly all of them from a package and untouched since. unbidden reads
-the dpkg, rpm and apk databases itself and hides those, so you get the short list:
-1,690 hidden on the host in the screenshot.
+the dpkg, rpm and apk databases itself and hides those, so you get the short
+list. The screenshot is a fresh Debian 12 cloud image with three mechanisms
+planted the way an intruder leaves them — `telemetry.service`, the cron job
+running `/usr/local/bin/agent`, and the library in `/etc/ld.so.preload` — and
+nothing filtered: 1,950 entries hidden, 8 shown. The other five are what the
+image honestly carries: root's ssh key, an `sshd_config` the image edited, the
+builder's modprobe blacklist, and netplan's runtime unit.
 
 ## Install
 
