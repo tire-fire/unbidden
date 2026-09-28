@@ -1,0 +1,682 @@
+//! The apk backend: Alpine's installed-package database, one plain-text
+//! file, read as apk-tools 2.14 and 3.0 read it (`apk_db_index_read`).
+//!
+//! /lib/apk/db/installed is a sequence of blank-line-separated records, one
+//! per package, each a list of `X:value` lines: `P:` and `V:` name and
+//! version, then the files, as `F:` directory lines each followed by the
+//! `R:` names inside it, with `a:` (owner and mode) and `Z:` (digest) lines
+//! after the `R:` they describe. The digest is the whole integrity story:
+//! apk records no size or mtime, and a symlink's digest is of its target
+//! string rather than of anything the link leads to.
+//!
+//! What a difference means is apk's protected-paths rule. A file under a
+//! protected path (`+etc` by default) is kept when its package upgrades, so
+//! a change there is what configuration is for; under a symlinks-only path
+//! (`@etc/init.d`) or an unprotected one the package's copy comes back on
+//! the next upgrade, so a change is a modified package file. `apk audit`
+//! itself skips a changed regular file under `@etc/init.d` in both of its
+//! modes, which makes this the one place on an Alpine host where the check
+//! sees what the package manager does not.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
+use std::path::{Path, PathBuf};
+
+use crate::entry::{Integrity, Provenance};
+use crate::root::Root;
+
+use super::{Answers, spellings};
+
+const INSTALLED: &str = "lib/apk/db/installed";
+const PROTECTED_D: &str = "etc/apk/protected_paths.d";
+
+/// A full host's database is a few megabytes; the cap is a backstop.
+const DB_CAP: usize = 64 << 20;
+
+/// apk's compiled-in protected paths (database.c), read before anything in
+/// protected_paths.d: /etc is kept on upgrade, /etc/init.d only its links,
+/// and /etc/apk is apk's own.
+const DEFAULT_PROTECTED: &str = "+etc\n@etc/init.d\n!etc/apk\n";
+
+pub fn present(root: &Root) -> bool {
+    root.exists(INSTALLED)
+}
+
+/// Every path the database claims, files and directories alike,
+/// root-relative.
+pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
+    let mut out = BTreeSet::new();
+    let Ok((bytes, _)) = root.read_capped(INSTALLED, DB_CAP) else { return out };
+    each_path(&bytes, |_, path, _| {
+        out.insert(PathBuf::from(OsStr::from_bytes(path)));
+    });
+    out
+}
+
+pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
+    if !present(root) {
+        return None;
+    }
+    // A database that is there but cannot be read answers for nobody: that
+    // is Unknown for every path, not Unpackaged.
+    let (bytes, _) = root.read_capped(INSTALLED, DB_CAP).ok()?;
+
+    let mut alias_to_wanted: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
+    for w in wanted {
+        for alias in spellings(root, w) {
+            alias_to_wanted.entry(alias).or_default().push(w.clone());
+        }
+    }
+
+    let protected = protected_paths(root);
+    let mut out = Answers::new();
+    each_path(&bytes, |pkg, path, facts| {
+        let Some(ws) = alias_to_wanted.get(Path::new(OsStr::from_bytes(path))) else { return };
+        for w in ws {
+            let integrity = verify(root, w, &facts, &protected);
+            out.insert(
+                w.clone(),
+                Provenance::Packaged {
+                    package: String::from_utf8_lossy(pkg.name).into_owned(),
+                    version: String::from_utf8_lossy(pkg.version).into_owned(),
+                    integrity,
+                },
+            );
+        }
+    });
+    Some(out)
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Alg {
+    Md5,
+    Sha1,
+    Sha256,
+}
+
+/// What the database says about one path.
+#[derive(Default, Clone, Debug, PartialEq)]
+struct Facts {
+    is_dir: bool,
+    /// Lower-case hex, in the algorithm the record was written with.
+    digest: Option<(Alg, String)>,
+    /// From the `a:` line, octal as apk writes it.
+    mode: Option<u32>,
+}
+
+struct Pkg<'a> {
+    name: &'a [u8],
+    version: &'a [u8],
+}
+
+/// Streams the database once, calling `f` for every directory and file it
+/// claims with the package that claims it. Lines apk would refuse the whole
+/// database over — a field without its colon, an `a:` before any `R:` — are
+/// skipped here instead: the rest of the file is still evidence.
+fn each_path(bytes: &[u8], mut f: impl FnMut(&Pkg<'_>, &[u8], Facts)) {
+    let mut name: &[u8] = b"";
+    let mut version: &[u8] = b"";
+    let mut dir: Vec<u8> = Vec::new();
+    // The file whose `a:` and `Z:` lines may still follow.
+    let mut pending: Option<(Vec<u8>, Facts)> = None;
+
+    let flush = |pending: &mut Option<(Vec<u8>, Facts)>, name: &[u8], version: &[u8], f: &mut dyn FnMut(&Pkg<'_>, &[u8], Facts)| {
+        if let Some((path, facts)) = pending.take() {
+            f(&Pkg { name, version }, &path, facts);
+        }
+    };
+
+    for line in bytes.split(|b| *b == b'\n') {
+        // A record ends at a line shorter than two bytes; apk_db_index_read
+        // treats that as the blank line between packages.
+        if line.len() < 2 {
+            flush(&mut pending, name, version, &mut f);
+            name = b"";
+            version = b"";
+            dir.clear();
+            continue;
+        }
+        if line[1] != b':' {
+            continue;
+        }
+        let value = &line[2..];
+        match line[0] {
+            b'P' => name = value,
+            b'V' => version = value,
+            b'F' => {
+                flush(&mut pending, name, version, &mut f);
+                dir = value.strip_suffix(b"/").unwrap_or(value).to_vec();
+                if !dir.is_empty() {
+                    f(&Pkg { name, version }, &dir, Facts { is_dir: true, ..Facts::default() });
+                }
+            }
+            b'R' => {
+                flush(&mut pending, name, version, &mut f);
+                let mut path = dir.clone();
+                if !path.is_empty() {
+                    path.push(b'/');
+                }
+                path.extend_from_slice(value);
+                pending = Some((path, Facts::default()));
+            }
+            b'a' => {
+                if let Some((_, facts)) = pending.as_mut() {
+                    facts.mode = acl_mode(value);
+                }
+            }
+            b'Z' => {
+                if let Some((_, facts)) = pending.as_mut() {
+                    facts.digest = digest(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    flush(&mut pending, name, version, &mut f);
+}
+
+/// `uid:gid:mode[:xattr-digest]`, the mode in octal.
+fn acl_mode(value: &[u8]) -> Option<u32> {
+    let mut fields = value.split(|b| *b == b':');
+    let (_uid, _gid, mode) = (fields.next()?, fields.next()?, fields.next()?);
+    let text = std::str::from_utf8(mode).ok()?;
+    u32::from_str_radix(text, 8).ok()
+}
+
+/// A `Z:` value as apk_blob_pull_csum (2.14) and apk_blob_pull_digest (3.0)
+/// read it: `Q` for base64 or `X` for hex, then `1` for SHA-1 or `2` for
+/// SHA-256; a value starting with a hex digit is an MD5 hexdump from before
+/// the prefix existed. apk 3 writes a SHA-256 in an old database as a
+/// SHA-1-length prefix with the remaining twelve bytes appended, and reads
+/// it back as SHA-256.
+fn digest(value: &[u8]) -> Option<(Alg, String)> {
+    if value.first().is_some_and(u8::is_ascii_hexdigit) {
+        let bytes = unhex(value)?;
+        return (bytes.len() == 16).then(|| (Alg::Md5, crate::entry::hex(&bytes)));
+    }
+    let [encoding, alg, rest @ ..] = value else { return None };
+    let decode = |chunk: &[u8]| match encoding {
+        b'Q' => base64(chunk),
+        b'X' => unhex(chunk),
+        _ => None,
+    };
+    let bytes = match alg {
+        b'1' => {
+            let head = if *encoding == b'Q' { 28 } else { 40 };
+            let (first, more) = rest.split_at_checked(head)?;
+            let mut bytes = decode(first)?;
+            if bytes.len() != 20 {
+                return None;
+            }
+            if !more.is_empty() {
+                let tail = decode(more)?;
+                if tail.len() != 12 {
+                    return None;
+                }
+                bytes.extend(tail);
+            }
+            bytes
+        }
+        b'2' => {
+            let bytes = decode(rest)?;
+            if bytes.len() != 32 {
+                return None;
+            }
+            bytes
+        }
+        _ => return None,
+    };
+    match bytes.len() {
+        20 => Some((Alg::Sha1, crate::entry::hex(&bytes))),
+        32 => Some((Alg::Sha256, crate::entry::hex(&bytes))),
+        _ => None,
+    }
+}
+
+fn unhex(text: &[u8]) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    let nibble = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    text.chunks(2).map(|pair| Some(nibble(pair[0])? << 4 | nibble(pair[1])?)).collect()
+}
+
+/// Standard-alphabet base64 with `=` padding, refusing anything else, as
+/// apk's own table does.
+fn base64(text: &[u8]) -> Option<Vec<u8>> {
+    let value = |b: u8| match b {
+        b'A'..=b'Z' => Some(b - b'A'),
+        b'a'..=b'z' => Some(b - b'a' + 26),
+        b'0'..=b'9' => Some(b - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    let body = text.iter().rev().skip_while(|b| **b == b'=').count();
+    let padding = text.len() - body;
+    if text.len() % 4 != 0 || padding > 2 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    for quad in text[..body].chunks(4) {
+        let mut acc: u32 = 0;
+        for (i, b) in quad.iter().enumerate() {
+            acc |= u32::from(value(*b)?) << (18 - 6 * i);
+        }
+        let bytes = acc.to_be_bytes();
+        out.extend_from_slice(&bytes[1..quad.len()]);
+    }
+    Some(out)
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Protect {
+    /// Not protected: the package's copy replaces a change on upgrade.
+    None,
+    /// `-`: explicitly not protected.
+    Ignore,
+    /// `+`: a changed file is kept, the package's copy written beside it.
+    Changed,
+    /// `@`: symlinks are kept; a changed regular file is replaced.
+    SymlinksOnly,
+    /// `!`: everything is kept, and apk never audits it.
+    All,
+}
+
+/// The compiled-in defaults, then every `*.list` in protected_paths.d, in
+/// name order; a line is a mode character then a path, `#` a comment, and a
+/// path with no mode character is `+`.
+fn protected_paths(root: &Root) -> Vec<(Vec<u8>, Protect)> {
+    let mut out = Vec::new();
+    let mut add = |text: &[u8]| {
+        for line in text.split(|b| *b == b'\n') {
+            let (mode, path) = match line.first() {
+                None | Some(b'#') => continue,
+                Some(b'-') => (Protect::Ignore, &line[1..]),
+                Some(b'+') => (Protect::Changed, &line[1..]),
+                Some(b'@') => (Protect::SymlinksOnly, &line[1..]),
+                Some(b'!') => (Protect::All, &line[1..]),
+                Some(_) => (Protect::Changed, line),
+            };
+            let start = path.iter().position(|b| *b != b'/').unwrap_or(path.len());
+            let end = path.iter().rposition(|b| *b != b'/').map_or(0, |i| i + 1);
+            if start < end {
+                out.push((path[start..end].to_vec(), mode));
+            }
+        }
+    };
+    add(DEFAULT_PROTECTED.as_bytes());
+    let mut lists: Vec<Vec<u8>> = root
+        .read_dir_optional(PROTECTED_D)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| !e.is_dir && e.name.as_bytes().ends_with(b".list"))
+        .map(|e| e.name.as_bytes().to_vec())
+        .collect();
+    lists.sort();
+    for name in lists {
+        let rel = Path::new(PROTECTED_D).join(OsStr::from_bytes(&name));
+        if let Ok((bytes, _)) = root.read_capped(rel, 1 << 20) {
+            add(&bytes);
+        }
+    }
+    out
+}
+
+/// apk's mode for a path, as apk_db_dir_get and determine_file_protect_mode
+/// work it out: a pattern is matched component by component from the root,
+/// a pattern that still has a slash descending with the directory it
+/// matched, one that has none setting the mode of the directory or file it
+/// matches, a later pattern overriding an earlier one, and a directory's
+/// mode inherited by everything under it. Patterns are `*` and `?` globs;
+/// fnmatch's bracket expressions are not read.
+fn protect_mode(patterns: &[(Vec<u8>, Protect)], rel: &Path) -> Protect {
+    let comps: Vec<&[u8]> = rel.iter().map(OsStr::as_bytes).collect();
+    let Some((name, dirs)) = comps.split_last() else { return Protect::None };
+    let mut mode = Protect::None;
+    let mut level: Vec<(&[u8], Protect)> = patterns.iter().map(|(p, m)| (p.as_slice(), *m)).collect();
+    for c in dirs {
+        let mut next = Vec::new();
+        for (pat, m) in &level {
+            match pat.iter().position(|b| *b == b'/') {
+                Some(i) => {
+                    if crate::collect::glob_match(&pat[..i], c) {
+                        next.push((&pat[i + 1..], *m));
+                    }
+                }
+                None => {
+                    if crate::collect::glob_match(pat, c) {
+                        mode = *m;
+                    }
+                }
+            }
+        }
+        level = next;
+    }
+    for (pat, m) in &level {
+        if !pat.contains(&b'/') && crate::collect::glob_match(pat, name) {
+            mode = *m;
+        }
+    }
+    mode
+}
+
+fn verify(root: &Root, rel: &Path, facts: &Facts, protected: &[(Vec<u8>, Protect)]) -> Integrity {
+    if facts.is_dir {
+        return Integrity::Unknown;
+    }
+    // No digest recorded — a directory, or a record apk 3 wrote for a file
+    // it did not hash — is genuinely unknown, never intact.
+    let Some((alg, expected)) = &facts.digest else { return Integrity::Unknown };
+    let Ok(meta) = root.stat(rel) else { return Integrity::Unknown };
+    let actual = if meta.is_symlink {
+        root.read_link(rel).ok().map(|t| hash(*alg, t.as_os_str().as_bytes()))
+    } else {
+        super::digests(root, rel).map(|d| match alg {
+            Alg::Md5 => d.md5,
+            Alg::Sha1 => d.sha1,
+            Alg::Sha256 => d.sha256,
+        })
+    };
+    let Some(actual) = actual else { return Integrity::Unknown };
+    if actual.eq_ignore_ascii_case(expected) {
+        // Contents match; a setuid or setgid bit the package did not ship
+        // is the rpm backend's ModeModified.
+        let privilege = |m: u32| m & 0o6000;
+        return match facts.mode {
+            Some(shipped) if privilege(shipped) != privilege(meta.mode) => Integrity::ModeModified,
+            _ => Integrity::Intact,
+        };
+    }
+    match protect_mode(protected, rel) {
+        Protect::Changed | Protect::All => Integrity::ConffileModified,
+        Protect::SymlinksOnly if meta.is_symlink => Integrity::ConffileModified,
+        Protect::SymlinksOnly | Protect::Ignore | Protect::None => Integrity::Modified,
+    }
+}
+
+fn hash(alg: Alg, bytes: &[u8]) -> String {
+    use md5::Digest as _;
+    crate::entry::hex(&match alg {
+        Alg::Md5 => md5::Md5::digest(bytes).to_vec(),
+        Alg::Sha1 => sha1::Sha1::digest(bytes).to_vec(),
+        Alg::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
+    })
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    pub(crate) struct Fixture(pub PathBuf);
+
+    impl Fixture {
+        pub(crate) fn new(tag: &str) -> Fixture {
+            let dir = std::env::temp_dir().join(format!("unbidden-apk-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("lib/apk/db")).unwrap();
+            Fixture(dir)
+        }
+        pub(crate) fn write(&self, rel: &str, content: &[u8]) {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        }
+        pub(crate) fn link(&self, target: &str, rel: &str) {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(target, p).unwrap();
+        }
+        pub(crate) fn root(&self) -> Root {
+            Root::at(&self.0).unwrap()
+        }
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `Q1<base64 sha1>`, as apk writes a digest.
+    pub(crate) fn q1(content: &[u8]) -> String {
+        use md5::Digest as _;
+        format!("Q1{}", b64(&sha1::Sha1::digest(content)))
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut acc = 0u32;
+            for (i, b) in chunk.iter().enumerate() {
+                acc |= u32::from(*b) << (16 - 8 * i);
+            }
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(T[((acc >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    fn ask(root: &Root, paths: &[&str]) -> Answers {
+        let wanted: BTreeSet<PathBuf> = paths.iter().map(PathBuf::from).collect();
+        resolve(root, &wanted).unwrap()
+    }
+
+    fn integrity(answers: &Answers, path: &str) -> Integrity {
+        match &answers[Path::new(path)] {
+            Provenance::Packaged { integrity, .. } => *integrity,
+            other => panic!("{path}: {other:?}"),
+        }
+    }
+
+    /// One package record in the database's own layout.
+    fn record(name: &str, version: &str, files: &[(&str, &str)]) -> String {
+        let mut out = format!("C:Q1abc=\nP:{name}\nV:{version}\nA:x86_64\nT:test\n");
+        let mut dir = "";
+        for (path, digest) in files {
+            let (d, f) = path.rsplit_once('/').unwrap_or(("", path));
+            if d != dir {
+                dir = d;
+                out.push_str(&format!("F:{d}\n"));
+            }
+            out.push_str(&format!("R:{f}\na:0:0:755\n"));
+            if !digest.is_empty() {
+                out.push_str(&format!("Z:{digest}\n"));
+            }
+        }
+        out.push('\n');
+        out
+    }
+
+    #[test]
+    fn a_file_is_owned_and_intact_when_its_digest_matches() {
+        let f = Fixture::new("intact");
+        let getty = b"#!/bin/sh\nexec /bin/busybox getty \"$@\"\n";
+        f.write("sbin/getty", getty);
+        f.write("etc/inittab", b"::sysinit:/sbin/openrc sysinit\n");
+        f.write(
+            INSTALLED,
+            format!(
+                "{}{}",
+                record("busybox", "1.37.0-r31", &[("sbin/getty", &q1(getty))]),
+                record("alpine-baselayout-data", "3.7.2-r1", &[("etc/inittab", &q1(b"::sysinit:/sbin/openrc sysinit\n"))]),
+            )
+            .as_bytes(),
+        );
+        let answers = ask(&f.root(), &["sbin/getty", "etc/inittab", "usr/bin/nothing"]);
+        match &answers[Path::new("sbin/getty")] {
+            Provenance::Packaged { package, version, integrity } => {
+                assert_eq!((package.as_str(), version.as_str(), *integrity), ("busybox", "1.37.0-r31", Integrity::Intact));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(integrity(&answers, "etc/inittab"), Integrity::Intact);
+        assert!(!answers.contains_key(Path::new("usr/bin/nothing")), "an unclaimed path is the caller's to judge");
+    }
+
+    #[test]
+    fn a_changed_file_is_configuration_under_etc_and_a_finding_elsewhere() {
+        let f = Fixture::new("protected");
+        let shipped = b"shipped\n";
+        for p in ["etc/motd", "usr/bin/tool", "etc/init.d/crond", "etc/apk/keys/k.rsa.pub", "etc/conf.d/crond"] {
+            f.write(p, b"changed\n");
+        }
+        let d = q1(shipped);
+        let files: Vec<(&str, &str)> = ["etc/motd", "usr/bin/tool", "etc/init.d/crond", "etc/apk/keys/k.rsa.pub", "etc/conf.d/crond"]
+            .into_iter()
+            .map(|p| (p, d.as_str()))
+            .collect();
+        f.write(INSTALLED, record("pkg", "1-r0", &files).as_bytes());
+        let a = ask(&f.root(), &["etc/motd", "usr/bin/tool", "etc/init.d/crond", "etc/apk/keys/k.rsa.pub", "etc/conf.d/crond"]);
+        assert_eq!(integrity(&a, "etc/motd"), Integrity::ConffileModified, "+etc keeps the change");
+        assert_eq!(integrity(&a, "etc/conf.d/crond"), Integrity::ConffileModified);
+        assert_eq!(integrity(&a, "usr/bin/tool"), Integrity::Modified);
+        assert_eq!(integrity(&a, "etc/init.d/crond"), Integrity::Modified, "@etc/init.d protects links only");
+        assert_eq!(integrity(&a, "etc/apk/keys/k.rsa.pub"), Integrity::ConffileModified, "!etc/apk is never overwritten");
+    }
+
+    #[test]
+    fn a_symlink_is_judged_by_its_target_string() {
+        let f = Fixture::new("links");
+        f.write("bin/busybox", b"ELF");
+        f.link("/bin/busybox", "bin/sh");
+        f.link("/tmp/evil", "usr/bin/rbash");
+        f.link("/tmp/evil", "etc/init.d/sshd");
+        let d = q1(b"/bin/busybox");
+        f.write(
+            INSTALLED,
+            record("busybox-binsh", "1.37.0-r31", &[("bin/sh", &d), ("usr/bin/rbash", &d), ("etc/init.d/sshd", &d)]).as_bytes(),
+        );
+        let a = ask(&f.root(), &["bin/sh", "usr/bin/rbash", "etc/init.d/sshd"]);
+        assert_eq!(integrity(&a, "bin/sh"), Integrity::Intact);
+        assert_eq!(integrity(&a, "usr/bin/rbash"), Integrity::Modified, "repointed");
+        assert_eq!(integrity(&a, "etc/init.d/sshd"), Integrity::ConffileModified, "a link under @etc/init.d is kept on upgrade");
+    }
+
+    #[test]
+    fn a_setuid_bit_the_package_did_not_ship_is_mode_modified() {
+        let f = Fixture::new("modes");
+        let body = b"#!/bin/sh\n";
+        f.write("usr/bin/find", body);
+        f.write("usr/bin/su", body);
+        std::fs::set_permissions(f.0.join("usr/bin/find"), std::fs::Permissions::from_mode(0o4755)).unwrap();
+        std::fs::set_permissions(f.0.join("usr/bin/su"), std::fs::Permissions::from_mode(0o4755)).unwrap();
+        let d = q1(body);
+        f.write(
+            INSTALLED,
+            format!("C:Q1x=\nP:findutils\nV:4.10.0-r0\nF:usr/bin\nR:find\na:0:0:755\nZ:{d}\nR:su\na:0:0:4755\nZ:{d}\n\n").as_bytes(),
+        );
+        let a = ask(&f.root(), &["usr/bin/find", "usr/bin/su"]);
+        assert_eq!(integrity(&a, "usr/bin/find"), Integrity::ModeModified);
+        assert_eq!(integrity(&a, "usr/bin/su"), Integrity::Intact);
+    }
+
+    #[test]
+    fn no_digest_and_a_directory_are_unknown_never_intact() {
+        let f = Fixture::new("nodigest");
+        f.write("usr/lib/x.so", b"x");
+        f.write(INSTALLED, record("p", "1", &[("usr/lib/x.so", "")]).as_bytes());
+        let a = ask(&f.root(), &["usr/lib/x.so", "usr/lib"]);
+        assert_eq!(integrity(&a, "usr/lib/x.so"), Integrity::Unknown);
+        assert_eq!(integrity(&a, "usr/lib"), Integrity::Unknown, "a directory is owned, and has no digest");
+    }
+
+    #[test]
+    fn every_digest_encoding_apk_has_written_is_read() {
+        use md5::Digest as _;
+        let f = Fixture::new("encodings");
+        let body = b"payload\n";
+        for p in ["a", "b", "c", "d", "e"] {
+            f.write(&format!("usr/share/{p}"), body);
+        }
+        let sha1 = sha1::Sha1::digest(body);
+        let sha256 = sha2::Sha256::digest(body);
+        let md5 = md5::Md5::digest(body);
+        let x1 = format!("X1{}", crate::entry::hex(&sha1));
+        let q2 = format!("Q2{}", b64(&sha256));
+        // apk 3 in an apk 2 database: the SHA-1-length prefix, then the rest.
+        let q1_extended = format!("Q1{}{}", b64(&sha256[..20]), b64(&sha256[20..]));
+        let legacy = crate::entry::hex(&md5);
+        f.write(
+            INSTALLED,
+            record("p", "1", &[("usr/share/a", &q1(body)), ("usr/share/b", &x1), ("usr/share/c", &q2), ("usr/share/d", &q1_extended), ("usr/share/e", &legacy)]).as_bytes(),
+        );
+        let a = ask(&f.root(), &["usr/share/a", "usr/share/b", "usr/share/c", "usr/share/d", "usr/share/e"]);
+        for p in ["a", "b", "c", "d", "e"] {
+            assert_eq!(integrity(&a, &format!("usr/share/{p}")), Integrity::Intact, "{p}");
+        }
+    }
+
+    #[test]
+    fn protected_paths_d_overrides_the_defaults_in_name_order() {
+        let f = Fixture::new("lists");
+        let shipped = b"shipped\n";
+        for p in ["etc/foo/x", "usr/local/bin/x", "etc/bar/y", "var/lib/z"] {
+            f.write(p, b"changed\n");
+        }
+        f.write(&format!("{PROTECTED_D}/10-site.list"), b"# site policy\n-etc/foo\n+usr/local\n/var/lib/\n");
+        f.write(&format!("{PROTECTED_D}/20-later.list"), b"+etc/foo/x\n");
+        f.write(&format!("{PROTECTED_D}/ignored.conf"), b"-etc\n");
+        let d = q1(shipped);
+        f.write(
+            INSTALLED,
+            record("p", "1", &[("etc/foo/x", &d), ("usr/local/bin/x", &d), ("etc/bar/y", &d), ("var/lib/z", &d)]).as_bytes(),
+        );
+        let a = ask(&f.root(), &["etc/foo/x", "usr/local/bin/x", "etc/bar/y", "var/lib/z"]);
+        assert_eq!(integrity(&a, "etc/foo/x"), Integrity::ConffileModified, "20-later's + outranks 10-site's -");
+        assert_eq!(integrity(&a, "usr/local/bin/x"), Integrity::ConffileModified, "+usr/local");
+        assert_eq!(integrity(&a, "etc/bar/y"), Integrity::ConffileModified, "still under +etc");
+        assert_eq!(integrity(&a, "var/lib/z"), Integrity::ConffileModified, "no mode character is +");
+        f.write(&format!("{PROTECTED_D}/20-later.list"), b"");
+        let a = ask(&f.root(), &["etc/foo/x"]);
+        assert_eq!(integrity(&a, "etc/foo/x"), Integrity::Modified, "-etc/foo unprotects what +etc protected");
+    }
+
+    #[test]
+    fn a_hostile_database_is_read_as_far_as_it_goes() {
+        let f = Fixture::new("hostile");
+        f.write("usr/bin/ok", b"ok\n");
+        f.write("usr/bin/bad", b"bad\n");
+        let db = format!(
+            "garbage line\nP\n:x\nZ:Q1before-any-file\na:1:2:3\nP:p\nV:1\nF:usr/bin\nR:ok\nZ:{}\nR:bad\nZ:Q1!!!!\nR:worse\nZ:Q1{}\nR:odd\na:0:0:notoctal\nZ:X1zz\n\nP:q\nF:\nR:rootfile\n",
+            q1(b"ok\n"),
+            "A".repeat(28)
+        );
+        f.write(INSTALLED, db.as_bytes());
+        let a = ask(&f.root(), &["usr/bin/ok", "usr/bin/bad", "usr/bin/worse", "usr/bin/odd", "rootfile"]);
+        assert_eq!(integrity(&a, "usr/bin/ok"), Integrity::Intact);
+        assert_eq!(integrity(&a, "usr/bin/bad"), Integrity::Unknown, "an undecodable digest verifies nothing");
+        assert_eq!(integrity(&a, "usr/bin/worse"), Integrity::Unknown, "a decodable digest of a missing file");
+        assert_eq!(integrity(&a, "usr/bin/odd"), Integrity::Unknown);
+        assert!(matches!(&a[Path::new("rootfile")], Provenance::Packaged { package, .. } if package == "q"));
+        assert!(packaged_files(&f.root()).contains(Path::new("usr/bin")));
+    }
+
+    #[test]
+    fn the_digest_decoder_matches_apk() {
+        assert_eq!(base64(b"AAAA"), Some(vec![0, 0, 0]));
+        assert_eq!(base64(b"AQ=="), Some(vec![1]));
+        assert_eq!(base64(b"AQI="), Some(vec![1, 2]));
+        assert_eq!(base64(b"AQ="), None, "length not a multiple of four");
+        assert_eq!(base64(b"A?=="), None);
+        assert_eq!(unhex(b"0aFF"), Some(vec![10, 255]));
+        assert_eq!(unhex(b"0a0"), None);
+        assert_eq!(digest(b"Q1"), None);
+        assert_eq!(digest(b"Q3AAAA"), None);
+        assert_eq!(digest(b"Y1AAAA"), None);
+        assert_eq!(digest(&b"0".repeat(32)).map(|d| d.0), Some(Alg::Md5));
+        assert_eq!(digest(&b"0".repeat(30)), None);
+        assert_eq!(digest(&[b"X1".as_slice(), &b"0".repeat(40)].concat()).map(|d| d.0), Some(Alg::Sha1));
+        assert_eq!(digest(&[b"X1".as_slice(), &b"0".repeat(64)].concat()).map(|d| d.0), Some(Alg::Sha256));
+        assert_eq!(digest(&[b"X2".as_slice(), &b"0".repeat(64)].concat()).map(|d| d.0), Some(Alg::Sha256));
+        assert_eq!(digest(&[b"X2".as_slice(), &b"0".repeat(40)].concat()), None);
+    }
+}

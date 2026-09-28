@@ -10,6 +10,7 @@
 //! backends stream their databases once and answer only the paths asked for.
 //! Building a full path index would be the most expensive part of a scan.
 
+pub mod apk;
 pub mod dpkg;
 pub mod generated;
 pub mod reproduced;
@@ -43,11 +44,12 @@ pub struct Resolution {
 pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
     let mut out = dpkg::packaged_files(root);
     out.extend(rpm::packaged_files(root));
+    out.extend(apk::packaged_files(root));
     out
 }
 
 pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Resolution {
-    resolve_with(root, wanted, &[("dpkg", dpkg::resolve), ("rpm", rpm::resolve)])
+    resolve_with(root, wanted, &[("dpkg", dpkg::resolve), ("rpm", rpm::resolve), ("apk", apk::resolve)])
 }
 
 type Backend = fn(&Root, &BTreeSet<PathBuf>) -> Option<Answers>;
@@ -146,6 +148,7 @@ pub fn spellings(root: &Root, rel: &Path) -> Vec<PathBuf> {
 pub struct FileDigests {
     pub sha256: String,
     pub md5: String,
+    pub sha1: String,
     pub size: u64,
 }
 
@@ -153,8 +156,8 @@ pub struct FileDigests {
 /// wall clock. Reported as an unknown digest rather than silently skipped.
 pub const HASH_SIZE_LIMIT: u64 = 256 << 20;
 
-/// One read, both digests: the reported sha256 of §4 and the md5 that dpkg
-/// manifests are written in.
+/// One read, three digests: the reported sha256 of §4, the md5 that dpkg
+/// manifests are written in, and the sha1 that apk's is.
 pub fn digests(root: &Root, rel: &Path) -> Option<FileDigests> {
     use md5::Digest as _;
 
@@ -165,6 +168,7 @@ pub fn digests(root: &Root, rel: &Path) -> Option<FileDigests> {
     let mut file = root.open(rel).ok()?;
     let mut sha = <sha2::Sha256 as sha2::Digest>::new();
     let mut md5 = md5::Md5::new();
+    let mut sha1 = <sha1::Sha1 as sha1::Digest>::new();
     let mut buf = vec![0u8; 64 * 1024];
     let mut size = 0u64;
     loop {
@@ -173,6 +177,7 @@ pub fn digests(root: &Root, rel: &Path) -> Option<FileDigests> {
             Ok(n) => {
                 sha2::Digest::update(&mut sha, &buf[..n]);
                 md5.update(&buf[..n]);
+                sha1::Digest::update(&mut sha1, &buf[..n]);
                 size += n as u64;
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -182,6 +187,7 @@ pub fn digests(root: &Root, rel: &Path) -> Option<FileDigests> {
     Some(FileDigests {
         sha256: crate::entry::hex(&sha2::Digest::finalize(sha)),
         md5: crate::entry::hex(&md5.finalize()),
+        sha1: crate::entry::hex(&sha1::Digest::finalize(sha1)),
         size,
     })
 }

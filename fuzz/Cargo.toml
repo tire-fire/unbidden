@@ -138,6 +138,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "apk_installed"
+path = "fuzz_targets/apk_installed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dpkg_md5sums"
 path = "fuzz_targets/dpkg_md5sums.rs"
 test = false
