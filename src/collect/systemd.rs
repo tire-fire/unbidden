@@ -1051,7 +1051,17 @@ struct Facts {
     has_install: bool,
     /// Set when ExecStart= sits in a section where systemd would ignore it.
     exec_section: Option<String>,
+    /// Condition*= and Assert*= lines that name a path, key and value as
+    /// written; an empty value clears the key's list, as systemd does.
+    conditions: Vec<(String, Vec<u8>)>,
 }
+
+/// The condition and assertion keys whose value is a path this pass can
+/// test without running anything: existence, kind, the execute bit, a
+/// non-empty file. A glob, a mount point or an encrypted path is left to
+/// systemd.
+const PATH_CONDITIONS: [&str; 5] =
+    ["PathExists", "PathIsDirectory", "PathIsSymbolicLink", "FileNotEmpty", "FileIsExecutable"];
 
 fn parse_into_facts(cx: &mut Ctx, rel: &Path) -> Facts {
     match read_regular(cx, rel, crate::root::READ_CAP) {
@@ -1092,6 +1102,13 @@ fn facts(ds: &[Directive]) -> Facts {
                 }
             }
             "EnvironmentFile" => accumulate(&mut f.env_files, &d.value),
+            k if k.strip_prefix("Condition").or_else(|| k.strip_prefix("Assert")).is_some_and(|c| PATH_CONDITIONS.contains(&c)) => {
+                if d.value.is_empty() {
+                    f.conditions.retain(|(key, _)| key != k);
+                } else {
+                    f.conditions.push((k.to_string(), d.value.clone()));
+                }
+            }
             "WantedBy" if d.section == "Install" => accumulate(&mut f.wanted_by, &d.value),
             "RequiredBy" if d.section == "Install" => accumulate(&mut f.required_by, &d.value),
             _ => {}
@@ -1153,6 +1170,37 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
 
     for (k, v) in &f.env {
         e.note(&format!("env.{k}"), v.clone());
+    }
+    // A unit whose condition does not hold is skipped by systemd however it
+    // is enabled: rc-local.service runs only if /etc/rc.local is executable,
+    // quotaon.service only if /sbin/quotaon exists. Evaluated here the way
+    // systemd evaluates them — `|` marks a triggering condition and `!`
+    // negates — so an absent target the unit itself tests for is not an
+    // orphan.
+    let mut fails = Vec::new();
+    for (key, raw) in &f.conditions {
+        let mut spec = raw.as_slice();
+        while spec.first() == Some(&b'|') {
+            spec = &spec[1..];
+        }
+        let negate = spec.first() == Some(&b'!');
+        let path = PathBuf::from(OsString::from_vec(if negate { spec[1..].to_vec() } else { spec.to_vec() }));
+        let test = key.trim_start_matches("Condition").trim_start_matches("Assert");
+        let holds = match test {
+            "PathExists" => cx.root.stat_follow(&path).is_ok(),
+            "PathIsDirectory" => cx.root.stat_follow(&path).is_ok_and(|m| m.is_dir),
+            "PathIsSymbolicLink" => cx.root.stat(&path).is_ok_and(|m| m.is_symlink),
+            "FileNotEmpty" => cx.root.stat_follow(&path).is_ok_and(|m| m.is_file && m.size > 0),
+            "FileIsExecutable" => cx.root.stat_follow(&path).is_ok_and(|m| m.is_file && m.mode & 0o111 != 0),
+            _ => continue,
+        };
+        if holds == negate {
+            fails.push(format!("{key}={}", String::from_utf8_lossy(raw)));
+        }
+    }
+    if !fails.is_empty() {
+        e.note("condition_fails", fails.join("; "));
+        e.note("not_run", format!("a condition of the unit does not hold: {}", fails[0]));
     }
     for (i, spec) in f.env_files.iter().enumerate() {
         note_bytes(e, &indexed("env_file", i), spec);
@@ -1378,6 +1426,25 @@ mod tests {
     }
 
     const VENDOR: &[u8] = b"[Unit]\nDescription=v\n[Service]\nExecStart=/usr/sbin/sshd -D\n[Install]\nWantedBy=multi-user.target\n";
+
+    #[test]
+    fn a_unit_conditioned_on_its_own_absent_target_says_so() {
+        let dir = tree("conditions");
+        write(&dir, "usr/lib/systemd/system/quotaon.service", b"[Unit]\nConditionPathExists=/sbin/quotaon\n[Service]\nExecStart=/sbin/quotaon -aug\n");
+        write(&dir, "usr/lib/systemd/system/rc-local.service", b"[Unit]\nConditionFileIsExecutable=/etc/rc.local\n[Service]\nExecStart=/etc/rc.local start\n");
+        write(&dir, "etc/rc.local", b"#!/bin/sh\n");
+        write(&dir, "usr/lib/systemd/system/held.service", b"[Unit]\nConditionPathExists=|!/etc/absent\nConditionPathIsDirectory=/etc\nAssertPathExists=/etc/rc.local\n[Service]\nExecStart=/opt/held\n");
+        write(&dir, "usr/lib/systemd/system/reset.service", b"[Unit]\nConditionPathExists=/nowhere\nConditionPathExists=\n[Service]\nExecStart=/opt/reset\n");
+        let s = scan(&dir);
+        let quotaon = one(&s, "quotaon.service");
+        assert_eq!(quotaon.raw["condition_fails"], "ConditionPathExists=/sbin/quotaon");
+        assert!(quotaon.raw["not_run"].starts_with("a condition of the unit does not hold"));
+        let rc_local = one(&s, "rc-local.service");
+        assert_eq!(rc_local.raw["condition_fails"], "ConditionFileIsExecutable=/etc/rc.local", "present but not executable");
+        assert!(!one(&s, "held.service").raw.contains_key("condition_fails"), "a negated absent path, a directory and a present file all hold");
+        assert!(!one(&s, "reset.service").raw.contains_key("condition_fails"), "an empty assignment clears the list");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn sleep_and_shutdown_hooks_run_as_systemd_runs_them() {

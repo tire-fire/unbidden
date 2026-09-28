@@ -240,7 +240,8 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
         if entry.raw.contains_key("target_unverifiable") {
             continue;
         }
-        let Some(command) = &entry.command else { continue };
+        let Some(command) = entry.command.clone() else { continue };
+        let command = command.as_slice();
         let lines = commands(&String::from_utf8_lossy(command), 0);
         let Some(first) = lines.first().and_then(|c| c.first()) else { continue };
         // systemd's ExecStart= prefixes.
@@ -273,6 +274,9 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
                     entry.note("target_wrapped_by", run.by.join(" "));
                 }
                 entry.target_path = run.program.as_deref().and_then(|p| program_path(root, entry.kind, p));
+                if let Some(how) = run.program.as_deref().and_then(|p| guarded_by_test(command, p.as_bytes())) {
+                    entry.note("guarded_by_test", how);
+                }
             }
             _ => {
                 entry.note("runs_commands", runs.len().to_string());
@@ -304,6 +308,9 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
                     }
                     e.note("chain", "command line");
                     e.note("declared_by_entry", &entry.id);
+                    if let Some(how) = run.program.as_deref().and_then(|p| guarded_by_test(command, p.as_bytes())) {
+                        e.note("guarded_by_test", how);
+                    }
                     out.push(e);
                     listed += 1;
                 }
@@ -696,7 +703,8 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
     // not — which is the whole shape of a hijacked ExecStart.
     if let Some(target) = entry.target_path.clone() {
         let target_rel = root.rel(&target);
-        if target_rel != source_rel {
+        let guarded = entry.raw.get("target_provenance").is_some_and(|v| v.starts_with("absent, guarded"));
+        if target_rel != source_rel && !guarded {
             let verdict = answers
                 .get(&target_rel)
                 .cloned()
@@ -807,7 +815,18 @@ fn apply_target(root: &Root, entry: &mut Entry) {
             }
             let rel = root.rel(target);
             if !root.exists(&rel) {
-                entry.flag(Flag::TargetMissing);
+                // Absent, but tested for before it would run: a script's
+                // `[ -x ]` around it, or the unit's own Condition on it.
+                // The script or unit is written for a host without it.
+                let guard = entry.raw.get("guarded_by_test").cloned().or_else(|| {
+                    entry.raw.get("condition_fails")?.split("; ").find(|c| {
+                        c.split_once('=').is_some_and(|(_, v)| root.rel(Path::new(v.trim_start_matches(['|', '!']))) == rel)
+                    }).map(|c| c.to_string())
+                });
+                match guard {
+                    Some(how) => entry.note("target_provenance", format!("absent, guarded by {how}")),
+                    None => entry.flag(Flag::TargetMissing),
+                }
             }
             rel
         }
@@ -1529,6 +1548,9 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
             e.note("chain", via);
             e.note("chain_from", root.abs(&script).to_string_lossy());
             e.note("declared_by_entry", &carrier.id);
+            if let Some(how) = guarded_by_test(&head, e.command.as_deref().unwrap_or(b"")) {
+                e.note("guarded_by_test", how);
+            }
             out.push(e);
         }
     }
@@ -1634,12 +1656,60 @@ fn handed_off(head: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
             continue;
         };
         let Some(word) = words.next() else { continue };
+        // Perl writes `exec "/usr/bin/x", @ARGV;` — the quotes and the list
+        // punctuation are the language's, not the path's.
         let word: Vec<u8> = word.iter().copied().filter(|b| *b != b'"' && *b != b'\'').collect();
+        let end = word.iter().rposition(|b| *b != b',' && *b != b';').map_or(0, |i| i + 1);
+        let word = word[..end].to_vec();
         if word.first() == Some(&b'/') && !word.contains(&b'$') {
             out.push((via, word));
         }
     }
     out
+}
+
+/// How `text` tests for `path` before running it, if it does: a shell or
+/// perl file test (`[ -x /bin/plymouth ] && /bin/plymouth`, `exec "/x"
+/// if -x "/x"`), `command -v`, `which` or `type`, or Python's
+/// `os.path.exists`, `os.path.isfile`, `os.access` and `shutil.which`. A
+/// program a script runs only after finding it is not an orphan when it
+/// is absent; the script is written for hosts without it.
+fn guarded_by_test(text: &[u8], path: &[u8]) -> Option<String> {
+    const TESTS: [&str; 5] = ["-x", "-e", "-f", "-s", "-r"];
+    const CALLS: [&str; 6] = ["command -v", "which", "type", "os.path.exists(", "os.path.isfile(", "os.access("];
+    const PY_CALLS: [&str; 1] = ["shutil.which("];
+    if path.is_empty() {
+        return None;
+    }
+    let mut from = 0;
+    while let Some(i) = text[from..].windows(path.len()).position(|w| w == path) {
+        let at = from + i;
+        from = at + 1;
+        // The path must end where a word ends.
+        if text.get(at + path.len()).is_some_and(|b| !b.is_ascii_whitespace() && !b"\"')];&|".contains(b)) {
+            continue;
+        }
+        let before = String::from_utf8_lossy(&text[..at]).into_owned();
+        let before = before.trim_end_matches(['"', '\'']).trim_end();
+        for t in TESTS {
+            let ok = before.ends_with(t)
+                && before[..before.len() - t.len()].ends_with(|c: char| c.is_whitespace() || c == '[' || c == '(');
+            if ok {
+                return Some(format!("{t} test"));
+            }
+        }
+        let before = before.trim_end_matches('(').trim_end();
+        for c in CALLS.iter().chain(PY_CALLS.iter()) {
+            let c = c.trim_end_matches('(');
+            if before.ends_with(c) && before[..before.len() - c.len()].ends_with(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '.') {
+                return Some(c.to_string());
+            }
+            if before.ends_with(c) && before.len() == c.len() {
+                return Some(c.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// A synthesised preload entry is built after provenance has run, so it needs
@@ -2161,6 +2231,64 @@ mod tests {
         assert!(plain.raw.is_empty() && more.is_empty());
         let (elsewhere, _) = run("env evil", Some("usr/lib/security/pam_exec.so"));
         assert_eq!(elsewhere.target_path, Some(dir.join("usr/lib/security/pam_exec.so")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_program_a_script_tests_for_before_running_is_not_an_orphan() {
+        let dir = std::env::temp_dir().join(format!("unbidden-guarded-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["etc/cron.d", "usr/share/u", "usr/sbin", "usr/bin", "opt"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        // unattended-upgrade-shutdown's shape: a splash program run only
+        // where it exists; and a program run regardless.
+        std::fs::write(
+            dir.join("usr/share/u/shutdown"),
+            "#!/usr/bin/python3\nimport os, subprocess\nif os.path.exists(\"/sbin/usplash_write\"):\n    subprocess.call([\"/sbin/usplash_write\", \"TEXT\", msg])\nsubprocess.call([\"/opt/unguarded\"])\n",
+        )
+        .unwrap();
+        // Debian's dpkg-preconfigure: perl handing off to cdebconf's if it is there.
+        std::fs::write(
+            dir.join("usr/sbin/dpkg-preconfigure"),
+            "#!/usr/bin/perl -w\nexec \"/usr/lib/cdebconf/dpkg-preconfigure\", @ARGV if -x \"/usr/lib/cdebconf/dpkg-preconfigure\";\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("usr/bin/python3"), b"py").unwrap();
+        std::fs::write(dir.join("usr/bin/perl"), b"pl").unwrap();
+        std::fs::write(
+            dir.join("etc/cron.d/jobs"),
+            b"* * * * * root /usr/share/u/shutdown\n* * * * * root /usr/sbin/dpkg-preconfigure --apt\n* * * * * root [ -x /opt/tool ] && /opt/tool --run\n* * * * * root [ -x /opt/tool ] && /opt/tool --run; /opt/other\n",
+        )
+        .unwrap();
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(crate::collect::cron::Cron)];
+        let mut scan = scan::run(&root, &Options { deep: false }, &collectors);
+        enrich(&root, &mut scan);
+        let by_name = |n: &str| {
+            scan.entries
+                .iter()
+                .find(|e| e.name == n)
+                .unwrap_or_else(|| panic!("no entry named {n}: {:?}", scan.entries.iter().map(|e| &e.name).collect::<Vec<_>>()))
+        };
+
+        let splash = by_name("/sbin/usplash_write");
+        assert_eq!(splash.raw["guarded_by_test"], "os.path.exists");
+        assert!(!splash.has_flag(Flag::TargetMissing));
+        assert_eq!(splash.raw["target_provenance"], "absent, guarded by os.path.exists");
+        assert!(!splash.has_flag(Flag::Unpackaged), "an absent guarded program is not an unpackaged one");
+        assert!(by_name("/opt/unguarded").has_flag(Flag::TargetMissing));
+
+        let cdebconf = by_name("/usr/lib/cdebconf/dpkg-preconfigure");
+        assert_eq!(cdebconf.raw["guarded_by_test"], "-x test");
+        assert!(!cdebconf.has_flag(Flag::TargetMissing));
+
+        let tool = scan.entries.iter().find(|e| e.command.as_deref() == Some(b"[ -x /opt/tool ] && /opt/tool --run".as_slice())).unwrap();
+        assert_eq!(tool.raw["guarded_by_test"], "-x test", "shell text guards its own single program");
+        assert!(!tool.has_flag(Flag::TargetMissing));
+        let other = scan.entries.iter().find(|e| e.name == "/opt/other").unwrap();
+        assert!(other.has_flag(Flag::TargetMissing), "the unguarded program in the same line still is");
+        assert!(scan.entries.iter().any(|e| e.name == "/opt/tool" && e.raw.get("guarded_by_test").is_some()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
