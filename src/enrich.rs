@@ -603,13 +603,16 @@ fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
     out
 }
 
-/// A link whose own verdict says nothing useful is judged by the file it
-/// leads to, and the entry says so. That covers two ordinary cases: a link no
-/// package owns (/usr/bin/editor -> /etc/alternatives/editor ->
-/// /usr/bin/vim.basic is vim), and a packaged link dpkg cannot verify because
-/// it records no digest for links at all (/usr/bin/python3 -> python3.10,
-/// which another package ships). The same links pointed at /tmp end at an
-/// unpackaged file, and that is the verdict that comes back.
+/// A link is judged by the file it leads to, and the entry says so: what
+/// runs is the file, whoever owns the link. That covers a link no package
+/// owns (/usr/bin/editor -> /etc/alternatives/editor -> /usr/bin/vim.basic
+/// is vim), a packaged link dpkg can vouch for only by its change time
+/// (/usr/bin/python3 -> python3.10, which another package ships, and which
+/// may have been trojaned behind an untouched link), and the same links
+/// pointed at /tmp, which end at an unpackaged file. Two things keep the
+/// link's own verdict: a link that was itself changed since its package
+/// installed it, which is the finding, and a link to a device — a unit
+/// masked to /dev/null — which leads to nothing that runs.
 fn through_link(
     root: &Root,
     entry: &mut Entry,
@@ -618,14 +621,17 @@ fn through_link(
     answers: &provenance::Answers,
     note: &str,
 ) -> Provenance {
-    let uninformative = matches!(
+    let changed = matches!(
         verdict,
-        Provenance::Unpackaged | Provenance::Packaged { integrity: Integrity::Unknown, .. }
+        Provenance::Packaged { integrity: Integrity::Modified | Integrity::ModeModified | Integrity::ConffileModified, .. }
     );
-    if !uninformative {
+    if changed {
         return verdict;
     }
     let Some(end) = link_end(root, rel) else { return verdict };
+    if !root.stat_follow(&end).is_ok_and(|m| m.is_file) {
+        return verdict;
+    }
     match answers.get(&end) {
         Some(v) => {
             entry.note(note, root.abs(&end).to_string_lossy());
@@ -1313,7 +1319,7 @@ fn setuid_changed_after_install(root: &Root, e: &mut Entry) {
     let Some(list) = list else { return };
     let Ok(listed) = root.stat(Path::new(INFO).join(&list)) else { return };
     let (Some(changed), Some(installed)) = (file.ctime, listed.ctime) else { return };
-    let Some(after) = crate::collect::pkg::changed_after_install(changed, installed) else { return };
+    let Some(after) = crate::provenance::dpkg::changed_after_install(changed, installed) else { return };
     let path = format!("/{}", rel.display());
     let overridden = root
         .read_capped("var/lib/dpkg/statoverride", 1 << 20)

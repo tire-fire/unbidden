@@ -560,13 +560,6 @@ const MAINTAINER_SCRIPTS: &[&str] = &["preinst", "postinst", "prerm", "postrm"];
 /// §8 suppresses a packaged, intact script by default, and a script that is
 /// *not* packaged or not intact in this directory is one of the loudest
 /// findings the tool can produce. Filtering here would delete that signal.
-/// How long after a package's file list is written its maintainer scripts
-/// may still be landing. dpkg writes the `.list` and then installs the new
-/// control files in the same unpack, moments apart; a restore or an image
-/// layer extracted in bulk spreads them by seconds. A script whose inode
-/// changed later than this was changed after its package was installed.
-pub(crate) const INSTALL_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
-
 /// No digest exists for a maintainer script, so its contents cannot be
 /// checked — but when it changed can be. dpkg writes `<pkg>.list` and the
 /// package's scripts in one unpack, and an inode's change time cannot be set
@@ -589,9 +582,7 @@ fn note_changed_after_install(cx: &Ctx, e: &mut Entry, rel: &Path, stem: &[u8]) 
     }
 }
 
-pub(crate) fn changed_after_install(script: std::time::SystemTime, list: std::time::SystemTime) -> Option<std::time::Duration> {
-    script.duration_since(list).ok().filter(|after| *after > INSTALL_WINDOW)
-}
+pub(crate) use crate::provenance::dpkg::changed_after_install;
 
 fn dpkg_scripts(cx: &mut Ctx) -> Vec<Entry> {
     let listing = cx.dir(DPKG_INFO);
@@ -1795,7 +1786,7 @@ mod tests {
         // dpkg writes the list and then the scripts, moments apart.
         assert_eq!(changed_after_install(list + Duration::from_secs(3), list), None);
         // A layer extracted in bulk, or a restore, spreads them a little.
-        assert_eq!(changed_after_install(list + INSTALL_WINDOW, list), None);
+        assert_eq!(changed_after_install(list + crate::provenance::dpkg::INSTALL_WINDOW, list), None);
         // Removal rewrites the list and leaves the postrm older than it.
         assert_eq!(changed_after_install(list - Duration::from_secs(86_400), list), None);
         // Edited or planted a day later: dpkg did not write that.
