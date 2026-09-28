@@ -23,32 +23,63 @@ impl Collector for Cron {
     fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
         let mut out = Vec::new();
         let mut seen = Vec::new();
+        let flavour = flavour(cx);
 
+        let system = out.len();
         crontab(cx, Path::new("etc/crontab"), Layout::SystemWide, &mut out);
         for ent in cx.dir("etc/cron.d") {
             let rel = Path::new("etc/cron.d").join(&ent.name);
             crontab(cx, &rel, Layout::SystemWide, &mut out);
+        }
+        if flavour == Flavour::BusyBox {
+            // BusyBox's crond opens its crontab directory and nothing else;
+            // a system crontab on such a host is a file no daemon reads.
+            for e in &mut out[system..] {
+                if e.enabled == Enablement::Enabled {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", "BusyBox crond reads only its crontab directory");
+                }
+            }
         }
 
         for period in ["hourly", "daily", "weekly", "monthly"] {
             run_parts(cx, period, &mut out);
         }
 
-        for dir in ["var/spool/cron", "var/spool/cron/crontabs"] {
-            if !first_visit(cx, dir, &mut seen) {
-                continue;
-            }
-            for ent in cx.dir(dir) {
-                // The crontabs/ and atjobs/ spools live inside var/spool/cron.
-                if ent.is_dir {
-                    continue;
+        match flavour {
+            Flavour::Vixie => {
+                for dir in ["var/spool/cron", "var/spool/cron/crontabs"] {
+                    if !first_visit(cx, dir, &mut seen) {
+                        continue;
+                    }
+                    for ent in cx.dir(dir) {
+                        // The crontabs/ and atjobs/ spools live inside var/spool/cron.
+                        if ent.is_dir {
+                            continue;
+                        }
+                        let rel = Path::new(dir).join(&ent.name);
+                        let user = ent.name.to_string_lossy().into_owned();
+                        crontab(cx, &rel, Layout::ForUser(&user), &mut out);
+                    }
                 }
-                let rel = Path::new(dir).join(&ent.name);
-                let user = ent.name.to_string_lossy().into_owned();
-                crontab(cx, &rel, Layout::ForUser(&user), &mut out);
+            }
+            Flavour::BusyBox => {
+                for dir in busybox_crontab_dirs(cx) {
+                    if !first_visit(cx, &dir, &mut seen) {
+                        continue;
+                    }
+                    let mut names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
+                    names.sort();
+                    for name in names {
+                        let rel = Path::new(&dir).join(&name);
+                        let user = name.to_string_lossy().into_owned();
+                        busybox_crontab(cx, &rel, &user, &mut out);
+                    }
+                }
             }
         }
 
+        periodic(cx, &mut out);
         anacrontab(cx, &mut out);
 
         for dir in ["var/spool/cron/atjobs", "var/spool/at"] {
@@ -66,6 +97,241 @@ impl Collector for Cron {
         }
 
         out
+    }
+}
+
+/// Which cron a host has, from what its crond is. BusyBox's reads one
+/// directory by its own rule; everything else supported reads the Vixie
+/// layout: cron on Debian, cronie on Fedora.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Flavour {
+    Vixie,
+    BusyBox,
+}
+
+/// The daemon binaries, in the order a host would have them: /usr/sbin/crond
+/// is BusyBox's link on Alpine and cronie's on Fedora, /usr/sbin/cron is
+/// Debian's. Read whole rather than through the collector's capped reads: a
+/// binary is not configuration, and a read of it that hit its cap is not a
+/// limited read of anything the operator should hear about.
+fn flavour(cx: &mut Ctx) -> Flavour {
+    for p in ["usr/sbin/crond", "sbin/crond", "usr/sbin/cron", "usr/bin/crond"] {
+        let Ok(resolved) = cx.root.resolve(Path::new(p)) else { continue };
+        let Ok((bytes, _)) = cx.root.read_capped(&resolved, 16 << 20) else { continue };
+        return if bytes.windows(7).any(|w| w == b"BusyBox") { Flavour::BusyBox } else { Flavour::Vixie };
+    }
+    Flavour::Vixie
+}
+
+/// BusyBox crond's crontab directory: /var/spool/cron/crontabs unless its
+/// service passes `-c`, which Alpine's does through CRON_OPTS in
+/// /etc/conf.d/crond (to /etc/crontabs, the same directory by another name;
+/// the first spelling read is the one apk records).
+fn busybox_crontab_dirs(cx: &mut Ctx) -> Vec<String> {
+    let mut dirs = Vec::new();
+    if let Some(bytes) = cx.read("etc/conf.d/crond") {
+        for line in bytes.split(|b| *b == b'\n') {
+            let Some(value) = trim(line).strip_prefix(b"CRON_OPTS=") else { continue };
+            let words: Vec<&[u8]> = unquote(value).split(|b| b.is_ascii_whitespace()).filter(|w| !w.is_empty()).collect();
+            for (i, w) in words.iter().enumerate() {
+                let dir = match w.strip_prefix(b"-c") {
+                    Some(rest) if !rest.is_empty() => Some(rest),
+                    Some(_) => words.get(i + 1).copied(),
+                    None => None,
+                };
+                if let Some(d) = dir {
+                    dirs.push(String::from_utf8_lossy(d).trim_start_matches('/').to_string());
+                }
+            }
+        }
+    }
+    dirs.push("var/spool/cron/crontabs".to_string());
+    dirs
+}
+
+/// One user's crontab as BusyBox crond loads it (crond.c). The file is read
+/// only if it is named for an account in passwd and owned by root; root's
+/// first 65534 lines and anyone else's first 255, comments and blanks not
+/// counted. Lines come through config_read: a trailing backslash joins the
+/// next line, leading blanks go, a line starting with # is skipped, a #
+/// anywhere else ends the line, and runs of blanks split up to six tokens
+/// with the sixth taking the rest. `MAILTO=`, `SHELL=` and `PATH=` on the
+/// first token are settings, the value being that token alone; an @ line
+/// names one of crond's seven periods or reboot, and its command is the
+/// original line after its first word, # and all; anything else needs six
+/// tokens or is skipped. The command goes to `$SHELL -c`; there is no %.
+fn busybox_crontab(cx: &mut Ctx, rel: &Path, user: &str, out: &mut Vec<Entry>) {
+    if is_symlink(cx, rel) {
+        out.push(unparsed_link(cx, Kind::Cron, rel, Some(user.to_string())));
+        return;
+    }
+    let Some(bytes) = cx.read(rel) else { return };
+    let crlf = has_crlf(&bytes);
+    let not_run: Option<String> = if !cx.users.iter().any(|u| u.name == user && u.source == "passwd") {
+        Some(format!("crond ignores a crontab named for no account ({user})"))
+    } else {
+        match cx.root.stat(rel) {
+            Ok(m) if m.uid != 0 => Some(format!("crond loads only files owned by root; this one is owned by uid {}", m.uid)),
+            _ => None,
+        }
+    };
+    let limit = if user == "root" { 65534 } else { 255 };
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    let mut used = BTreeMap::new();
+    let mut loaded = 0usize;
+    for line in super::inittab::continued_lines(&bytes) {
+        let Some((tokens, original)) = busybox_tokens(&line) else { continue };
+        loaded += 1;
+        let past_limit = loaded > limit;
+        for key in ["MAILTO", "SHELL", "PATH"] {
+            if let Some(v) = tokens[0].strip_prefix(format!("{key}=").as_bytes()) {
+                env.insert(key.to_string(), String::from_utf8_lossy(v).into_owned());
+            }
+        }
+        if [b"MAILTO=".as_slice(), b"SHELL=", b"PATH="].iter().any(|k| tokens[0].starts_with(k)) {
+            continue;
+        }
+        let mut e = if tokens[0][0] == b'@' {
+            let command = take_fields(original, 1).map(|(_, rest)| trim_start(rest)).unwrap_or(b"");
+            match (shortcut(tokens[0]), tokens.len() >= 2) {
+                (Some(trigger), true) => job(cx, rel, user, tokens[0], command, trigger, &mut used),
+                _ => {
+                    let mut e = malformed(cx, rel, original, Some(user.to_string()), &mut used);
+                    e.note("parse_error", "crond knows @reboot, @yearly, @annually, @monthly, @weekly, @daily, @midnight and @hourly, each with a command");
+                    e
+                }
+            }
+        } else if tokens.len() < 6 {
+            let mut e = malformed(cx, rel, original, Some(user.to_string()), &mut used);
+            e.note("parse_error", "fewer than six fields; crond skips the line");
+            e
+        } else {
+            let schedule = tokens[..5].join(&b' ');
+            let mut e = job(cx, rel, user, &schedule, tokens[5], Trigger::Schedule, &mut used);
+            if let Some(bad) = odd_field(&schedule) {
+                e.note("schedule_suspect", String::from_utf8_lossy(bad));
+            }
+            e
+        };
+        for (k, v) in &env {
+            e.raw.entry(format!("env.{k}")).or_insert_with(|| v.clone());
+        }
+        e.note("crond", "busybox");
+        if crlf {
+            e.note("line_ending", "crlf");
+        }
+        if let Some(why) = &not_run {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", why.clone());
+        } else if past_limit {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", format!("past crond's limit of {limit} lines for this file"));
+        }
+        out.push(e);
+    }
+}
+
+/// A job line as an entry, named from its schedule and command like every
+/// other crontab line.
+fn job(cx: &mut Ctx, rel: &Path, user: &str, schedule: &[u8], command: &[u8], trigger: Trigger, used: &mut BTreeMap<String, u32>) -> Entry {
+    let (name, dup) = unique(used, job_name(schedule, command));
+    let mut e = cx.entry(Kind::Cron, rel, &name);
+    if dup > 1 {
+        e.note("duplicate_line", dup.to_string());
+    }
+    e.trigger = trigger;
+    e.enabled = Enablement::Enabled;
+    e.principal = Some(user.to_string());
+    e.note("schedule", String::from_utf8_lossy(schedule));
+    set_command(&mut e, command);
+    e.target_path = command_target(command, &mut e);
+    e
+}
+
+/// config_read with `# \t`: the tokens of one logical line and the line as
+/// crond keeps a copy of it, or nothing for a blank or comment line.
+fn busybox_tokens(line: &[u8]) -> Option<(Vec<&[u8]>, &[u8])> {
+    let blank = |b: &u8| *b == b' ' || *b == b'\t';
+    let start = line.iter().position(|b| !blank(b)).unwrap_or(line.len());
+    let line = &line[start..];
+    if line.is_empty() || line[0] == b'#' {
+        return None;
+    }
+    let mut tokens: Vec<&[u8]> = Vec::new();
+    let mut rest = line;
+    loop {
+        if tokens.len() < 5 {
+            let i = rest.iter().position(|b| *b == b'#' || blank(b)).unwrap_or(rest.len());
+            tokens.push(&rest[..i]);
+            if i < rest.len() && rest[i] == b'#' {
+                rest = &[];
+            } else {
+                rest = &rest[i.min(rest.len())..];
+                let skip = rest.iter().position(|b| !blank(b)).unwrap_or(rest.len());
+                rest = &rest[skip..];
+            }
+        } else {
+            let i = rest.iter().position(|b| *b == b'#').unwrap_or(rest.len());
+            let end = rest[..i].iter().rposition(|b| !blank(b)).map_or(0, |j| j + 1);
+            tokens.push(&rest[..end]);
+            rest = &[];
+        }
+        if rest.is_empty() || rest[0] == b'#' || tokens.len() >= 6 {
+            break;
+        }
+    }
+    Some((tokens, line))
+}
+
+/// /etc/periodic/{15min,hourly,daily,weekly,monthly}: Alpine's run-parts
+/// directories, which crond runs only because root's packaged crontab says
+/// `run-parts /etc/periodic/<period>` on that schedule. Each script is a
+/// cron entry, on when it is executable, run-parts' rule selects it, and a
+/// loaded crontab line names its directory.
+fn periodic(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let flavour = super::run_parts_flavour(cx);
+    for period in ["15min", "hourly", "daily", "weekly", "monthly"] {
+        let dir = format!("etc/periodic/{period}");
+        let ents = cx.dir(&dir);
+        if ents.is_empty() {
+            continue;
+        }
+        // The directory as a crontab line names it: by its path on the host,
+        // whatever root the scan reads it through.
+        let named = format!("/{dir}");
+        let runner = out.iter().find(|e| {
+            e.kind == Kind::Cron
+                && e.enabled == Enablement::Enabled
+                && e.command.as_deref().is_some_and(|c| {
+                    c.windows(9).any(|w| w == b"run-parts") && c.windows(named.len()).any(|w| w == named.as_bytes())
+                })
+        });
+        let runner = runner.map(|e| e.source.display().to_string());
+        for ent in ents {
+            if ent.is_dir {
+                continue;
+            }
+            let rel = Path::new(&dir).join(&ent.name);
+            let mut e = cx.entry(Kind::Cron, &rel, ent.name.to_string_lossy());
+            name_from_os(&mut e, &ent.name);
+            e.trigger = Trigger::Schedule;
+            e.principal = Some("root".to_string());
+            e.target_path = Some(cx.root.abs(&rel));
+            e.note("schedule", format!("@{period}"));
+            e.enabled = if e.mode & 0o111 != 0 { Enablement::Enabled } else { Enablement::Disabled };
+            if let Some(why) = super::run_parts_skips(cx, flavour, Path::new(&dir), ent.name.as_bytes()) {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", why);
+            }
+            match &runner {
+                Some(src) => e.note("run_by", format!("a crontab line in {src}")),
+                None => {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", "no loaded crontab line runs run-parts on this directory");
+                }
+            }
+            out.push(e);
+        }
     }
 }
 
@@ -662,6 +928,109 @@ mod tests {
 
     fn named<'a>(s: &'a Scan, name: &str) -> &'a Entry {
         s.entries.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no entry named {name:?}"))
+    }
+
+    /// An Alpine-shaped host: BusyBox behind crond and run-parts.
+    fn busybox_host(dir: &Path) {
+        put(dir, "bin/busybox", b"\x7fELF BusyBox v1.37.0 multi-call binary");
+        for at in ["usr/sbin/crond", "bin/run-parts"] {
+            std::fs::create_dir_all(dir.join(at).parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink("/bin/busybox", dir.join(at)).unwrap();
+        }
+        put(dir, "etc/passwd", b"root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n");
+    }
+
+    #[test]
+    fn busybox_crond_reads_its_directory_by_config_reads_rule() {
+        let dir = tree("busybox");
+        busybox_host(&dir);
+        put(&dir, "etc/conf.d/crond", b"# options\nCRON_OPTS=\"-c /etc/crontabs\"\n");
+        put(
+            &dir,
+            "etc/crontabs/root",
+            b"# root's\nMAILTO=admin@x extra\nPATH=/usr/bin:/bin\n*/15 * * * *   run-parts /etc/periodic/15min # hi\n@reboot /opt/agent --x # keep\n@bogus /opt/x\n* * * * *\n0 2 * * * /opt/a \\\n  --b\n0 3 * * * echo a%b\n",
+        );
+        put(&dir, "etc/crontabs/alice", b"1 2 3 4 5 /opt/alice\n");
+        put(&dir, "etc/crontabs/nobodyhere", b"1 2 3 4 5 /opt/ghost\n");
+        put(&dir, "etc/crontab", b"1 1 * * * root /opt/system\n");
+        put(&dir, "etc/cron.d/job", b"1 1 * * * root /opt/cron-d\n");
+        for f in ["etc/periodic/15min/job", "etc/periodic/15min/backup.sh", "etc/periodic/15min/.hidden", "etc/periodic/daily/orphan"] {
+            put(&dir, f, b"#!/bin/sh\n");
+            chmod(&dir, f, 0o755);
+        }
+        let s = scan(&dir);
+        assert!(matches!(s.header.collectors[0].status, Status::Complete), "{:?}", s.header.collectors[0].status);
+
+        let parts = find(&s, "run-parts /etc/periodic/15min");
+        assert_eq!(text(parts), "run-parts /etc/periodic/15min", "a # ends the line; blanks before it are trimmed");
+        assert_eq!(parts.raw["schedule"], "*/15 * * * *");
+        assert_eq!(parts.raw["crond"], "busybox");
+        assert_eq!(parts.raw["env.PATH"], "/usr/bin:/bin");
+        assert_eq!(parts.raw["env.MAILTO"], "admin@x", "a setting is its first token alone");
+        assert_eq!(parts.principal.as_deref(), Some("root"));
+        // The fixture is owned by whoever runs the tests, and crond loads
+        // only root's files.
+        assert_eq!(parts.enabled, Enablement::Disabled);
+        assert!(parts.raw["not_run"].starts_with("crond loads only files owned by root"), "{}", parts.raw["not_run"]);
+
+        let agent = find(&s, "/opt/agent");
+        assert_eq!((text(agent).as_str(), agent.trigger), ("/opt/agent --x # keep", Trigger::Boot), "an @ line keeps its # tail");
+        assert!(find(&s, "@bogus").raw["parse_error"].starts_with("crond knows @reboot"));
+        assert_eq!(find(&s, "* * * * *").raw["parse_error"], "fewer than six fields; crond skips the line");
+        assert_eq!(text(find(&s, "--b")), "/opt/a   --b", "a backslash joins the next line");
+        let percent = find(&s, "echo a%b");
+        assert_eq!(text(percent), "echo a%b");
+        assert!(!percent.raw.contains_key("stdin"), "BusyBox has no %");
+
+        assert_eq!(find(&s, "/opt/alice").principal.as_deref(), Some("alice"));
+        assert_eq!(find(&s, "/opt/ghost").raw["not_run"], "crond ignores a crontab named for no account (nobodyhere)");
+        for planted in ["/opt/system", "/opt/cron-d"] {
+            let e = find(&s, planted);
+            assert_eq!((e.enabled, e.raw["not_run"].as_str()), (Enablement::Disabled, "BusyBox crond reads only its crontab directory"), "{planted}");
+        }
+
+        let job = named(&s, "job");
+        assert_eq!(job.raw["schedule"], "@15min");
+        assert_eq!(job.raw["not_run"], "no loaded crontab line runs run-parts on this directory", "root's line did not load");
+        assert!(!named(&s, "backup.sh").raw["not_run"].contains("names"), "BusyBox's run-parts allows a dot");
+        assert_eq!(named(&s, ".hidden").enabled, Enablement::Disabled);
+        assert_eq!(named(&s, "orphan").enabled, Enablement::Disabled);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn periodic_scripts_run_when_a_loaded_crontab_line_names_them() {
+        let dir = tree("periodic");
+        put(&dir, "etc/crontab", b"*/15 * * * * root run-parts /etc/periodic/15min\n");
+        for f in ["etc/periodic/15min/job", "etc/periodic/15min/backup.sh", "etc/periodic/daily/orphan"] {
+            put(&dir, f, b"#!/bin/sh\n");
+            chmod(&dir, f, 0o755);
+        }
+        let s = scan(&dir);
+        let job = named(&s, "job");
+        assert_eq!(job.enabled, Enablement::Enabled);
+        assert_eq!(job.raw["run_by"], format!("a crontab line in {}", dir.join("etc/crontab").display()));
+        assert_eq!(job.target_path, Some(dir.join("etc/periodic/15min/job")));
+        let backup = named(&s, "backup.sh");
+        assert_eq!((backup.enabled, backup.raw["not_run"].as_str()), (Enablement::Disabled, "run-parts runs only names of letters, digits, _ and -"), "Debian's run-parts here");
+        assert_eq!(named(&s, "orphan").raw["not_run"], "no loaded crontab line runs run-parts on this directory");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn busybox_run_parts_allows_a_dot_after_the_first_character() {
+        let dir = tree("bb-run-parts");
+        busybox_host(&dir);
+        for f in ["etc/cron.daily/backup.sh", "etc/cron.daily/.x", "etc/cron.daily/ok-1_2"] {
+            put(&dir, f, b"#!/bin/sh\n");
+            chmod(&dir, f, 0o755);
+        }
+        let s = scan(&dir);
+        assert_eq!(named(&s, "backup.sh").enabled, Enablement::Enabled);
+        assert_eq!(named(&s, "ok-1_2").enabled, Enablement::Enabled);
+        assert_eq!(named(&s, ".x").raw["not_run"], "run-parts runs only names of letters, digits, _, - and dots after the first character");
+        assert!(s.header.collectors[0].truncated.is_empty(), "reading the binary is not a limited read: {:?}", s.header.collectors[0].truncated);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

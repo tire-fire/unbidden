@@ -159,6 +159,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "busybox_crontab"
+path = "fuzz_targets/busybox_crontab.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dpkg_md5sums"
 path = "fuzz_targets/dpkg_md5sums.rs"
 test = false

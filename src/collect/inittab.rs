@@ -321,8 +321,9 @@ fn sysv(cx: &mut Ctx, init: Init, shown: &str, out: &mut Vec<Entry>) {
 
 // -------------------------------------------------------------- BusyBox ----
 
-/// A line ending in a backslash continues on the next, backslash dropped.
-fn continued_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
+/// A line ending in a backslash continues on the next, backslash dropped:
+/// BusyBox's get_line_with_continuation, which its init and crond share.
+pub(crate) fn continued_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
     let mut out: Vec<Vec<u8>> = Vec::new();
     let mut open = false;
     for line in bytes.split(|b| *b == b'\n') {

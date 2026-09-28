@@ -15,7 +15,8 @@ What it reads, grouped by when each thing runs:
   builds the initramfs (initramfs-tools, dracut, DKMS), cloud-init,
   crypttab keyscripts, display-manager scripts, systemd's sleep and
   shutdown hooks
-- A schedule: cron, anacron, at, systemd timers, logrotate scripts
+- A schedule: cron (Vixie and BusyBox), anacron, at, systemd timers,
+  logrotate scripts
 - Login: shell startup files for bash, zsh, csh, fish and ksh, the X
   session, XDG autostart and the GNOME, MATE and Plasma session files,
   GNOME and Cinnamon extensions, file-manager extensions, browser policy,

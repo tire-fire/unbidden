@@ -102,20 +102,31 @@ pub(crate) fn expand_glob(cx: &mut Ctx, rel: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Which run-parts a host has: debianutils' binary, or the shell script
-/// Fedora's crontabs package installs. They pick scripts by different rules.
+/// Which run-parts a host has: debianutils' binary, the shell script
+/// Fedora's crontabs package installs, or BusyBox's applet. They pick
+/// scripts by different rules.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum RunParts {
     Debian,
     Script,
+    BusyBox,
 }
 
+/// Read whole and directly: a binary is not configuration, and a capped read
+/// of one is not a limited read the operator should hear about.
 pub(crate) fn run_parts_flavour(cx: &mut Ctx) -> RunParts {
-    let head = ["usr/bin/run-parts", "bin/run-parts"].iter().find_map(|p| cx.read_capped(p, 4));
-    match head {
-        Some(h) if h.starts_with(b"#!") => RunParts::Script,
-        _ => RunParts::Debian,
+    for p in ["usr/bin/run-parts", "bin/run-parts"] {
+        let Ok(resolved) = cx.root.resolve(Path::new(p)) else { continue };
+        let Ok((bytes, _)) = cx.root.read_capped(&resolved, 16 << 20) else { continue };
+        if bytes.starts_with(b"#!") {
+            return RunParts::Script;
+        }
+        if bytes.windows(7).any(|w| w == b"BusyBox") {
+            return RunParts::BusyBox;
+        }
+        return RunParts::Debian;
     }
+    RunParts::Debian
 }
 
 /// Why run-parts would not run the file `name` in `dir`, or `None` where it
@@ -123,12 +134,20 @@ pub(crate) fn run_parts_flavour(cx: &mut Ctx) -> RunParts {
 /// only, so `backup.sh` never runs. Fedora's script runs any name but a
 /// dotfile, one ending in `~` or `,`, or `.cfsaved`, `.rpmsave`, `.rpmorig`,
 /// `.rpmnew`, `.swp` or `,v`, and honours `jobs.deny` and `jobs.allow` in the
-/// directory. Both then need the execute bit, checked by the caller.
+/// directory. BusyBox's allows a dot too, anywhere but first, so there
+/// `backup.sh` does run. All three then need the execute bit, checked by
+/// the caller.
 pub(crate) fn run_parts_skips(cx: &mut Ctx, flavour: RunParts, dir: &Path, name: &[u8]) -> Option<&'static str> {
     match flavour {
         RunParts::Debian => {
             let ok = !name.is_empty() && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-');
             (!ok).then_some("run-parts runs only names of letters, digits, _ and -")
+        }
+        RunParts::BusyBox => {
+            let ok = !name.is_empty()
+                && name[0] != b'.'
+                && name.iter().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(b));
+            (!ok).then_some("run-parts runs only names of letters, digits, _, - and dots after the first character")
         }
         RunParts::Script => {
             const SKIP: [&[u8]; 6] = [b".cfsaved", b".rpmsave", b".rpmorig", b".rpmnew", b".swp", b",v"];
