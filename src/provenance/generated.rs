@@ -112,7 +112,43 @@ fn producer(root: &Root, snaps: &Snaps, rel: &Path) -> Option<&'static str> {
     if preset_link(root, rel) {
         return Some("systemd-preset");
     }
+    if postinst_mask(root, rel) {
+        return Some("dpkg-postinst");
+    }
     None
+}
+
+/// A unit masked to /dev/null in a vendor directory by the package's own
+/// postinst rather than shipped in it — screen's does `ln -s /dev/null
+/// /lib/systemd/system/screen-cleanup.service` — is dpkg's doing when a
+/// maintainer script names the unit and the link's inode dates from that
+/// package's install.
+fn postinst_mask(root: &Root, rel: &Path) -> bool {
+    let text = rel.to_string_lossy();
+    let in_vendor_dir = ["usr/lib/systemd/system/", "lib/systemd/system/", "usr/lib/systemd/user/"]
+        .iter()
+        .any(|d| text.strip_prefix(d).is_some_and(|rest| !rest.contains('/')));
+    if !in_vendor_dir || root.read_link(rel).ok().as_deref() != Some(Path::new("/dev/null")) {
+        return false;
+    }
+    let Some(unit) = rel.file_name().map(|n| n.to_string_lossy().into_owned()) else { return false };
+    let Ok(link) = root.stat(rel) else { return false };
+    const INFO: &str = "var/lib/dpkg/info";
+    for ent in root.read_dir_optional(INFO).unwrap_or_default() {
+        let name = ent.name.to_string_lossy();
+        let Some(pkg) = name.strip_suffix(".postinst") else { continue };
+        let Ok((script, _)) = root.read_capped(Path::new(INFO).join(&*name), 1 << 20) else { continue };
+        if !script.windows(unit.len()).any(|w| w == unit.as_bytes()) {
+            continue;
+        }
+        let Ok(list) = root.stat(Path::new(INFO).join(format!("{pkg}.list"))) else { continue };
+        if let (Some(changed), Some(installed)) = (link.ctime, list.ctime) {
+            if super::dpkg::changed_after_install(changed, installed).is_none() && changed >= installed {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// A link `systemctl preset` writes for a template instance — getty@tty1
@@ -252,6 +288,32 @@ fn snap_unit(root: &Root, snaps: &Snaps, rel: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_mask_a_maintainer_script_wrote_at_install_is_dpkgs_doing() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("unbidden-postinst-mask-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["usr/lib/systemd/system", "var/lib/dpkg/info", "etc/systemd/system"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("var/lib/dpkg/info/screen.list"), "/usr/bin/screen\n").unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/screen.postinst"), "#!/bin/sh\nservicefile=/lib/systemd/system/screen-cleanup.service\nln -s /dev/null $servicefile\n").unwrap();
+        let link = |at: &str| std::os::unix::fs::symlink("/dev/null", dir.join(at)).unwrap();
+        link("usr/lib/systemd/system/screen-cleanup.service");
+        link("usr/lib/systemd/system/auditd.service");
+        link("etc/systemd/system/screen-cleanup.service");
+        let root = Root::at(&dir).unwrap();
+        let wanted: BTreeSet<PathBuf> = ["usr/lib/systemd/system/screen-cleanup.service", "usr/lib/systemd/system/auditd.service", "etc/systemd/system/screen-cleanup.service"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        let out = classify(&root, &wanted);
+        assert_eq!(out.get(Path::new("usr/lib/systemd/system/screen-cleanup.service")), Some(&Provenance::GeneratedBy { by: "dpkg-postinst".into() }));
+        assert_eq!(out.get(Path::new("usr/lib/systemd/system/auditd.service")), None, "no maintainer script names it");
+        assert_eq!(out.get(Path::new("etc/systemd/system/screen-cleanup.service")), None, "the administrator's directory is the administrator's");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_preset_written_instance_link_is_the_vendors_doing() {
         use super::*;

@@ -67,8 +67,8 @@
       "enabled": "enabled",
       "flags": [
         "degraded-enablement",
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "b0f8e004396441717f2e1f9266b3c1a16f1618bd4e4192ba6a8e106ac14f23c2",
       "kind": "systemd_unit",
@@ -120,6 +120,7 @@
       "raw": {
         "chain": "shebang",
         "chain_from": "<ROOT>/usr/sbin/sshd",
+        "chain_from_provenance": "unverified",
         "declared_by_entry": "e2444ea235d818967426239368142bc3d5aa66617598334fc2bd7f2e703318ea"
       },
       "source": "<ROOT>/usr/lib/systemd/system/ssh.service",
@@ -220,6 +221,7 @@
       "raw": {
         "chain": "shebang",
         "chain_from": "<ROOT>/usr/local/bin/agent",
+        "chain_from_provenance": "unverified",
         "declared_by_entry": "c5191ce3ff436ee3e673abd33a58e035d00e6d7957266ff86702ba02318b3b0e"
       },
       "source": "<ROOT>/etc/cron.d/agent",
@@ -281,6 +283,7 @@
       "raw": {
         "chain": "shebang",
         "chain_from": "<ROOT>/etc/cron.daily/logrotate",
+        "chain_from_provenance": "unverified",
         "declared_by_entry": "8813dafbf1bdd2b25d05fe382ac851e8e9886ff0577dc0f0955e576183ca31ac"
       },
       "source": "<ROOT>/etc/cron.daily/logrotate",
@@ -323,8 +326,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-unresolvable"
+        "target-unresolvable",
+        "unpackaged"
       ],
       "id": "e1196888a8c6bea193f935aeb5cf4dc52d0801c12699d97ecf5b2f7d3a3090b9",
       "kind": "cron",
@@ -369,6 +372,7 @@
       "raw": {
         "chain": "shebang",
         "chain_from": "<ROOT>/usr/bin/nm-applet",
+        "chain_from_provenance": "unverified",
         "declared_by_entry": "5b7b87fb9c7a4e3814d1d6a2a1615d4ae6318e7fe63ae2f37c795daa79ef25d4"
       },
       "source": "<ROOT>/etc/xdg/autostart/nm-applet.desktop",
@@ -415,8 +419,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "02e8bdb2ddd1eb5ada07cab3f05055fb4a74afdb8cbb0c6e5e07bea66dc49a9f",
       "kind": "xdg_autostart",
@@ -597,8 +601,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "b4acb5c7e6b71672f2beaf1d102a2cc7797dc8cf248f2bbaf5416485557ef8af",
       "kind": "pam",
@@ -633,8 +637,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "646ad5c39af3df78c3cbddf0e11815e7f86cd5ded46923f4d21e39655cca25e7",
       "kind": "udev",
@@ -683,6 +687,7 @@
       "raw": {
         "chain": "shebang",
         "chain_from": "<ROOT>/etc/rc.local",
+        "chain_from_provenance": "unverified",
         "declared_by_entry": "4a26ed564fb2b3a8cbc5667f455680f449f6fba970d129a134b7ef4ecd9f4d13"
       },
       "source": "<ROOT>/etc/rc.local",
@@ -744,6 +749,7 @@
       "raw": {
         "chain": "shebang",
         "chain_from": "<ROOT>/etc/init.d/legacy",
+        "chain_from_provenance": "unverified",
         "declared_by_entry": "e650d94785ef89d40980ea99c87e4c9b850369423f15d89438059099eeb41a9c"
       },
       "source": "<ROOT>/etc/init.d/legacy",
@@ -759,8 +765,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "529166e70fb3754402e64b592b15a0ed85f6576add6785eda95062f05e61cb44",
       "kind": "sysv_init",
@@ -775,6 +781,7 @@
       "raw": {
         "chain": "exec",
         "chain_from": "<ROOT>/etc/init.d/legacy",
+        "chain_from_provenance": "unverified",
         "declared_by_entry": "e650d94785ef89d40980ea99c87e4c9b850369423f15d89438059099eeb41a9c"
       },
       "source": "<ROOT>/etc/init.d/legacy",
@@ -823,9 +830,9 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
+        "target-missing",
         "conffile-modified",
-        "unpackaged",
-        "target-missing"
+        "unpackaged"
       ],
       "id": "9e3555b359a8bf33a6e8974c473f46f0a73625dfb05b91464e21802291797758",
       "kind": "ssh_authorized_key",
@@ -859,8 +866,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "922fb705b1bacab893ac34da76cea026406fb1855eb6356e481ebfd07365f5d1",
       "kind": "ssh_authorized_key",
@@ -895,8 +902,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "1d1bdc79f5c0aa973b4f79aac5c750555e8d69c8ac5d2f505ecdf338e5a35c5f",
       "kind": "sudoers",
@@ -932,8 +939,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-unresolvable"
+        "target-unresolvable",
+        "unpackaged"
       ],
       "id": "6e3e547120e55e238b1812b9e92ef6c69ab59274f2f2728d9259966547a38fdf",
       "kind": "sudoers",
@@ -996,8 +1003,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "781cee4c8126b1767430082afd0c4a6091f034af1b3e6cc1d280670d73ac9c07",
       "kind": "ld_preload",
@@ -1087,8 +1094,8 @@
       "command_utf8": true,
       "enabled": "unknown",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "d7f216406cb8bf8ed2664892a6645245adf0750fcde3812ff407406466d83bba",
       "kind": "kernel_module",
@@ -1118,8 +1125,8 @@
       "command_utf8": true,
       "enabled": "unknown",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "f9b03b48aead6b8365e5f6807d6d8df9b10b4b3bedf9358684d4ee6b4a507713",
       "kind": "kernel_module",
@@ -1286,8 +1293,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "920955e2f81429881daee9991fdb559cc33b50dbbb9c5a2c405dffd4459fa5ea",
       "kind": "polkit_rule",
@@ -1343,8 +1350,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "dcd3478317d36a1ef2a905fff64dbd2d8a82eead22643880d9821c0846be38ff",
       "kind": "inetd_service",

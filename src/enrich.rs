@@ -45,9 +45,12 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
         None => provenance::Answers::new(),
     };
 
+    // The target first: whether it is there, and whether its absence is
+    // guarded, is what the provenance pass needs to know before it takes a
+    // verdict for it.
     per_entry(&mut failed, "provenance and targets", &mut scan.entries, |entry| {
-        apply_provenance(root, entry, &answers);
         apply_target(root, entry);
+        apply_provenance(root, entry, &answers);
         apply_location(root, entry);
     });
 
@@ -668,7 +671,11 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
     // came from, and that file is packaged like any other.
     let about_target = entry.raw.contains_key("declared_by_entry")
         || is_kernel_interface(&root.rel(&entry.source));
-    let subject = about_target.then(|| entry.target_path.clone().map(|t| root.rel(&t))).flatten();
+    // A guarded absent program has no verdict to take: an entry about one
+    // is judged by the file that names it. An unguarded absent one keeps
+    // the orphan's verdict — nobody's file — which is the finding.
+    let guarded = entry.raw.get("target_provenance").is_some_and(|v| v.starts_with("absent, guarded"));
+    let subject = (about_target && !guarded).then(|| entry.target_path.clone().map(|t| root.rel(&t))).flatten();
 
     let source_rel = subject.unwrap_or_else(|| root.rel(&entry.source));
     if is_kernel_interface(&source_rel) {
@@ -701,9 +708,15 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
     // The target is a separate file with a separate verdict, and an entry
     // whose backing file is packaged can still point at something that is
     // not — which is the whole shape of a hijacked ExecStart.
+    // The script a followed program was read out of: vendor text when it is
+    // packaged and intact, and then a program it names and does not find is
+    // the vendor's optional hand-off rather than an orphan.
+    if let Some(from) = entry.raw.get("chain_from").cloned() {
+        let verified = answers.get(&root.rel(Path::new(&from))).is_some_and(Provenance::is_verified);
+        entry.note("chain_from_provenance", if verified { "intact" } else { "unverified" });
+    }
     if let Some(target) = entry.target_path.clone() {
         let target_rel = root.rel(&target);
-        let guarded = entry.raw.get("target_provenance").is_some_and(|v| v.starts_with("absent, guarded"));
         if target_rel != source_rel && !guarded {
             let verdict = answers
                 .get(&target_rel)
@@ -1707,6 +1720,13 @@ fn guarded_by_test(text: &[u8], path: &[u8]) -> Option<String> {
             continue;
         }
         let before = String::from_utf8_lossy(&text[..at]).into_owned();
+        // A hand-off inside an `if` on an environment variable — debconf's
+        // dpkg-preconfigure execs cdebconf's only when DEBCONF_USE_CDEBCONF
+        // is set — runs when a person asks for it, not unbidden.
+        let recent: Vec<&str> = before.lines().rev().take(3).collect();
+        if recent.iter().any(|l| l.contains("if") && ["$ENV{", "getenv(", "os.environ", "os.getenv("].iter().any(|e| l.contains(e))) {
+            return Some("environment variable test".to_string());
+        }
         let before = before.trim_end_matches(['"', '\'']).trim_end();
         for t in TESTS {
             let ok = before.ends_with(t)
@@ -2265,10 +2285,10 @@ mod tests {
             "#!/usr/bin/python3\nimport os, subprocess\nif os.path.exists(\"/sbin/usplash_write\"):\n    subprocess.call([\"/sbin/usplash_write\", \"TEXT\", msg])\nsubprocess.call([\"/opt/unguarded\"])\n",
         )
         .unwrap();
-        // Debian's dpkg-preconfigure: perl handing off to cdebconf's if it is there.
+        // Debian's dpkg-preconfigure: perl handing off to cdebconf's when told to.
         std::fs::write(
             dir.join("usr/sbin/dpkg-preconfigure"),
-            "#!/usr/bin/perl -w\nexec \"/usr/lib/cdebconf/dpkg-preconfigure\", @ARGV if -x \"/usr/lib/cdebconf/dpkg-preconfigure\";\n",
+            "#!/usr/bin/perl -w\nif (exists $ENV{DEBCONF_USE_CDEBCONF} and $ENV{DEBCONF_USE_CDEBCONF} ne '') {\n    exec \"/usr/lib/cdebconf/dpkg-preconfigure\", @ARGV;\n}\n",
         )
         .unwrap();
         std::fs::write(dir.join("usr/bin/python3"), b"py").unwrap();
@@ -2297,8 +2317,9 @@ mod tests {
         assert!(by_name("/opt/unguarded").has_flag(Flag::TargetMissing));
 
         let cdebconf = by_name("/usr/lib/cdebconf/dpkg-preconfigure");
-        assert_eq!(cdebconf.raw["guarded_by_test"], "-x test");
+        assert_eq!(cdebconf.raw["guarded_by_test"], "environment variable test");
         assert!(!cdebconf.has_flag(Flag::TargetMissing));
+        assert!(!cdebconf.has_flag(Flag::Unpackaged), "judged by the file that names it, not by its absence: {:?}", cdebconf.flags);
 
         let tool = scan.entries.iter().find(|e| e.command.as_deref() == Some(b"[ -x /opt/tool ] && /opt/tool --run".as_slice())).unwrap();
         assert_eq!(tool.raw["guarded_by_test"], "-x test", "shell text guards its own single program");
@@ -2341,6 +2362,34 @@ mod tests {
         };
         assert!(!generator("netplan", "/usr/libexec/netplan/generate").has_flag(Flag::NonStandardLocation), "a link into a vendor tree");
         assert!(generator("evil", "/tmp/evil").has_flag(Flag::NonStandardLocation), "a link into /tmp");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_packaged_unit_conditioned_on_its_absent_target_is_quiet_end_to_end() {
+        let dir = std::env::temp_dir().join(format!("unbidden-quotaon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["usr/lib/systemd/system", "var/lib/dpkg/info", "sbin"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let unit = b"[Unit]\nConditionPathExists=/sbin/quotaon\n[Service]\nExecStart=/sbin/quotaon -aug\n";
+        std::fs::write(dir.join("usr/lib/systemd/system/quotaon.service"), unit).unwrap();
+        let md5 = |b: &[u8]| {
+            use md5::Digest as _;
+            crate::entry::hex(&md5::Md5::digest(b))
+        };
+        std::fs::write(dir.join("var/lib/dpkg/status"), b"Package: systemd\nStatus: install ok installed\nVersion: 252\n\n").unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/systemd.list"), b"/usr/lib/systemd/system/quotaon.service\n").unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/systemd.md5sums"), format!("{}  usr/lib/systemd/system/quotaon.service\n", md5(unit))).unwrap();
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(crate::collect::systemd::Systemd)];
+        let mut scan = scan::run(&root, &Options { deep: false }, &collectors);
+        enrich(&root, &mut scan);
+        let unit = scan.entries.iter().find(|e| e.name == "quotaon.service").unwrap();
+        assert_eq!(unit.raw["target_provenance"], "absent, guarded by ConditionPathExists=/sbin/quotaon");
+        assert!(unit.provenance.is_packaged_intact(), "{:?}", unit.provenance);
+        assert!(unit.flags.iter().all(|f| *f == Flag::DegradedEnablement), "{:?}", unit.flags);
+        assert!(crate::render::suppressed(unit));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

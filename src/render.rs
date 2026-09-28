@@ -56,8 +56,8 @@ pub fn suppressed(e: &Entry) -> bool {
     let vendor_text = e.provenance.is_verified() || from_package_database(e);
     let quiet = e.flags.iter().all(|f| *f == Flag::DegradedEnablement || (*f == Flag::TargetUnresolvable && vendor_text));
     // A zero-byte file holds no mechanism: /etc/environment as most hosts
-    // ship it. Anything written into it makes it a row again.
-    if e.raw.contains_key("empty_file") && quiet {
+    // ship it, owned by nothing. Anything written into it makes it a row.
+    if e.raw.contains_key("empty_file") && e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged)) {
         return true;
     }
     let target_verified = e
@@ -116,7 +116,7 @@ pub fn suppressed(e: &Entry) -> bool {
     // doing, and stays in view.
     let derived = matches!(
         &e.provenance,
-        crate::entry::Provenance::GeneratedBy { by } if by == "systemd-generator" || by == "snapd" || by == "systemd-preset"
+        crate::entry::Provenance::GeneratedBy { by } if matches!(by.as_str(), "systemd-generator" | "snapd" | "systemd-preset" | "dpkg-postinst")
     );
     // A file whose inode changed after its package installed it was touched
     // by something other than the package manager, however it verifies.
@@ -488,6 +488,13 @@ mod tests {
         assert!(!suppressed(&udev));
         let edited = entry("sudoers", packaged(Integrity::ConffileModified), &[Flag::ConffileModified, Flag::TargetUnresolvable]);
         assert!(!suppressed(&edited));
+
+        // A hand-off a packaged script makes, unconditionally, to a program
+        // that is not there is an orphan anyone can fill in.
+        let mut hop = entry("70debconf", packaged(Integrity::Intact), &[Flag::TargetMissing]);
+        hop.note("chain_from", "/usr/sbin/dpkg-preconfigure");
+        hop.note("chain_from_provenance", "intact");
+        assert!(!suppressed(&hop));
     }
 
     #[test]
@@ -512,10 +519,9 @@ mod tests {
         let mut e = entry("environment", Provenance::Unpackaged, &[Flag::Unpackaged]);
         assert!(!suppressed(&e));
         e.note("empty_file", "true");
-        assert!(!suppressed(&e), "unpackaged is a flag; an empty file only earns quiet");
-        let mut e = entry("environment", Provenance::Unpackaged, &[]);
-        e.note("empty_file", "true");
-        assert!(suppressed(&e));
+        assert!(suppressed(&e), "nobody owns /etc/environment, and nothing is in it");
+        e.flag(Flag::WorldWritable);
+        assert!(!suppressed(&e), "an empty file anyone can write into is a finding");
     }
 
     #[test]
