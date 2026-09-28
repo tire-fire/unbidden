@@ -428,6 +428,23 @@ if [ "$FAMILY" = apk ]; then
 else
     printf 'uc:2345:respawn:/tmp/not-a-real-payload\n' | plant_check /etc/inittab inittab '"name":"uc"'
 fi
+# apk: a repository line and a signing key an attacker would add, and the
+# triggers the stock image registers.
+if [ "$FAMILY" = apk ]; then
+    cp -p /etc/apk/repositories /etc/apk/repositories.unbidden-backup
+    printf '@evil https://mirror.invalid/unbidden-check/main\n' >> /etc/apk/repositories
+    repo=$("$BIN" --json --all | tail -n +2 | grep '"kind":"pkg_source"' | grep -F 'mirror.invalid/unbidden-check' || true)
+    cp -p /etc/apk/repositories.unbidden-backup /etc/apk/repositories; rm -f /etc/apk/repositories.unbidden-backup
+    [ -n "$repo" ] || fail "a repository appended to /etc/apk/repositories was not reported"
+    case "$repo" in
+        *'"tag":"evil"'*) note "a tagged repository appended to /etc/apk/repositories reports with its tag" ;;
+        *) fail "the appended apk repository lost its tag: $repo" ;;
+    esac
+    printf -- '-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----\n' | plant_check /etc/apk/keys/unbidden-check.rsa.pub pkg_source '"name":"key:unbidden-check.rsa.pub"'
+    triggers=$("$BIN" --json --all | tail -n +2 | grep '"kind":"pkg_hook"' | grep -c '"script":"trigger"' || true)
+    [ "$triggers" -gt 0 ] || fail "the stock image registers a busybox trigger and none was reported"
+    note "$triggers apk trigger scripts reported from the scripts archive"
+fi
 # BusyBox crond: a line appended to root's packaged crontab, which is the
 # one file it reads, and a periodic script the crontab's run-parts line
 # reaches.
