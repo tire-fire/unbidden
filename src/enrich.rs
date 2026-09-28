@@ -853,6 +853,14 @@ fn apply_target(root: &Root, entry: &mut Entry) {
             entry.target_sha256 = Some(d.sha256);
         }
     }
+    // A zero-byte file holds no mechanism: /etc/environment as most hosts
+    // ship it. Only where the file is what the entry is about — it is the
+    // target, or there is none — since an empty crontab line would not get
+    // here at all.
+    let about_itself = entry.target_path.as_ref().is_none_or(|t| root.rel(t) == root.rel(&entry.source));
+    if about_itself && root.stat_follow(&hashed).is_ok_and(|m| m.is_file && m.size == 0) {
+        entry.note("empty_file", "true");
+    }
 }
 
 /// Where a mechanism's files are supposed to live. A unit or rule outside its
@@ -959,7 +967,16 @@ fn apply_location(root: &Root, entry: &mut Entry) {
             return;
         }
         let resolved = in_root(&resolve_link(root, &entry.source, Path::new(target)));
-        if !inside(&resolved) {
+        // A link into a vendor tree is how a package installs a generator or
+        // a unit under another name: netplan's generator is a link to
+        // /usr/libexec/netplan/generate. The escape worth a flag is into a
+        // place packages do not own — /tmp, a home, /opt, /var.
+        const VENDOR_TREES: [&str; 10] = [
+            "/usr/lib/", "/usr/lib64/", "/usr/libexec/", "/usr/bin/", "/usr/sbin/", "/usr/share/", "/lib/", "/lib64/", "/bin/",
+            "/sbin/",
+        ];
+        let vendor = VENDOR_TREES.iter().any(|v| resolved.to_string_lossy().starts_with(v));
+        if !inside(&resolved) && !vendor {
             entry.flag(Flag::NonStandardLocation);
         }
         if is_hidden_path(&resolved) {
@@ -2289,6 +2306,41 @@ mod tests {
         let other = scan.entries.iter().find(|e| e.name == "/opt/other").unwrap();
         assert!(other.has_flag(Flag::TargetMissing), "the unguarded program in the same line still is");
         assert!(scan.entries.iter().any(|e| e.name == "/opt/tool" && e.raw.get("guarded_by_test").is_some()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_empty_file_is_noted_and_a_vendor_tree_link_is_no_escape() {
+        let dir = std::env::temp_dir().join(format!("unbidden-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["etc", "usr/lib/systemd/system-generators", "usr/libexec/netplan", "tmp"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("etc/environment"), b"").unwrap();
+        std::fs::write(dir.join("etc/profile"), b"umask 022\n").unwrap();
+        std::fs::write(dir.join("usr/libexec/netplan/generate"), b"elf").unwrap();
+        std::fs::write(dir.join("tmp/evil"), b"elf").unwrap();
+        std::os::unix::fs::symlink("/usr/libexec/netplan/generate", dir.join("usr/lib/systemd/system-generators/netplan")).unwrap();
+        std::os::unix::fs::symlink("/tmp/evil", dir.join("usr/lib/systemd/system-generators/evil")).unwrap();
+        let root = Root::at(&dir).unwrap();
+
+        let mut empty = Entry::new(Kind::ShellProfile, dir.join("etc/environment"), "environment");
+        empty.target_path = Some(dir.join("etc/environment"));
+        let mut full = Entry::new(Kind::ShellProfile, dir.join("etc/profile"), "profile");
+        full.target_path = Some(dir.join("etc/profile"));
+        apply_target(&root, &mut empty);
+        apply_target(&root, &mut full);
+        assert_eq!(empty.raw.get("empty_file").map(String::as_str), Some("true"));
+        assert!(!full.raw.contains_key("empty_file"));
+
+        let generator = |name: &str, target: &str| {
+            let mut e = Entry::new(Kind::SystemdGenerator, dir.join("usr/lib/systemd/system-generators").join(name), name);
+            e.note("symlink_target", target);
+            apply_location(&root, &mut e);
+            e
+        };
+        assert!(!generator("netplan", "/usr/libexec/netplan/generate").has_flag(Flag::NonStandardLocation), "a link into a vendor tree");
+        assert!(generator("evil", "/tmp/evil").has_flag(Flag::NonStandardLocation), "a link into /tmp");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

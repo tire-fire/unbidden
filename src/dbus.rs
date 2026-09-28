@@ -311,7 +311,14 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
         if !matches!(e.kind, Kind::SystemdUnit | Kind::SystemdTimer) {
             continue;
         }
-        let Some(file) = manager.by_path.get(&e.source) else { continue };
+        // A template instance has no unit file of its own: getty@tty1's
+        // only file is the .wants link, which ListUnitFiles never lists.
+        // The template's answer stands in, and the entry says so.
+        let via_template = manager.by_path.get(&e.source).is_none()
+            && e.name.contains('@')
+            && e.raw.get("symlink_target").is_some_and(|t| t.contains("@."));
+        let key = if via_template { PathBuf::from(&e.raw["symlink_target"]) } else { e.source.clone() };
+        let Some(file) = manager.by_path.get(&key) else { continue };
 
         if file.by_manager.len() > 1 {
             e.note("enablement_managers", file.breakdown());
@@ -337,6 +344,20 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
         // is the only place its answers can be checked against systemd's.
         if e.enabled != Enablement::Unknown {
             e.note("inferred_enablement", e.enabled.as_str());
+        }
+        if via_template {
+            // The template being enabled says its default instance is; this
+            // instance is enabled by the link the collector found. What the
+            // template's state settles is that the link is systemd's own
+            // kind of enablement, not that it is this instance's.
+            let template = key.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            e.note("unit_file_state", format!("{state} (template {template})"));
+            e.note("enablement_from", format!("{} (template)", from.join(", ")));
+            if matches!(enablement_of(state), Enablement::Enabled | Enablement::Static) {
+                e.flags.retain(|f| *f != Flag::DegradedEnablement);
+            }
+            answered += 1;
+            continue;
         }
         e.enabled = enablement_of(state);
         e.note("unit_file_state", state);
@@ -410,6 +431,30 @@ mod tests {
         assert_eq!(enablement_of("generated"), Enablement::Static);
         assert_eq!(enablement_of("bad"), Enablement::Unknown);
         assert_eq!(enablement_of("something-new-in-systemd-260"), Enablement::Unknown);
+    }
+
+    #[test]
+    fn a_template_instance_is_answered_for_by_its_template() {
+        let mut e = Entry::new(Kind::SystemdUnit, "/etc/systemd/system/getty.target.wants/getty@tty1.service", "getty@tty1.service");
+        e.enabled = Enablement::Enabled;
+        e.flag(Flag::DegradedEnablement);
+        e.note("symlink_target", "/usr/lib/systemd/system/getty@.service");
+        e.note("enabled_by", "/etc/systemd/system/getty.target.wants/getty@tty1.service");
+        let manager = manager_of(vec![("/usr/lib/systemd/system/getty@.service", answers(&[("system", "enabled")]))]);
+        let mut entries = vec![e];
+        assert_eq!(apply(&manager, &mut entries), 1);
+        let e = &entries[0];
+        assert_eq!(e.enabled, Enablement::Enabled, "the link is what enables the instance");
+        assert!(!e.has_flag(Flag::DegradedEnablement));
+        assert_eq!(e.raw["unit_file_state"], "enabled (template getty@.service)");
+        assert_eq!(e.raw["enablement_from"], "system (template)");
+
+        // A masked template answers for nothing the link says.
+        let manager = manager_of(vec![("/usr/lib/systemd/system/getty@.service", answers(&[("system", "masked")]))]);
+        let mut entries = vec![entries.remove(0)];
+        entries[0].flag(Flag::DegradedEnablement);
+        apply(&manager, &mut entries);
+        assert!(entries[0].has_flag(Flag::DegradedEnablement));
     }
 
     #[test]

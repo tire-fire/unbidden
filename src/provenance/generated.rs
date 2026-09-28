@@ -93,7 +93,7 @@ fn producer(root: &Root, snaps: &Snaps, rel: &Path) -> Option<&'static str> {
 
     // cloud-init's runtime state; its units and binaries are packaged and so
     // never reach this function.
-    if text.starts_with("run/cloud-init/") {
+    if text.starts_with("run/cloud-init/") || text.starts_with("var/lib/cloud/") {
         return Some("cloud-init");
     }
     // apk's own state: the installed database, the scripts archive and the
@@ -108,6 +108,91 @@ fn producer(root: &Root, snaps: &Snaps, rel: &Path) -> Option<&'static str> {
     });
     if unit_dir && snap_unit(root, snaps, rel) {
         return Some("snapd");
+    }
+    if preset_link(root, rel) {
+        return Some("systemd-preset");
+    }
+    None
+}
+
+/// A link `systemctl preset` writes for a template instance — getty@tty1
+/// on every host, from systemd's own `enable getty@.service` and the
+/// template's DefaultInstance= — sits in a .wants directory under /etc,
+/// owned by no package, and is the instance's only file. It is the
+/// vendor's doing when a vendor preset (/usr/lib/systemd/system-preset,
+/// never the administrator's /etc) is the first to match the instance, or
+/// the template whose DefaultInstance= it is, with `enable`, and the link
+/// leads to that template under /usr/lib or /lib.
+fn preset_link(root: &Root, rel: &Path) -> bool {
+    let text = rel.to_string_lossy();
+    let Some(rest) = text.strip_prefix("etc/systemd/system/") else { return false };
+    let Some((dir, unit)) = rest.split_once('/') else { return false };
+    if unit.contains('/') || !(dir.ends_with(".wants") || dir.ends_with(".requires")) {
+        return false;
+    }
+    // name@instance.suffix, with a non-empty instance.
+    let Some((stem, suffix)) = unit.rsplit_once('.') else { return false };
+    let Some((name, instance)) = stem.split_once('@') else { return false };
+    if instance.is_empty() {
+        return false;
+    }
+    let template = format!("{name}@.{suffix}");
+    let Ok(end) = root.resolve(rel) else { return false };
+    let vendor_template = ["usr/lib/systemd/system", "lib/systemd/system", "usr/lib/systemd/user"]
+        .iter()
+        .any(|d| end == Path::new(d).join(&template));
+    if !vendor_template {
+        return false;
+    }
+    let Some(verdict) = preset_verdict(root, unit, &template) else { return false };
+    match verdict {
+        PresetMatch::Instance => true,
+        PresetMatch::Template => {
+            let Ok((bytes, _)) = root.read_capped(&end, UNIT_CAP) else { return false };
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .any(|l| l.trim().strip_prefix("DefaultInstance=").is_some_and(|v| v.trim() == instance))
+        }
+    }
+}
+
+enum PresetMatch {
+    Instance,
+    Template,
+}
+
+/// systemd.preset(5): the files of the vendor directories in name order,
+/// the first line whose glob matches deciding; `enable` for the instance
+/// itself, or for its template, is a yes. The administrator's directories
+/// are not read: a preset there is a file no package wrote.
+fn preset_verdict(root: &Root, unit: &str, template: &str) -> Option<PresetMatch> {
+    let mut files: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
+    for dir in ["usr/lib/systemd/system-preset", "lib/systemd/system-preset"] {
+        for ent in root.read_dir_optional(dir).unwrap_or_default() {
+            if !ent.is_dir && ent.name.as_encoded_bytes().ends_with(b".preset") {
+                files.push((ent.name.clone(), Path::new(dir).join(&ent.name)));
+            }
+        }
+    }
+    files.sort();
+    files.dedup_by(|a, b| a.0 == b.0);
+    for (_, path) in files {
+        let Ok((bytes, _)) = root.read_capped(&path, UNIT_CAP) else { continue };
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let line = line.trim();
+            let Some((verb, rest)) = line.split_once(char::is_whitespace) else { continue };
+            if verb != "enable" && verb != "disable" {
+                continue;
+            }
+            for pattern in rest.split_whitespace() {
+                if crate::collect::glob_match(pattern.as_bytes(), unit.as_bytes()) {
+                    return (verb == "enable").then_some(PresetMatch::Instance);
+                }
+                if crate::collect::glob_match(pattern.as_bytes(), template.as_bytes()) {
+                    return (verb == "enable").then_some(PresetMatch::Template);
+                }
+            }
+        }
     }
     None
 }
@@ -167,6 +252,44 @@ fn snap_unit(root: &Root, snaps: &Snaps, rel: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_preset_written_instance_link_is_the_vendors_doing() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("unbidden-preset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["etc/systemd/system/getty.target.wants", "etc/systemd/system/multi-user.target.wants", "usr/lib/systemd/system", "usr/lib/systemd/system-preset", "etc/systemd/system-preset", "opt"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("usr/lib/systemd/system/getty@.service"), b"[Unit]\nDescription=Getty on %I\n[Service]\nExecStart=-/sbin/agetty %I\n[Install]\nWantedBy=getty.target\nDefaultInstance=tty1\n").unwrap();
+        std::fs::write(dir.join("usr/lib/systemd/system/container-getty@.service"), b"[Service]\nExecStart=/sbin/agetty pts/%I\n").unwrap();
+        std::fs::write(dir.join("usr/lib/systemd/system-preset/90-systemd.preset"), b"enable getty@.service\nenable serial-getty@ttyS0.service\ndisable *\n").unwrap();
+        // The administrator's preset is not a vendor's word.
+        std::fs::write(dir.join("etc/systemd/system-preset/50-site.preset"), b"enable container-getty@evil.service\n").unwrap();
+        std::fs::write(dir.join("opt/evil.service"), b"[Service]\nExecStart=/opt/x\n").unwrap();
+        let link = |target: &str, at: &str| std::os::unix::fs::symlink(target, dir.join(at)).unwrap();
+        link("/usr/lib/systemd/system/getty@.service", "etc/systemd/system/getty.target.wants/getty@tty1.service");
+        link("/usr/lib/systemd/system/getty@.service", "etc/systemd/system/getty.target.wants/getty@tty9.service");
+        link("/usr/lib/systemd/system/container-getty@.service", "etc/systemd/system/getty.target.wants/container-getty@evil.service");
+        link("/opt/evil.service", "etc/systemd/system/multi-user.target.wants/evil@x.service");
+        let root = Root::at(&dir).unwrap();
+        let wanted: BTreeSet<PathBuf> = [
+            "etc/systemd/system/getty.target.wants/getty@tty1.service",
+            "etc/systemd/system/getty.target.wants/getty@tty9.service",
+            "etc/systemd/system/getty.target.wants/container-getty@evil.service",
+            "etc/systemd/system/multi-user.target.wants/evil@x.service",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        let out = classify(&root, &wanted);
+        let by = |p: &str| out.get(Path::new(p)).cloned();
+        assert_eq!(by("etc/systemd/system/getty.target.wants/getty@tty1.service"), Some(Provenance::GeneratedBy { by: "systemd-preset".into() }), "the template's DefaultInstance, enabled by systemd's own preset");
+        assert_eq!(by("etc/systemd/system/getty.target.wants/getty@tty9.service"), None, "another instance is somebody's enable");
+        assert_eq!(by("etc/systemd/system/getty.target.wants/container-getty@evil.service"), None, "a preset in /etc vouches for nothing");
+        assert_eq!(by("etc/systemd/system/multi-user.target.wants/evil@x.service"), None, "a link out of the vendor tree");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use super::*;
 
     const SERVICE: &str = "[Unit]\n# Auto-generated, DO NOT EDIT\nDescription=Service for snap application lxd.daemon\n\

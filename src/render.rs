@@ -49,7 +49,17 @@ impl Filters {
 /// A packaged unit whose ExecStart= names a file with no digest to check it
 /// against is §7's missing-md5sums case, one step removed, and is shown.
 pub fn suppressed(e: &Entry) -> bool {
-    let quiet = e.flags.iter().all(|f| *f == Flag::DegradedEnablement);
+    // A target unresolvable by construction — udev's `RUN+="$env{X}"`,
+    // sudoers' ALL — in a file that is packaged and intact is the vendor's
+    // text, and there is nothing the operator can do with it. The same flag
+    // on an unpackaged or edited file is a finding, as it always was.
+    let vendor_text = e.provenance.is_verified() || from_package_database(e);
+    let quiet = e.flags.iter().all(|f| *f == Flag::DegradedEnablement || (*f == Flag::TargetUnresolvable && vendor_text));
+    // A zero-byte file holds no mechanism: /etc/environment as most hosts
+    // ship it. Anything written into it makes it a row again.
+    if e.raw.contains_key("empty_file") && quiet {
+        return true;
+    }
     let target_verified = e
         .raw
         .get("target_provenance")
@@ -97,10 +107,21 @@ pub fn suppressed(e: &Entry) -> bool {
     if e.kind == Kind::Inittab && e.raw.contains_key("vouched") {
         return target_verified && e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
     }
+    // What a generator, snapd or a vendor preset wrote is derived from
+    // packaged inputs — an init script, the kernel command line, an
+    // installed snap, a preset naming a template — and runs a program that
+    // verifies; the product itself is nobody's file to digest.
+    // A transient unit or one written into /run/systemd/system by some
+    // program at runtime is not in this set: it is that program's own
+    // doing, and stays in view.
+    let derived = matches!(
+        &e.provenance,
+        crate::entry::Provenance::GeneratedBy { by } if by == "systemd-generator" || by == "snapd" || by == "systemd-preset"
+    );
     // A file whose inode changed after its package installed it was touched
     // by something other than the package manager, however it verifies.
     let untouched = !e.raw.contains_key("changed_after_install");
-    quiet && target_verified && untouched && (e.provenance.is_verified() || from_package_database(e))
+    quiet && target_verified && untouched && (e.provenance.is_verified() || from_package_database(e) || derived)
 }
 
 /// An entry that is the package manager's own machinery: an rpm scriptlet or
@@ -456,6 +477,45 @@ mod tests {
             e.note("target_provenance", unverified);
             assert!(!suppressed(&e), "{unverified}");
         }
+    }
+
+    #[test]
+    fn vendor_text_with_an_unresolvable_target_is_quiet_but_planted_text_is_not() {
+        let mut udev = entry("50-udev-default.rules", packaged(Integrity::Intact), &[Flag::TargetUnresolvable]);
+        assert!(suppressed(&udev));
+        udev.provenance = Provenance::Unpackaged;
+        udev.flag(Flag::Unpackaged);
+        assert!(!suppressed(&udev));
+        let edited = entry("sudoers", packaged(Integrity::ConffileModified), &[Flag::ConffileModified, Flag::TargetUnresolvable]);
+        assert!(!suppressed(&edited));
+    }
+
+    #[test]
+    fn what_a_generator_or_snapd_wrote_is_quiet_once_its_program_verifies() {
+        let generated = |by: &str| {
+            let mut e = entry("exim4.service", Provenance::GeneratedBy { by: by.into() }, &[]);
+            e.note("target_provenance", "exim4-base (intact)");
+            e
+        };
+        assert!(suppressed(&generated("systemd-generator")));
+        assert!(suppressed(&generated("snapd")));
+        assert!(!suppressed(&generated("systemd-transient")), "a transient unit is some program's doing");
+        assert!(!suppressed(&generated("cloud-init")));
+        let mut e = generated("systemd-generator");
+        e.note("target_provenance", "unpackaged");
+        e.flag(Flag::Unpackaged);
+        assert!(!suppressed(&e), "a generated unit running an unpackaged program");
+    }
+
+    #[test]
+    fn an_empty_file_is_no_mechanism() {
+        let mut e = entry("environment", Provenance::Unpackaged, &[Flag::Unpackaged]);
+        assert!(!suppressed(&e));
+        e.note("empty_file", "true");
+        assert!(!suppressed(&e), "unpackaged is a flag; an empty file only earns quiet");
+        let mut e = entry("environment", Provenance::Unpackaged, &[]);
+        e.note("empty_file", "true");
+        assert!(suppressed(&e));
     }
 
     #[test]
