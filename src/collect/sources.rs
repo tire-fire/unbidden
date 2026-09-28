@@ -14,7 +14,8 @@
 //! /usr/share/dnf5/repos.d, one entry per repository, with the key files its
 //! `gpgkey` names; `gpgcheck=0` turns package signature checking off.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::entry::{Enablement, Entry, Kind, Trigger, hex};
@@ -45,11 +46,15 @@ impl Collector for Sources {
         }
         dnf(cx, &mut out, &mut keys);
         rpmdb_keys(cx, &mut out, &mut keys);
+        apk(cx, &mut out, &mut keys);
         // Read either way, and off where the tool that would use them is not
         // installed.
         for e in &mut out {
             let tool = e.raw.get("source_type").cloned().unwrap_or_default();
-            let missing = (tool == "apt repository" && !apt_installed) || (tool == "dnf repository" && !dnf_installed);
+            let apk_installed = ["sbin/apk", "usr/sbin/apk", "usr/bin/apk"].iter().any(|p| cx.root.exists(p));
+            let missing = (tool == "apt repository" && !apt_installed)
+                || (tool == "dnf repository" && !dnf_installed)
+                || (tool == "apk repository" && !apk_installed);
             if missing {
                 e.enabled = Enablement::Disabled;
                 e.note("not_run", "its package manager is not installed");
@@ -275,6 +280,59 @@ fn rpmdb_keys(cx: &mut Ctx, out: &mut Vec<Entry>, keys: &mut BTreeSet<PathBuf>) 
     }
 }
 
+/// apk's repositories: /etc/apk/repositories and repositories.d/*.list,
+/// one URL a line as apk_db_add_repository reads it — blank lines and ones
+/// starting with # skipped, a leading @tag ended by a blank or colon, the
+/// rest the URL verbatim. Every index apk fetches is verified against the
+/// keys in /etc/apk/keys, any of which may sign any index, so each
+/// repository trusts all of them; a directory with no key at all leaves apk
+/// refusing every index unless told --allow-untrusted, which is not a file.
+fn apk(cx: &mut Ctx, out: &mut Vec<Entry>, keys: &mut BTreeSet<PathBuf>) {
+    let mut files = vec![PathBuf::from("etc/apk/repositories")];
+    let dir = Path::new("etc/apk/repositories.d");
+    let mut lists: Vec<PathBuf> = cx.dir(dir).into_iter().filter(|e| !e.is_dir && e.name.as_bytes().ends_with(b".list")).map(|e| dir.join(e.name)).collect();
+    lists.sort();
+    files.extend(lists);
+    let key_dir = Path::new("etc/apk/keys");
+    let mut key_files: Vec<PathBuf> = cx.dir(key_dir).into_iter().filter(|e| !e.is_dir).map(|e| key_dir.join(e.name)).collect();
+    key_files.sort();
+    let trusts: Vec<String> = key_files.iter().map(|k| cx.root.abs(k).display().to_string()).collect();
+    for rel in files {
+        let Some(bytes) = cx.read_capped(&rel, CAP) else { continue };
+        let mut used: BTreeMap<String, u32> = BTreeMap::new();
+        for line in bytes.split(|b| *b == b'\n') {
+            if line.is_empty() || line[0] == b'#' {
+                continue;
+            }
+            let (tag, url) = match line.strip_prefix(b"@") {
+                Some(rest) => {
+                    let end = rest.iter().position(|b| matches!(b, b' ' | b'\t' | b':')).unwrap_or(rest.len());
+                    let after = rest[end..].iter().position(|b| !matches!(b, b' ' | b'\t' | b':')).map_or(rest.len(), |i| end + i);
+                    (Some(String::from_utf8_lossy(&rest[..end]).into_owned()), &rest[after..])
+                }
+                None => (None, line),
+            };
+            let url = String::from_utf8_lossy(url).into_owned();
+            let n = used.entry(url.clone()).or_insert(0);
+            *n += 1;
+            let name = if *n == 1 { format!("apk:{url}") } else { format!("apk:{url}#{n}") };
+            let mut e = entry(cx, &rel, name);
+            e.note("source_type", "apk repository");
+            e.note("uris", url);
+            if let Some(t) = tag {
+                e.note("tag", t);
+            }
+            if trusts.is_empty() {
+                e.note("signature_checking", "no key in /etc/apk/keys; apk refuses every index unless run with --allow-untrusted");
+            } else {
+                e.note("trusts", trusts.join(", "));
+            }
+            out.push(e);
+        }
+    }
+    keys.extend(key_files);
+}
+
 /// An armored key's base64, without its headers, line breaks or checksum,
 /// so a key can be recognised however it was wrapped.
 fn armored_body(text: &str) -> String {
@@ -370,6 +428,51 @@ mod tests {
         let root = Root::at(dir).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Sources)];
         crate::scan::run(&root, &Options { deep: false }, &collectors)
+    }
+
+    #[test]
+    fn apk_repositories_trust_every_key_in_the_keys_directory() {
+        let dir = std::env::temp_dir().join(format!("unbidden-apk-sources-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        put(&dir, "sbin/apk", b"\x7fELF apk");
+        put(&dir, "etc/apk/repositories", b"# main\nhttps://dl-cdn.alpinelinux.org/alpine/v3.24/main\n\n@edge\thttps://dl-cdn.alpinelinux.org/alpine/edge/testing\n@tagged:https://x/y\nhttps://dl-cdn.alpinelinux.org/alpine/v3.24/main\n");
+        put(&dir, "etc/apk/repositories.d/site.list", b"https://mirror.example/site\n");
+        put(&dir, "etc/apk/repositories.d/notes.txt", b"https://ignored/\n");
+        put(&dir, "etc/apk/keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub", b"-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----\n");
+        put(&dir, "etc/apk/keys/planted.rsa.pub", b"-----BEGIN PUBLIC KEY-----\nMIIC\n-----END PUBLIC KEY-----\n");
+        let s = scan(&dir);
+        let repos: Vec<&Entry> = s.entries.iter().filter(|e| e.raw.get("source_type").is_some_and(|t| t == "apk repository")).collect();
+        let mut names: Vec<&str> = repos.iter().map(|e| e.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "apk:https://dl-cdn.alpinelinux.org/alpine/edge/testing",
+                "apk:https://dl-cdn.alpinelinux.org/alpine/v3.24/main",
+                "apk:https://dl-cdn.alpinelinux.org/alpine/v3.24/main#2",
+                "apk:https://mirror.example/site",
+                "apk:https://x/y",
+            ]
+        );
+        let by_name = |n: &str| repos.iter().find(|e| e.name == n).unwrap();
+        assert_eq!(by_name("apk:https://dl-cdn.alpinelinux.org/alpine/edge/testing").raw["tag"], "edge");
+        assert_eq!(by_name("apk:https://x/y").raw["tag"], "tagged", "a colon ends the tag too");
+        let main = by_name("apk:https://dl-cdn.alpinelinux.org/alpine/v3.24/main");
+        assert!(!main.raw.contains_key("tag"));
+        let keys = format!("{}, {}", dir.join("etc/apk/keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub").display(), dir.join("etc/apk/keys/planted.rsa.pub").display());
+        assert_eq!(main.raw["trusts"], keys, "any key may sign any index");
+        assert_eq!(main.enabled, Enablement::Enabled);
+        let key = s.entries.iter().find(|e| e.name == "key:planted.rsa.pub").expect("the planted key is an entry");
+        assert_eq!(key.raw["source_type"], "signing key");
+
+        std::fs::remove_dir_all(dir.join("etc/apk/keys")).unwrap();
+        std::fs::remove_file(dir.join("sbin/apk")).unwrap();
+        let s = scan(&dir);
+        let repo = s.entries.iter().find(|e| e.name == "apk:https://x/y").unwrap();
+        assert!(repo.raw["signature_checking"].starts_with("no key in /etc/apk/keys"));
+        assert_eq!((repo.enabled, repo.raw["not_run"].as_str()), (Enablement::Disabled, "its package manager is not installed"));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

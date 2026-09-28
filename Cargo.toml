@@ -31,6 +31,7 @@ tree-sitter-bash = "0.25.1"
 # Perl-style patterns some configurations filter with (munin-node's
 # ignore_file); already built for tree-sitter.
 regex = "1.13"
+miniz_oxide = "0.9"
 
 [profile.release]
 lto = true

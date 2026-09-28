@@ -405,6 +405,191 @@ fn hash(alg: Alg, bytes: &[u8]) -> String {
     })
 }
 
+
+// ------------------------------------------------- scripts and triggers ----
+
+const SCRIPTS_GZ: &str = "lib/apk/db/scripts.tar.gz";
+const SCRIPTS_TAR: &str = "lib/apk/db/scripts.tar";
+const TRIGGERS: &str = "lib/apk/db/triggers";
+
+/// The phases apk runs a package's scripts at (apk_script_types).
+const PHASES: [&str; 7] =
+    ["pre-install", "post-install", "pre-deinstall", "post-deinstall", "pre-upgrade", "post-upgrade", "trigger"];
+
+/// One script apk keeps for an installed package: `<name>-<version>.<package
+/// digest>.<phase>` in the archive, run as root at that phase of the
+/// package's own transactions, or, for `trigger`, whenever any transaction
+/// touches a directory the triggers file lists for it.
+pub struct Script {
+    pub package: String,
+    pub version: String,
+    /// The package's own checksum, lower-case hex, as `C:` records it.
+    pub digest: String,
+    pub phase: String,
+    pub body: Vec<u8>,
+}
+
+/// The scripts archive: apk 3 writes scripts.tar.gz, apk 2 scripts.tar,
+/// both ustar written by apk itself. The path read is returned with them.
+pub fn scripts(root: &Root) -> Option<(&'static str, Vec<Script>)> {
+    let (path, bytes) = if let Ok((b, _)) = root.read_capped(SCRIPTS_GZ, DB_CAP) {
+        (SCRIPTS_GZ, gunzip(&b)?)
+    } else if let Ok((b, _)) = root.read_capped(SCRIPTS_TAR, DB_CAP) {
+        (SCRIPTS_TAR, b)
+    } else {
+        return None;
+    };
+    let mut out = Vec::new();
+    for (name, body) in tar_entries(&bytes) {
+        let Some((stem, phase)) = name.rsplit_once('.') else { continue };
+        if !PHASES.contains(&phase) {
+            continue;
+        }
+        let Some((pkg_ver, digest)) = stem.rsplit_once('.') else { continue };
+        let Some(alg_digest) = digest_text(digest) else { continue };
+        let Some(dash) = pkg_ver.rfind('-') else { continue };
+        let Some(dash2) = pkg_ver[..dash].rfind('-') else { continue };
+        out.push(Script {
+            package: pkg_ver[..dash2].to_string(),
+            version: pkg_ver[dash2 + 1..].to_string(),
+            digest: alg_digest,
+            phase: phase.to_string(),
+            body,
+        });
+    }
+    Some((path, out))
+}
+
+/// One line of the triggers file: a package's checksum and the directory
+/// patterns whose change runs its trigger script.
+pub struct Trigger {
+    pub digest: String,
+    pub dirs: Vec<String>,
+    pub package: Option<(String, String)>,
+}
+
+/// The triggers file, each line's digest resolved to the installed package
+/// whose `C:` it is.
+pub fn triggers(root: &Root) -> Option<(&'static str, Vec<Trigger>)> {
+    let (bytes, _) = root.read_capped(TRIGGERS, DB_CAP).ok()?;
+    let packages = packages_by_checksum(root);
+    let mut out = Vec::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        let mut fields = line.split(|b| b.is_ascii_whitespace()).filter(|f| !f.is_empty());
+        let Some(first) = fields.next() else { continue };
+        let Some(digest) = digest_text(&String::from_utf8_lossy(first)) else { continue };
+        let package = packages.get(&digest).cloned();
+        out.push(Trigger { package, digest, dirs: fields.map(|f| String::from_utf8_lossy(f).into_owned()).collect() });
+    }
+    Some((TRIGGERS, out))
+}
+
+/// Every installed package by its `C:` checksum, lower-case hex.
+fn packages_by_checksum(root: &Root) -> BTreeMap<String, (String, String)> {
+    let mut out = BTreeMap::new();
+    let Ok((bytes, _)) = root.read_capped(INSTALLED, DB_CAP) else { return out };
+    let (mut checksum, mut name, mut version) = (None, String::new(), String::new());
+    for line in bytes.split(|b| *b == b'\n') {
+        if line.len() < 2 {
+            if let Some(c) = checksum.take() {
+                out.insert(c, (std::mem::take(&mut name), std::mem::take(&mut version)));
+            }
+            name.clear();
+            version.clear();
+            continue;
+        }
+        if line[1] != b':' {
+            continue;
+        }
+        let value = String::from_utf8_lossy(&line[2..]).into_owned();
+        match line[0] {
+            b'C' => checksum = digest_text(&value),
+            b'P' => name = value,
+            b'V' => version = value,
+            _ => {}
+        }
+    }
+    if let Some(c) = checksum {
+        out.insert(c, (name, version));
+    }
+    out
+}
+
+/// A digest in either of apk's spellings, as hex, so a `Q1` in the
+/// triggers file matches the `X1` in an apk 3 script name.
+fn digest_text(text: &str) -> Option<String> {
+    digest(text.as_bytes()).map(|(_, hex)| hex)
+}
+
+/// RFC 1952: the fixed header, the optional fields the flags announce, then
+/// a raw deflate stream; the trailer is not consulted.
+fn gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
+    let [0x1f, 0x8b, 8, flags, rest @ ..] = bytes else { return None };
+    let mut i = 6usize.min(rest.len());
+    if flags & 4 != 0 {
+        let len = usize::from(u16::from_le_bytes([*rest.get(i)?, *rest.get(i + 1)?]));
+        i = i.checked_add(2 + len)?;
+    }
+    for bit in [8u8, 16] {
+        if flags & bit != 0 {
+            let end = rest.get(i..)?.iter().position(|b| *b == 0)?;
+            i += end + 1;
+        }
+    }
+    if flags & 2 != 0 {
+        i = i.checked_add(2)?;
+    }
+    miniz_oxide::inflate::decompress_to_vec_with_limit(rest.get(i..)?, DB_CAP).ok()
+}
+
+/// The regular files of a ustar archive, in order: name (with the prefix
+/// field, or a GNU `././@LongLink` entry before it) and contents. Stops at
+/// the first zero block, a short block, or a header without ustar's magic.
+fn tar_entries(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    let mut long_name: Option<String> = None;
+    while at + 512 <= bytes.len() {
+        let header = &bytes[at..at + 512];
+        if header.iter().all(|b| *b == 0) {
+            break;
+        }
+        if &header[257..262] != b"ustar" {
+            break;
+        }
+        let field = |range: std::ops::Range<usize>| -> String {
+            let raw = &header[range];
+            let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+            String::from_utf8_lossy(&raw[..end]).into_owned()
+        };
+        let size = {
+            let raw = &header[124..136];
+            let text: String = raw.iter().take_while(|b| b.is_ascii_digit()).map(|b| *b as char).collect();
+            usize::from_str_radix(&text, 8).unwrap_or(0)
+        };
+        let typeflag = header[156];
+        let data_end = at.saturating_add(512).saturating_add(size).min(bytes.len());
+        let data = &bytes[(at + 512).min(bytes.len())..data_end];
+        let name = match long_name.take() {
+            Some(n) => n,
+            None => {
+                let prefix = field(345..500);
+                let name = field(0..100);
+                if prefix.is_empty() { name } else { format!("{prefix}/{name}") }
+            }
+        };
+        match typeflag {
+            b'L' => long_name = Some(field(0..0).clone() + &String::from_utf8_lossy(data).trim_end_matches('\0')),
+            b'0' | 0 => out.push((name, data.to_vec())),
+            _ => {}
+        }
+        let padded = size.div_ceil(512) * 512;
+        let Some(next) = at.checked_add(512).and_then(|n| n.checked_add(padded)) else { break };
+        at = next;
+    }
+    out
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -678,5 +863,133 @@ pub(crate) mod tests {
         assert_eq!(digest(&[b"X1".as_slice(), &b"0".repeat(64)].concat()).map(|d| d.0), Some(Alg::Sha256));
         assert_eq!(digest(&[b"X2".as_slice(), &b"0".repeat(64)].concat()).map(|d| d.0), Some(Alg::Sha256));
         assert_eq!(digest(&[b"X2".as_slice(), &b"0".repeat(40)].concat()), None);
+    }
+
+    /// A ustar archive as apk writes one, a GNU long-name entry ahead of any
+    /// name over a hundred bytes.
+    pub(crate) fn tar(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        fn header(name: &str, size: usize, typeflag: u8) -> Vec<u8> {
+            let mut h = vec![0u8; 512];
+            h[..name.len()].copy_from_slice(name.as_bytes());
+            h[100..108].copy_from_slice(b"0000644\0");
+            h[108..116].copy_from_slice(b"0000000\0");
+            h[116..124].copy_from_slice(b"0000000\0");
+            h[124..136].copy_from_slice(format!("{size:011o}\0").as_bytes());
+            h[136..148].copy_from_slice(b"00000000000\0");
+            h[148..156].copy_from_slice(b"        ");
+            h[156] = typeflag;
+            h[257..263].copy_from_slice(b"ustar\0");
+            h[263..265].copy_from_slice(b"00");
+            let sum: u32 = h.iter().map(|b| u32::from(*b)).sum();
+            h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+            h
+        }
+        let mut out = Vec::new();
+        for (name, body) in entries {
+            let short = if name.len() > 100 {
+                out.extend(header("././@LongLink", name.len() + 1, b'L'));
+                let mut data = name.as_bytes().to_vec();
+                data.push(0);
+                data.resize(data.len().div_ceil(512) * 512, 0);
+                out.extend(data);
+                &name[..100]
+            } else {
+                name
+            };
+            out.extend(header(short, body.len(), b'0'));
+            let mut data = body.to_vec();
+            data.resize(data.len().div_ceil(512) * 512, 0);
+            out.extend(data);
+        }
+        out.extend(vec![0u8; 1024]);
+        out
+    }
+
+    /// The bytes gzip would write: a header naming the file, a raw deflate
+    /// stream, and a trailer nobody here reads.
+    pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x1f, 0x8b, 8, 0x08, 0, 0, 0, 0, 0, 3];
+        out.extend_from_slice(b"scripts.tar\0");
+        out.extend(miniz_oxide::deflate::compress_to_vec(bytes, 6));
+        out.extend_from_slice(&[0u8; 8]);
+        out
+    }
+
+    #[test]
+    fn the_scripts_archive_is_read_gzipped_or_not() {
+        let f = Fixture::new("scripts");
+        let long = format!("{}-1.0-r0.Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=.post-install", "x".repeat(120));
+        let archive = tar(&[
+            ("busybox-1.37.0-r31.X1b5405ebc02f7dd8be95b6265c54b243d5456ab8f.trigger", b"#!/bin/busybox sh\n/bin/busybox --install -s\n"),
+            ("busybox-1.37.0-r31.X1b5405ebc02f7dd8be95b6265c54b243d5456ab8f.post-install", b"#!/bin/sh\nexit 0\n"),
+            ("alpine-baselayout-3.7.2-r1.Q1tUBevAL33YvpW2JlxUskPVRWq48=.pre-upgrade", b"#!/bin/sh\n"),
+            ("notes.txt", b"not a script"),
+            ("odd-1.0-r0.Q1garbage.post-install", b"#!/bin/sh\n"),
+            (long.as_str(), b"#!/bin/sh\n"),
+        ]);
+        f.write(SCRIPTS_GZ, &gzip(&archive));
+        let (path, scripts) = scripts(&f.root()).unwrap();
+        assert_eq!(path, SCRIPTS_GZ);
+        let names: Vec<(String, String, String)> = scripts.iter().map(|s| (s.package.clone(), s.version.clone(), s.phase.clone())).collect();
+        assert_eq!(
+            names,
+            [
+                ("busybox".to_string(), "1.37.0-r31".to_string(), "trigger".to_string()),
+                ("busybox".to_string(), "1.37.0-r31".to_string(), "post-install".to_string()),
+                ("alpine-baselayout".to_string(), "3.7.2-r1".to_string(), "pre-upgrade".to_string()),
+                ("x".repeat(120), "1.0-r0".to_string(), "post-install".to_string()),
+            ]
+        );
+        assert_eq!(scripts[0].digest, "b5405ebc02f7dd8be95b6265c54b243d5456ab8f");
+        assert_eq!(scripts[2].digest, "b5405ebc02f7dd8be95b6265c54b243d5456ab8f", "Q1 and X1 spell one digest");
+        assert_eq!(scripts[0].body, b"#!/bin/busybox sh\n/bin/busybox --install -s\n");
+
+        std::fs::remove_file(f.0.join(SCRIPTS_GZ)).unwrap();
+        f.write(SCRIPTS_TAR, &archive);
+        let (path, plain) = super::scripts(&f.root()).unwrap();
+        assert_eq!((path, plain.len()), (SCRIPTS_TAR, 4), "apk 2 keeps it uncompressed");
+    }
+
+    #[test]
+    fn triggers_resolve_to_the_package_whose_checksum_they_carry() {
+        let f = Fixture::new("triggers");
+        f.write(
+            INSTALLED,
+            b"C:Q1tUBevAL33YvpW2JlxUskPVRWq48=\nP:busybox\nV:1.37.0-r31\n\nC:Q1xvm97RfYRLbxsLtXZtLDXA1chQg=\nP:kmod\nV:33-r0\n",
+        );
+        f.write(TRIGGERS, b"Q1tUBevAL33YvpW2JlxUskPVRWq48= /bin /usr/bin /lib/modules/*\nX1ffffffffffffffffffffffffffffffffffffffff /etc/x\nnot-a-digest /y\n\n");
+        let (_, triggers) = triggers(&f.root()).unwrap();
+        assert_eq!(triggers.len(), 2);
+        assert_eq!(triggers[0].package, Some(("busybox".to_string(), "1.37.0-r31".to_string())));
+        assert_eq!(triggers[0].dirs, ["/bin", "/usr/bin", "/lib/modules/*"]);
+        assert_eq!(triggers[1].package, None);
+    }
+
+    #[test]
+    fn hostile_archives_and_headers_yield_nothing_rather_than_a_panic() {
+        let f = Fixture::new("hostile-archive");
+        for (i, bytes) in [
+            vec![0x1f, 0x8b],
+            vec![0x1f, 0x8b, 8, 0xff, 0, 0, 0, 0, 0, 3, 0xff, 0xff],
+            vec![0x1f, 0x8b, 8, 0x04, 0, 0, 0, 0, 0, 3, 0xff, 0xff, 1],
+            vec![0x1f, 0x8b, 8, 0x08, 0, 0, 0, 0, 0, 3, b'n', b'o', b'n', b'u', b'l'],
+            gzip(b"not a tar"),
+            gzip(&{
+                let mut t = tar(&[("a-1-r0.Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=.trigger", b"x")]);
+                t[124..136].copy_from_slice(b"77777777777\0");
+                t
+            }),
+            gzip(&tar(&[("a-1-r0.Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=.trigger", b"x")])[..600].to_vec()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            f.write(SCRIPTS_GZ, &bytes);
+            let got = super::scripts(&f.root()).map(|(_, s)| s.len());
+            assert!(got.is_none() || got == Some(0) || i >= 5, "case {i}: {got:?}");
+        }
+        assert_eq!(tar_entries(&[0u8; 511]).len(), 0);
+        assert_eq!(tar_entries(b"\x00".repeat(1024).as_slice()).len(), 0);
+        assert!(gunzip(&[]).is_none());
     }
 }

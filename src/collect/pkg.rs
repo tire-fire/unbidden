@@ -35,6 +35,7 @@ impl Collector for PkgHooks {
         out.extend(dnf_plugins(cx));
         out.extend(libdnf5_actions(cx));
         out.extend(rpm(cx));
+        out.extend(apk_hooks(cx));
         out.extend(kernel_hooks(cx));
         out.extend(dpkg_cfg(cx));
         out.extend(hook_dirs(cx));
@@ -1044,6 +1045,76 @@ fn rpm_scriptlets(cx: &mut Ctx) -> (Vec<Entry>, &'static str) {
     (out, RPM_CAVEAT)
 }
 
+// ------------------------------------------------------------------ apk ----
+
+/// The scripts apk keeps for every installed package, and its triggers. A
+/// package's pre- and post-install, -upgrade and -deinstall scripts run as
+/// root on its own transactions; its trigger script runs, as root, at the
+/// end of any transaction that touched a directory the triggers file lists
+/// for it — busybox's re-links its applets whenever /usr/bin changes. All
+/// of it lives in apk's own state under /lib/apk/db rather than in any
+/// file a package ships, so the source is the archive and the entry says
+/// so.
+fn apk_hooks(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let Some((archive, scripts)) = crate::provenance::apk::scripts(cx.root) else { return out };
+    let triggers = crate::provenance::apk::triggers(cx.root);
+    let (triggers_file, triggers) = match &triggers {
+        Some((f, t)) => (Some(*f), t.as_slice()),
+        None => (None, &[][..]),
+    };
+    let mut used: BTreeMap<String, usize> = BTreeMap::new();
+    let mut with_script: BTreeSet<String> = BTreeSet::new();
+    for s in &scripts {
+        let mut e = cx.entry(Kind::PkgHook, archive, uniq(&mut used, format!("{}:{}", s.package, s.phase)));
+        e.trigger = Trigger::PackageOp;
+        e.principal = Some("root".to_string());
+        e.enabled = Enablement::Enabled;
+        e.note("manager", "apk");
+        e.note("package", s.package.clone());
+        e.note("version", s.version.clone());
+        e.note("script", s.phase.clone());
+        e.note("read_from", "apk scripts archive");
+        if s.phase == "trigger" {
+            with_script.insert(s.digest.clone());
+            let dirs: Vec<&str> = triggers.iter().filter(|t| t.digest == s.digest).flat_map(|t| t.dirs.iter().map(String::as_str)).collect();
+            if dirs.is_empty() {
+                e.note("fires_on", "nothing: the triggers file lists no directory for it");
+            } else {
+                e.note("fires_on", dirs.join(", "));
+            }
+        }
+        set_command(&mut e, &s.body);
+        // apk runs the script as a file of its own, so the interpreter is
+        // the shebang's, and the enrichment pass reads that from the body.
+        e.note("target_unverifiable", "apk runs the script from its archive; no file on disk is the program");
+        out.push(e);
+    }
+    // A trigger registered for a package whose script is not in the archive
+    // fires nothing apk can run, and is still a registration worth a row.
+    if let Some(file) = triggers_file {
+        for t in triggers.iter().filter(|t| !with_script.contains(&t.digest)) {
+            let who = t.package.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| format!("checksum {}", &t.digest[..12.min(t.digest.len())]));
+            let mut e = cx.entry(Kind::PkgHook, file, uniq(&mut used, format!("{who}:trigger")));
+            e.trigger = Trigger::PackageOp;
+            e.principal = Some("root".to_string());
+            e.enabled = Enablement::Disabled;
+            e.note("manager", "apk");
+            if let Some((n, v)) = &t.package {
+                e.note("package", n.clone());
+                e.note("version", v.clone());
+            }
+            e.note("script", "trigger");
+            e.note("read_from", "apk triggers file");
+            e.note("fires_on", t.dirs.join(", "));
+            e.note("not_run", "no trigger script for it in the scripts archive");
+            e.note("target_unverifiable", "a registration in apk's triggers file, not a file");
+            out.push(e);
+        }
+    }
+    out
+}
+
 /// Does this macro body name something rpm could dlopen? The extension is the
 /// only signal available before the transaction runs: rpm finds its plugins by
 /// looking for shared objects, and the macro says which one and with what.
@@ -1776,6 +1847,39 @@ mod tests {
         put(&dir, "etc/dnf/dnf.conf", b"[main]\ngpgcheck=1\nplugins=0\n");
         let s = scan(&dir);
         assert_eq!(one(&s, |e| e.name == "dnf-plugin:copr").enabled, Enablement::Disabled);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn apk_scripts_and_triggers_are_read_from_apks_own_archive() {
+        use crate::provenance::apk::tests::{gzip, tar};
+        let dir = tree("apk-hooks");
+        put(&dir, "lib/apk/db/installed", b"C:Q1tUBevAL33YvpW2JlxUskPVRWq48=\nP:busybox\nV:1.37.0-r31\n\nC:Q1xvm97RfYRLbxsLtXZtLDXA1chQg=\nP:kmod\nV:33-r0\n\n");
+        put(&dir, "lib/apk/db/triggers", b"Q1tUBevAL33YvpW2JlxUskPVRWq48= /bin /usr/bin /lib/modules/*\nQ1xvm97RfYRLbxsLtXZtLDXA1chQg= /lib/modules/*\n");
+        let archive = tar(&[
+            ("busybox-1.37.0-r31.X1b5405ebc02f7dd8be95b6265c54b243d5456ab8f.trigger", b"#!/bin/busybox sh\n/bin/busybox --install -s\n"),
+            ("busybox-1.37.0-r31.X1b5405ebc02f7dd8be95b6265c54b243d5456ab8f.post-install", b"#!/bin/sh\n/sbin/setup-x\n"),
+            ("alpine-baselayout-3.7.2-r1.Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=.pre-upgrade", b"#!/bin/sh\nexit 0\n"),
+        ]);
+        put(&dir, "lib/apk/db/scripts.tar.gz", &gzip(&archive));
+        let s = scan(&dir);
+        assert!(matches!(s.header.collectors[0].status, Status::Complete), "{:?}", s.header.collectors[0].status);
+        let hooks: Vec<&Entry> = of_kind(&s, Kind::PkgHook).into_iter().filter(|e| e.raw.get("manager").is_some_and(|m| m == "apk")).collect();
+        let mut names: Vec<&str> = hooks.iter().map(|e| e.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["alpine-baselayout:pre-upgrade", "busybox:post-install", "busybox:trigger", "kmod:trigger"]);
+        let trigger = one(&s, |e| e.name == "busybox:trigger");
+        assert_eq!(trigger.raw["fires_on"], "/bin, /usr/bin, /lib/modules/*");
+        assert_eq!(trigger.raw["read_from"], "apk scripts archive");
+        assert_eq!(trigger.raw["version"], "1.37.0-r31");
+        assert_eq!(trigger.command.as_deref(), Some(b"#!/bin/busybox sh\n/bin/busybox --install -s\n".as_slice()));
+        assert_eq!((trigger.trigger, trigger.enabled), (Trigger::PackageOp, Enablement::Enabled));
+        assert_eq!(trigger.source, dir.join("lib/apk/db/scripts.tar.gz"));
+        let kmod = one(&s, |e| e.name == "kmod:trigger");
+        assert_eq!((kmod.enabled, kmod.raw["fires_on"].as_str()), (Enablement::Disabled, "/lib/modules/*"));
+        assert_eq!(kmod.raw["not_run"], "no trigger script for it in the scripts archive");
+        assert_eq!(kmod.source, dir.join("lib/apk/db/triggers"));
+        assert!(one(&s, |e| e.name == "busybox:post-install").raw.get("fires_on").is_none());
         fs::remove_dir_all(&dir).unwrap();
     }
 

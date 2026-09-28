@@ -731,3 +731,31 @@ path = "fuzz_targets/libdnf5_actions.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "apk_scripts_gz"
+path = "fuzz_targets/apk_scripts_gz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "apk_scripts_tar"
+path = "fuzz_targets/apk_scripts_tar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "apk_triggers"
+path = "fuzz_targets/apk_triggers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "apk_repositories"
+path = "fuzz_targets/apk_repositories.rs"
+test = false
+doc = false
+bench = false

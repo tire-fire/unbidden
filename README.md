@@ -32,9 +32,9 @@ What it reads, grouped by when each thing runs:
   dozen more daemons
 - Monitoring and management agents: auditd plugins, collectd, munin,
   monit, Zabbix, NRPE, incron, facter, Salt schedules
-- Package installs: apt, dnf and dpkg hooks, kernel package hooks, dpkg
-  and rpm scriptlets, package sources and the keys trusted to sign them,
-  alternatives and diversions
+- Package installs: apt, dnf and dpkg hooks, kernel package hooks, dpkg,
+  rpm and apk scriptlets and triggers, package sources and the keys trusted
+  to sign them, alternatives and diversions
 - Any time, or whenever something asks: `ld.so.preload`, library search
   paths, NSS modules, D-Bus services, Python startup hooks, interpreter
   variables, the plug-in registries of gconv, p11-kit, Vulkan, EGL, OpenCL

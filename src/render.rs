@@ -131,9 +131,12 @@ pub fn suppressed(e: &Entry) -> bool {
 /// dpkg did not write it, and that is exactly the script worth reading.
 fn from_package_database(e: &Entry) -> bool {
     let metadata = e.raw.contains_key("read_from") || e.raw.contains_key("digest_unavailable");
+    // apk's scripts archive is written by apk, not shipped by a package:
+    // GeneratedBy apk is that database's way of being the package manager's
+    // own machinery.
     metadata
         && !e.raw.contains_key("changed_after_install")
-        && matches!(e.provenance, crate::entry::Provenance::Packaged { .. })
+        && matches!(e.provenance, crate::entry::Provenance::Packaged { .. } | crate::entry::Provenance::GeneratedBy { .. })
 }
 
 /// Text from a hostile disk, made safe to print to a terminal.

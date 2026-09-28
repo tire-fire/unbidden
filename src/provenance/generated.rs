@@ -96,6 +96,12 @@ fn producer(root: &Root, snaps: &Snaps, rel: &Path) -> Option<&'static str> {
     if text.starts_with("run/cloud-init/") {
         return Some("cloud-init");
     }
+    // apk's own state: the installed database, the scripts archive and the
+    // triggers file it rewrites on every transaction. No package ships
+    // them, and apk info -W owns up to none of them.
+    if text.starts_with("lib/apk/db/") {
+        return Some("apk");
+    }
 
     let unit_dir = ["etc/systemd/system/", "etc/systemd/user/"].iter().any(|d| {
         text.strip_prefix(d).is_some_and(|rest| !rest.contains('/'))
