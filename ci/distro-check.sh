@@ -409,6 +409,25 @@ case "$FAMILY" in
     dpkg) printf '#!/bin/sh\ncp /opt/b "${DESTDIR}/bin/"\n' | plant_check /etc/initramfs-tools/hooks/unbidden-check initramfs_hook "initramfs-tools:hook:unbidden-check" ;;
     rpm)  printf 'check() { return 0; }\ninstall() { inst /opt/b /bin/b; }\n' | plant_check /usr/lib/dracut/modules.d/99unbidden/module-setup.sh initramfs_hook "dracut:module:unbidden"; rmdir /usr/lib/dracut/modules.d/99unbidden 2>/dev/null ;;
 esac
+# A line init itself would run. On a systemd image the file is a plant,
+# read and reported inert; on Alpine it is BusyBox init's own packaged file,
+# so a line is appended to it instead and the file put back.
+if [ "$FAMILY" = apk ]; then
+    cp -p /etc/inittab /etc/inittab.unbidden-backup
+    printf '::respawn:/tmp/not-a-real-payload\n' >> /etc/inittab
+    planted=$("$BIN" --json --all | tail -n +2 | grep '"kind":"inittab"' | grep -F '"name":"console:/tmp/not-a-real-payload"' || true)
+    cp -p /etc/inittab.unbidden-backup /etc/inittab; rm -f /etc/inittab.unbidden-backup
+    [ -n "$planted" ] || fail "a line appended to /etc/inittab was not reported"
+    case "$planted" in
+        *'"enabled":"enabled"'*) note "a line appended to /etc/inittab reports as one BusyBox init runs" ;;
+        *) fail "the appended inittab line does not read as enabled: $planted" ;;
+    esac
+    if [ "$("$BIN" --json --all | grep -Fc 'console:/tmp/not-a-real-payload')" -gt 0 ]; then
+        fail "the restored /etc/inittab still reports the appended line"
+    fi
+else
+    printf 'uc:2345:respawn:/tmp/not-a-real-payload\n' | plant_check /etc/inittab inittab '"name":"uc"'
+fi
 # A member of the group sudo's default rule grants root through.
 grp=$([ "$FAMILY" = rpm ] && echo wheel || echo sudo)
 if getent group "$grp" >/dev/null && command -v useradd >/dev/null; then
