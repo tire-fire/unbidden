@@ -428,6 +428,33 @@ if [ "$FAMILY" = apk ]; then
 else
     printf 'uc:2345:respawn:/tmp/not-a-real-payload\n' | plant_check /etc/inittab inittab '"name":"uc"'
 fi
+# OpenRC: a service a runlevel names, and a local.d script the local
+# service runs. Both planted the way rc-update and an administrator would.
+if [ "$FAMILY" = apk ] && command -v rc-update >/dev/null; then
+    printf '#!/sbin/openrc-run\ncommand=/tmp/not-a-real-payload\n' > /etc/init.d/unbidden-check
+    chmod +x /etc/init.d/unbidden-check
+    rc-update -q add unbidden-check default
+    svc=$("$BIN" --json --all | tail -n +2 | grep '"kind":"openrc_service"' | grep -F '"name":"unbidden-check"' || true)
+    rc-update -q del unbidden-check default; rm -f /etc/init.d/unbidden-check
+    [ -n "$svc" ] || fail "an OpenRC service added to the default runlevel was not reported"
+    case "$svc" in
+        *'"enabled":"enabled"'*'"unpackaged"'*|*'"unpackaged"'*'"enabled":"enabled"'*) note "an OpenRC service in the default runlevel reports enabled and unpackaged" ;;
+        *) fail "the planted OpenRC service is not enabled and unpackaged: $svc" ;;
+    esac
+    if [ "$("$BIN" --json --all | grep -Fc '"name":"unbidden-check"')" -gt 0 ]; then
+        fail "the removed OpenRC service is still reported"
+    fi
+    rc-update -q add local default
+    printf '#!/bin/sh\n/tmp/not-a-real-payload\n' > /etc/local.d/unbidden-check.start
+    chmod +x /etc/local.d/unbidden-check.start
+    loc=$("$BIN" --json --all | tail -n +2 | grep '"kind":"rc_local"' | grep -F '"name":"unbidden-check.start"' || true)
+    rm -f /etc/local.d/unbidden-check.start; rc-update -q del local default
+    [ -n "$loc" ] || fail "a local.d script was not reported"
+    case "$loc" in
+        *'"enabled":"enabled"'*) note "a local.d script reports as one the local service runs" ;;
+        *) fail "the local.d script is not enabled while local is in a runlevel: $loc" ;;
+    esac
+fi
 # A member of the group sudo's default rule grants root through.
 grp=$([ "$FAMILY" = rpm ] && echo wheel || echo sudo)
 if getent group "$grp" >/dev/null && command -v useradd >/dev/null; then
