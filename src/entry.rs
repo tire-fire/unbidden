@@ -110,6 +110,7 @@ str_enum!(Kind {
     InitramfsHook => "initramfs_hook",
     Incron => "incron",
     ExternalFact => "external_fact",
+    Inittab => "inittab",
 });
 
 str_enum!(Trigger {

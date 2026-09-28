@@ -71,6 +71,7 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
         cross_reference_suid(&mut scan.entries);
         gate_on_super_server(&mut scan.entries);
         vouch_for_sources(&mut scan.entries);
+        vouch_for_templates(&mut scan.entries, &answers);
     });
 
     if let Some(preloads) = stage(&mut failed, "preloads", || preload_entries(root, &scan.entries)) {
@@ -581,6 +582,10 @@ fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
             continue;
         }
         out.insert(source);
+        // A line copied from a packaged template is judged by the template.
+        if let Some(t) = e.raw.get("matches_template") {
+            out.insert(root.rel(Path::new(t)));
+        }
         if let Some(t) = &e.target_path {
             let target = root.rel(t);
             // Where a target is a link, the file it ends at is asked about
@@ -1054,6 +1059,20 @@ fn vouch_for_sources(entries: &mut [Entry]) {
         let all = trusts.split(", ").all(|k| verified.get(k).copied().unwrap_or(false));
         if all {
             e.note("vouched", "every key it trusts is packaged and intact");
+        }
+    }
+}
+
+/// A line found verbatim in a packaged, intact template — sysvinit-core's
+/// postinst copies /usr/share/sysvinit/inittab to /etc/inittab, so dpkg owns
+/// the template and never the file — is what the package wrote, however the
+/// file it sits in came to be. Noted, for the default view to judge by.
+fn vouch_for_templates(entries: &mut [Entry], answers: &provenance::Answers) {
+    for e in entries.iter_mut() {
+        let Some(template) = e.raw.get("matches_template") else { continue };
+        let rel = Path::new(template).strip_prefix("/").unwrap_or(Path::new(template));
+        if answers.get(rel).is_some_and(Provenance::is_verified) {
+            e.note("vouched", "a line of the packaged template, unchanged");
         }
     }
 }
@@ -1949,6 +1968,34 @@ mod tests {
         vouch_for_sources(&mut entries);
         let vouched: Vec<bool> = entries[2..].iter().map(|e| e.raw.contains_key("vouched")).collect();
         assert_eq!(vouched, [true, false, false, false], "a planted key, trusted=yes or a missing key each withhold it");
+    }
+
+    #[test]
+    fn an_inittab_line_is_vouched_for_by_a_verified_template() {
+        let line = |name: &str, template: bool| {
+            let mut e = Entry::new(Kind::Inittab, "/etc/inittab", name);
+            if template {
+                e.note("matches_template", "/usr/share/sysvinit/inittab");
+            }
+            e
+        };
+        let mut entries = vec![line("1", true), line("ev", false), line("2", true)];
+        let mut answers = provenance::Answers::new();
+        answers.insert(
+            PathBuf::from("usr/share/sysvinit/inittab"),
+            Provenance::Packaged { package: "sysvinit-core".into(), version: "3.14-4".into(), integrity: crate::entry::Integrity::Intact },
+        );
+        vouch_for_templates(&mut entries, &answers);
+        let vouched: Vec<bool> = entries.iter().map(|e| e.raw.contains_key("vouched")).collect();
+        assert_eq!(vouched, [true, false, true]);
+
+        answers.insert(
+            PathBuf::from("usr/share/sysvinit/inittab"),
+            Provenance::Packaged { package: "sysvinit-core".into(), version: "3.14-4".into(), integrity: crate::entry::Integrity::Modified },
+        );
+        let mut entries = vec![line("1", true)];
+        vouch_for_templates(&mut entries, &answers);
+        assert!(!entries[0].raw.contains_key("vouched"), "an edited template vouches for nothing");
     }
 
     #[test]

@@ -540,7 +540,7 @@ fn unparsed_link(cx: &mut Ctx, kind: Kind, rel: &Path, principal: Option<String>
     e
 }
 
-fn set_command(e: &mut Entry, bytes: &[u8]) {
+pub(crate) fn set_command(e: &mut Entry, bytes: &[u8]) {
     if std::str::from_utf8(bytes).is_err() {
         e.flag(Flag::EncodingAnomaly);
     }

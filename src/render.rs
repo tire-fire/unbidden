@@ -92,6 +92,11 @@ pub fn suppressed(e: &Entry) -> bool {
     if e.kind == Kind::PkgSource && e.raw.contains_key("vouched") {
         return e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged | Flag::ConffileModified));
     }
+    // An inittab line the packaged template holds verbatim runs what the
+    // package meant it to, once its target verifies.
+    if e.kind == Kind::Inittab && e.raw.contains_key("vouched") {
+        return target_verified && e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
+    }
     // A file whose inode changed after its package installed it was touched
     // by something other than the package manager, however it verifies.
     let untouched = !e.raw.contains_key("changed_after_install");

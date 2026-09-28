@@ -1481,6 +1481,11 @@
       },
       {
         "entries": 0,
+        "name": "inittab",
+        "status": "complete"
+      },
+      {
+        "entries": 0,
         "name": "integrity",
         "reason": "needs --deep",
         "status": "skipped"

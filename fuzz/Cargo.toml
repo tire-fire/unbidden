@@ -145,6 +145,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "inittab"
+path = "fuzz_targets/inittab.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "inittab_busybox"
+path = "fuzz_targets/inittab_busybox.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "dpkg_md5sums"
 path = "fuzz_targets/dpkg_md5sums.rs"
 test = false
