@@ -124,19 +124,35 @@ impl<'a> Ctx<'a> {
     /// a file where a directory belongs is the owner's own construction and
     /// fails the same way on every run, so it is recorded as a limit rather
     /// than a failure: otherwise any account could make every baseline
-    /// incomparable with one symlink. Anywhere else, and for any other error,
-    /// the scan could not look, and the collector is Partial.
+    /// incomparable with one symlink. A home that is itself no directory —
+    /// Alpine homes sshd and guest at /dev/null — can hold nothing, and a
+    /// path under one is absent, not a limit and not a failure. Anywhere
+    /// else, and for any other error, the scan could not look, and the
+    /// collector is Partial.
     pub fn note_failed(&mut self, path: impl AsRef<Path>, e: &std::io::Error) {
         let path = path.as_ref();
         let what = format!("{}: {e}", path.display());
-        let built = [rustix::io::Errno::LOOP, rustix::io::Errno::NOTDIR]
-            .iter()
-            .any(|n| e.raw_os_error() == Some(n.raw_os_error()));
+        let is = |n: rustix::io::Errno| e.raw_os_error() == Some(n.raw_os_error());
+        if is(rustix::io::Errno::NOTDIR) && self.under_a_home_that_is_no_directory(path) {
+            return;
+        }
+        let built = is(rustix::io::Errno::LOOP) || is(rustix::io::Errno::NOTDIR);
         if built && self.root.in_home(path) {
             self.note_limited(what);
         } else {
             self.note_unreadable(what);
         }
+    }
+
+    fn under_a_home_that_is_no_directory(&self, rel: &Path) -> bool {
+        let here = self.root.rel(&self.root.abs(rel));
+        self.users.iter().any(|u| {
+            let home = self.root.rel(&u.home);
+            !home.as_os_str().is_empty()
+                && here.starts_with(&home)
+                && here != home
+                && self.root.stat_follow(&home).is_ok_and(|m| !m.is_dir)
+        })
     }
 
     /// A read the scan limited on purpose, or content it read but declined to
@@ -672,6 +688,20 @@ mod tests {
         cx.note_failed("home/alice/.ssh/authorized_keys", &err(rustix::io::Errno::LOOP));
         cx.note_failed("/home/alice/.config/autostart", &err(rustix::io::Errno::NOTDIR));
         assert_eq!((cx.truncated.len(), cx.unreadable.len()), (2, 0));
+
+        // An account homed at a file, as Alpine homes sshd at /dev/null: the
+        // path cannot exist, and the read is absent rather than a limit.
+        std::fs::create_dir_all(dir.join("dev")).unwrap();
+        std::fs::write(dir.join("dev/null"), b"").unwrap();
+        let sshd = vec![User { name: "sshd".into(), uid: Some(22), home: PathBuf::from("/dev/null"), shell: None, source: "passwd" }];
+        let mut homed = Ctx { root: &root, users: &sshd, deep: false, unreadable: Vec::new(), truncated: Vec::new() };
+        homed.note_failed("dev/null/.ssh/authorized_keys", &err(rustix::io::Errno::NOTDIR));
+        homed.note_failed("/dev/null/.config/autostart", &err(rustix::io::Errno::NOTDIR));
+        assert_eq!((homed.truncated.len(), homed.unreadable.len()), (0, 0));
+        // The home itself failing, or a file elsewhere, is still a failure.
+        homed.note_failed("dev/null", &err(rustix::io::Errno::NOTDIR));
+        homed.note_failed("etc/cron.d/job", &err(rustix::io::Errno::NOTDIR));
+        assert_eq!((homed.truncated.len(), homed.unreadable.len()), (0, 2));
 
         // A scan that was refused permission could not look, wherever it was.
         cx.note_failed("home/alice/.profile", &err(rustix::io::Errno::ACCESS));
