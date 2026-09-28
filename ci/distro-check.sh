@@ -33,6 +33,7 @@ echo "== $ID $VERSION_ID"
 case "$ID ${ID_LIKE:-}" in
     *debian*|*ubuntu*)        FAMILY=dpkg ;;
     *fedora*|*rhel*|*centos*) FAMILY=rpm ;;
+    *alpine*)                 FAMILY=apk ;;
     *)                        FAMILY=none ;;
 esac
 
@@ -143,6 +144,14 @@ fi
 owner_of() {
     case "$FAMILY" in
         rpm)  rpm -qf --qf '%{NAME}\n' "$1" 2>/dev/null | grep -v 'not owned' ;;
+        # "/etc/inittab is owned by alpine-baselayout-data-3.7.2-r1": the
+        # name is what precedes the version's two dash-separated fields.
+        # apk knows a file by the name it installed it under, so a path
+        # through a linked directory (/var/spool/cron/crontabs is a link to
+        # /etc/crontabs) is asked about under its real directory too.
+        apk)  for p in $(apk_spellings "$1"); do
+                  apk info -W "$p" 2>/dev/null | sed -n 's/^.* is owned by \(.*\)-[^-]*-r[0-9]*$/\1/p'
+              done | sort -u ;;
         dpkg)
             # dpkg records whichever spelling the package shipped, so a
             # merged-usr path is asked about both ways.
@@ -156,11 +165,25 @@ verify_failed() {
     case "$FAMILY" in
         rpm)  rpm -Vf "$1" 2>/dev/null | grep -E "^..5.* $1\$|^....L.* $1\$" ;;
         dpkg) dpkg --verify "$2" 2>/dev/null | grep -E "^..5.* $1\$" ;;
+        # apk audit reports a protected path's changes, --system the rest's.
+        # Neither reports an edited regular file under /etc/init.d, whose
+        # protection covers links only, so an edit there passes this referee
+        # and is caught by unbidden's own digest check alone.
+        apk)  { apk audit 2>/dev/null; apk audit --system 2>/dev/null; } |
+                  grep -E "^U ($(apk_spellings "$1" | sed 's#^/##' | tr '\n' '|' | sed 's/|$//'))\$" ;;
     esac
+}
+# A path as given and, where its directory is reached through a link, under
+# the directory's real name.
+apk_spellings() {
+    echo "$1"
+    real="$(readlink -f "$(dirname "$1")")/$(basename "$1")"
+    [ "$real" = "$1" ] || echo "$real"
 }
 case "$FAMILY" in
     rpm)  referee=rpm ;;
     dpkg) referee=dpkg-query ;;
+    apk)  referee=apk ;;
     *)    referee="" ;;
 esac
 if [ -n "$referee" ] && command -v "$referee" >/dev/null 2>&1; then
@@ -216,7 +239,7 @@ if [ ! -f /etc/crontab ]; then
 fi
 
 conf=""
-for c in /etc/crontab /etc/ssh/sshd_config /etc/sudoers /etc/bash.bashrc /etc/profile; do
+for c in /etc/crontab /etc/ssh/sshd_config /etc/sudoers /etc/bash.bashrc /etc/profile /var/spool/cron/crontabs/root; do
     if [ -f "$c" ] && tail -n +2 "$out" | grep "\"source\":\"$c\"" | grep -q '"integrity":"intact"'; then
         conf="$c"
         break

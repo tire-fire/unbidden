@@ -12,7 +12,7 @@ Both want the same data and a different default view. That is the central design
 Scope boundary
 v1 runs on a live local host, as root, and only reads. It does not modify, disable, remediate or write anything outside its own output files.
 Supported platforms
-Four distributions are supported targets. Correctness on these is a release requirement: a defect on any of them blocks a release, and every one is in CI.
+Five distributions are supported targets. Correctness on these is a release requirement: a defect on any of them blocks a release, and every one is in CI.
 Distribution
 Versions
 Package backend
@@ -33,9 +33,13 @@ Fedora
 current and current-1
 rpm, sqlite backend
 GNOME
-Everything else — RHEL, CentOS, Arch, openSUSE, Alpine — is best-effort. unbidden should run there and probably will, but nothing is tested and no defect blocks a release.
-One thing this does not change: the musl static build target (§3, §12) stays, and is unrelated to whether Alpine is supported. Static linking is the ld.so.preload defence, not a packaging choice for musl-based distros.
-The four-distro set is narrower than it looks in one respect and wider in another. Narrower: two package backends cover 100% of supported systems, and the rpm side reduces to sqlite alone (§7). Wider: Mint brings Cinnamon, and Ubuntu and Mint bring snap, both of which add work that a Debian-and-Fedora-only target would not have (§5, §7).
+Alpine
+current and current-1, and 3.22, the last release on apk 2
+apk
+— (server, containers)
+Everything else — RHEL, CentOS, Arch, openSUSE — is best-effort. unbidden should run there and probably will, but nothing is tested and no defect blocks a release.
+The musl static build (§3, §12) is the ld.so.preload defence first, and it is also what lets one binary run on Alpine, which has no glibc. Alpine is the supported distribution where that reach is exercised, and the one that shares nothing with the other four: BusyBox as PID 1 and as cron, OpenRC as the service manager, apk as the package manager, no systemd, no PAM, no merged /usr.
+The five-distro set is narrower than it looks in one respect and wider in another. Narrower: three package backends, two of them plain text, cover 100% of supported systems, and the rpm side reduces to sqlite alone (§7). Wider: Mint brings Cinnamon, and Ubuntu and Mint bring snap, both of which add work that a Debian-and-Fedora-only target would not have (§5, §7).
 2. Non-goals
 Each of these is excluded for a reason, not by oversight.
 Not in v1
@@ -356,7 +360,7 @@ A command given as a bare name — ExecStart=systemctl, * * * * * root backdoor 
 A target that is a symlink no package owns, or one the package database records no digest for, is judged by the file it finally resolves to, and says so. /usr/bin/editor -> /etc/alternatives/editor -> /usr/bin/vim.basic is vim; the same links pointed at /tmp end at an unpackaged file. This applies to what an entry runs, never to the entry's own source: an alias link in /etc/systemd/system is itself the evidence and keeps its own verdict.
 Implementation
 Read the databases directly. Never invoke rpm or dpkg (§3).
-The supported platform set (§1) reduces this to exactly two backends, and simplifies the harder one considerably.
+The supported platform set (§1) reduces this to exactly three backends, and simplifies the harder one considerably.
 dpkg is straightforward: /var/lib/dpkg/status for installed packages, /var/lib/dpkg/info/*.list for file ownership, and /var/lib/dpkg/info/*.md5sums for integrity. All plain text. The file lists are streamed once per scan and only the paths the entries asked about are kept (Cost, below). Each path is looked up under every spelling a package might have recorded: the merged-usr aliases, and the path with its directories resolved on the host, which is what catches a list entry written through a symlinked directory. Diversions in /var/lib/dpkg/diversions are applied as dpkg applies them: a listed path diverted by anyone but the package listing it (by hand included) holds that package's file at the diverted-to name, checked against the manifest under the listed name, and what sits at the original path is not that package's.
 Two dpkg-specific hazards, both of which would otherwise produce false PackagedModified findings at scale:
 Conffiles. Configuration files are expected to differ from what the package shipped — that is what a conffile is for. dpkg records their original digests separately, in the Conffiles: field of /var/lib/dpkg/status, and checksum verification tools exclude them by default. unbidden must do the same: a conffile whose contents differ is Packaged and intact-by-policy, carrying a distinct ConffileModified marker rather than the high-signal PackagedModified flag. Without this, every host with an edited /etc/ssh/sshd_config lights up.
@@ -366,6 +370,7 @@ rpm is the hard part. The database backend varies by RPM version: BerkeleyDB (Pa
 With Fedora as the only supported rpm distribution, that reduces to sqlite alone. Fedora 33 changed the default rpmdb backend to sqlite, and BDB dropped to read-only support in Fedora 34, so no supported Fedora release carries a BDB database. As built, only sqlite is read; see the decision below. The corollary is that the rusqlite bundled-feature decision is not an edge case — it is the entire rpm path.
 The database is read through Root like every other file (§11), capped, deserialised into an in-memory SQLite, and never opened in place: SQLite would try to create -wal and -shm files beside it, which writes to the host under examination and fails on a read-only image. rpm keeps the database in WAL mode, so the in-memory copy is switched to rollback-journal mode first; a transaction sitting in a live -wal during a concurrent dnf run is not seen. A scanner reads a snapshot.
 Integrity follows rpm -V. A regular file is checked against RPMTAG_FILEDIGESTS in the algorithm RPMTAG_FILEDIGESTALGO names — absent or 1 is MD5, 8 is SHA-256, anything else is unknown. A symlink is checked against RPMTAG_FILELINKTOS: rpm records no digest for one, but it records the target. A %config file that differs is conffile-modified; a %ghost file is unknown.
+apk is the third and the simplest: /lib/apk/db/installed is one plain-text file, blank-line-separated records of X:value lines — P: and V: the name and version, F: a directory and R: each file in it, a: the file's owner and mode, Z: its digest — read as apk_db_index_read reads it in apk-tools 2.14 and 3.0, which write the same file. The digest is the whole integrity story: apk records no size or mtime, and a symlink's digest is of its target string. Z: is Q1 base64 or X1 hex SHA-1, Q2 or X2 SHA-256, or a bare MD5 hexdump from before the prefix existed; apk 3 writes a SHA-256 into an apk 2 database as a SHA-1-length prefix with the remaining twelve bytes appended, and it is read back as apk reads it. What a difference means is apk's protected-paths rule, from its compiled-in defaults (+etc, @etc/init.d, !etc/apk) and then /etc/apk/protected_paths.d/*.list, matched component by component as apk_db_dir_get matches them: under a protected path (+, or ! for apk's own) a changed file is kept on upgrade, so it is conffile-modified; under a symlinks-only path (@) a changed link is kept and a changed regular file replaced, so the link is conffile-modified and the file modified; anywhere else, modified. A setuid or setgid bit the a: line did not ship is mode-modified, as on rpm. Worth knowing: apk audit skips a changed regular file under /etc/init.d in both of its modes, so an edited init script on Alpine is invisible to the package manager's own check and visible here alone.
 Snap, and the limits of package provenance
 Ubuntu and Mint ship snapd, which installs systemd units named snap.*.service along with mount units for each squashfs revision. dpkg owns none of these files. Under the §7 rules as written, every snap on the system reports Unpackaged — the same verdict an attacker's unit gets.
 This is the largest false-positive source in the supported set, and it matters because Unpackaged is the flag the tool leads with. Options considered, in order of preference:
@@ -516,6 +521,9 @@ Default features only; the glib C binding stays off (§5)
 dpkg digests
 md-5
 dpkg's manifests are MD5
+apk digests
+sha1
+apk's manifests are SHA-1; the SHA-256 apk 3 can write is read with sha2
 dpkg
 hand-rolled
 Plain text, not worth a dependency
@@ -550,14 +558,15 @@ As built, ci/panix-coverage.tsv is that matrix. It has one row per PANIX module,
 Where the loop runs: in a VM for the distributions that publish cloud images (Debian, Ubuntu, Fedora), with a real boot and a kernel of its own. Mint and LMDE publish none, so they run in a privileged container booted with systemd as PID 1. That gives the mechanisms a real service manager, system bus and timers, but not a kernel of their own, so lkm alone is not run there, and the loop says so.
 The loop gates a release. It runs on every push to main, on tags and nightly, not on other branches: nine to fourteen minutes an image is longer than a change should wait for its checks. A change is pushed to a branch, tested there, and main is moved to it once green; a release is a version in Cargo.toml with no tag yet, bumped in a signed commit, and CI tags and publishes it without committing anything itself. A break it alone would catch is found after merging, and blocks the release until fixed.
 Distro matrix
-The four supported distributions from §1, all in CI, all gating release: Debian 12 and 13, Ubuntu 22.04 and 24.04, Linux Mint 21.x and 22.x plus LMDE, and Fedora current and current-1.
-The PANIX loop above runs against every one of them. That is the point of automating it — thirty-odd mechanisms across nine images is not a matrix anyone verifies by hand, and the distro-specific defects are exactly the ones that hide.
+The five supported distributions from §1, all in CI, all gating release: Debian 12 and 13, Ubuntu 22.04 and 24.04, Linux Mint 21.x and 22.x plus LMDE, Fedora current and current-1, and Alpine current and current-1 plus 3.22, the last release on apk 2.
+The PANIX loop above runs against every one of them but Alpine: PANIX plants with bash into systemd, and Alpine has neither, so what §5 reads there is planted by the distro check itself. That is the point of automating it — thirty-odd mechanisms across twelve images is not a matrix anyone verifies by hand, and the distro-specific defects are exactly the ones that hide.
 The published Mint 22 container image carries Ubuntu's base-files and reports itself as Ubuntu 24.04. CI installs Mint's own base-files from the Mint repository the image's apt sources already name, and asserts the result reports Mint 22 before testing it.
 Desktop coverage needs care. Both desktops matter for the extension collector (§5), and a headless image will silently skip it, so at least one image per desktop must boot a session. As built: Mint 21 with Cinnamon and Debian 12 with GNOME, each under Xvfb. The session writes a real user dconf database, and an extension is then enabled the way the desktop does it. A system database compiled by dconf itself pins a second extension with a lock, which must demote the user's own choice.
 Specific things to assert per distro, because they are the ones a generic test misses. All are asserted in CI:
 • Merged-usr: nothing is reported under /lib, /bin or /sbin where those are links, and every vendor unit file is reported exactly once (§5).
 • The package manager as referee, on every image: every file-backed verdict must agree with the distribution's own tool. The owner must be the one rpm -qf or dpkg-query -S names, every file called intact must pass rpm -V or dpkg --verify, and every file called unpackaged must be owned by nothing. unbidden never runs those tools (§3); the test does, to know unbidden is right.
 • Fedora: the rpm path exercises sqlite, file digests are read correctly given RPMTAG_FILEDIGESTALGO (the referee above), and SELinux is enforcing and blocks nothing (the VM).
+• Alpine: the referee is apk info -W for owners and apk audit, in both modes, for verification; the images are prepared with openrc, since a bare image has no init system; the packaged crontab, /etc/crontabs/root, is the edited conffile; and every mechanism §5 reads on Alpine is planted by the check.
 • Debian family: an edited conffile reads as conffile-modified and never raises PackagedModified. A package whose md5sums are taken away reads integrity Unknown, and is shown by default rather than hidden (§7). No maintainer script on a pristine image, or after a real package install, reads as changed after install; one image also edits one after the install window and requires the note.
 • Ubuntu: installed snaps do not flood the output as Unpackaged, and at least one is attributed to snapd (§7). The Mint images carry no snapd.
 • LMDE: unbidden's header reads the Debian base as such, not as Ubuntu.
@@ -566,7 +575,7 @@ Specific things to assert per distro, because they are the ones a generic test m
 RHEL, CentOS, Arch, openSUSE and Alpine are not tested. Community bug reports welcome; no release waits on them.
 Parser fuzzing
 Every parser gets a cargo-fuzz target. §3 establishes that parser input is adversarial; fuzzing is how that stops being an aspiration. Priority order: unit files, crontabs, .desktop files, udev rules, PAM configs.
-As built: 97 targets, one per parser. On main and nightly the five above get a minute each, the rest twenty seconds; any other branch gets ten and five. The targets run one per CPU at a time. A smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
+As built: 98 targets, one per parser. On main and nightly the five above get a minute each, the rest twenty seconds; any other branch gets ten and five. The targets run one per CPU at a time. A smoke run, not a soak. The input is delivered as the adversary delivers it, as a file on a scan root read through Root with its caps and link rules. Parsers that run in enrichment — the package databases, script interpreter lines, the preload entries — are reached by running enrichment too. A panic in a collector or in an enrichment stage fails the target. Seed corpora come from real files in the supported images. One parser has no target: the security.capability extended attribute, which an unprivileged fuzzer cannot set.
 Golden files
 Collector output for a fixed synthetic filesystem tree, checked into the repository. Catches unintended changes to the Entry record, which is the schema contract of §10. Alongside it, a mutation pass takes the same tree apart 120 ways and requires every collector to survive each.
 Conventions
@@ -671,6 +680,7 @@ Contact with real systems also found these, now fixed and described in the secti
 • §12: the aarch64 static check could not fail.
 • §13: CI reported Mint 22 as Ubuntu, could not plant dbus on Fedora, checked snaps against one with no service, and failed at random on a KVM permission race.
 • §13: the PANIX loop had never run, checked only an entry's kind, counted an unplanted mechanism as a skip, and gated nothing. PANIX's own systemd module plants into /usr/local/lib/systemd/system, the directory §5 was not walking.
+• §3 and §5: an account whose home is a file — Alpine homes sshd and guest at /dev/null — made every per-account collector partial, since each read under it failed with ENOTDIR outside any real home. Nothing can be under such a home, and a read there is absent.
 v0.2.0, Sep 27, 2026, widened coverage rather than fixing it. The persistence notes, ATT&CK Enterprise 19.2, Autoruns' categories, the paths Elastic's, Sigma's and Velociraptor's rules name, and every hook and drop-in directory in Ubuntu 24.04's and Fedora 44's package indexes were each checked against §5, and each mechanism found missing was read: by the rule of the program that runs it, its source verified, and off where that program is not installed. Added to §5, by trigger:
 • Boot: initramfs-tools hooks and scripts, dracut configuration and modules, DKMS; cloud-init's commands, scripts, handlers and boothooks; crypttab keyscripts; systemd's sleep and shutdown hooks and the manager's environment, the per-account user.conf included; display managers' scripts; systemd Alias= links folded into the unit they name.
 • Login: the X session's files; GNOME, MATE and Plasma session files and Xwayland session scripts; csh, fish and ksh, and what bash reads beyond its profiles; the system-wide startup files of vim, neovim, emacs, tmux and screen; browser policy; file-manager extensions; membership of groups that grant root.

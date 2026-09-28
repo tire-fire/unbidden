@@ -288,6 +288,16 @@ jobs:
           - image: linuxmintd/lmde6-amd64
             expect_id: linuxmint
             expect_version: "6"
+          # §1: Alpine current and current-1, and 3.22, the last release on
+          # apk 2 (the same installed database; its scripts archive is not
+          # compressed). A bare image has no init system: openrc is what an
+          # installed Alpine boots with, and what the plants below need.
+          - image: public.ecr.aws/docker/library/alpine:3.24
+            prep: apk add -q openrc busybox-openrc &&
+          - image: public.ecr.aws/docker/library/alpine:3.23
+            prep: apk add -q openrc busybox-openrc &&
+          - image: public.ecr.aws/docker/library/alpine:3.22
+            prep: apk add -q openrc busybox-openrc &&
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

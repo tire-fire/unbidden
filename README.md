@@ -50,7 +50,7 @@ If it runs without a person typing something, it should turn up here.
 
 Most of what turns up is noise. A desktop has well over a thousand autostart
 entries, nearly all of them from a package and untouched since. unbidden reads
-the dpkg and rpm databases itself and hides those, so you get the short list:
+the dpkg, rpm and apk databases itself and hides those, so you get the short list:
 1,690 hidden on the host in the screenshot.
 
 ## Install
@@ -113,6 +113,7 @@ or SSSD account with nothing on local disk won't be picked up.
 | Ubuntu | 22.04, 24.04 | dpkg | snap |
 | Linux Mint | 21.x, 22.x, LMDE | dpkg | Cinnamon |
 | Fedora | current, current-1 | rpm (sqlite) | |
+| Alpine | 3.22, current-1, current | apk | OpenRC, BusyBox |
 
 Anything else works on a best-effort basis. With no package database it reports
 provenance as unknown rather than calling every file on the box unpackaged.
@@ -128,8 +129,8 @@ mutation pass that takes a synthetic tree apart 120 ways, and a lint that
 keeps every module off the filesystem except through the scan root. Every
 parser has a `cargo-fuzz` target.
 
-CI runs the release binary in all nine supported images and checks its
-verdicts against the image's own `rpm` or `dpkg`: who owns each file, and
+CI runs the release binary in all twelve supported images and checks its
+verdicts against the image's own `rpm`, `dpkg` or `apk`: who owns each file, and
 whether it is intact. It boots real GNOME and Cinnamon sessions. It also
 plants every mechanism [PANIX](https://github.com/Aegrah/PANIX) supports that
 is in scope, and checks that each is reported, from the right place and tied
