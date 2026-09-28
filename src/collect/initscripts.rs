@@ -522,12 +522,21 @@ struct Links {
 }
 
 fn sysv(cx: &mut Ctx) -> Vec<Entry> {
-    let init_dirs = distinct_dirs(cx, INIT_DIRS.iter().map(|d| ((), PathBuf::from(*d))).collect());
+    let openrc = openrc_state(cx);
+    let mut dirs: Vec<((), PathBuf)> = Vec::new();
+    if openrc.is_some() {
+        dirs.extend(OPENRC_PREFIXES.iter().map(|p| ((), PathBuf::from(p).join("init.d"))));
+    }
+    dirs.extend(INIT_DIRS.iter().map(|d| ((), PathBuf::from(*d))));
+    let init_dirs = distinct_dirs(cx, dirs);
     let init_ids: BTreeSet<(u64, u64)> = init_dirs.iter().map(|(_, id, _)| *id).collect();
+    let kind = if openrc.is_some() { Kind::OpenrcService } else { Kind::SysvInit };
 
     let mut scripts: Vec<Entry> = Vec::new();
     let mut links: Vec<Links> = Vec::new();
     let mut index: BTreeMap<((u64, u64), Vec<u8>), usize> = BTreeMap::new();
+    // OpenRC finds a service by name in the first init.d that has it.
+    let mut first_of_name: BTreeSet<Vec<u8>> = BTreeSet::new();
 
     for (_, id, dir) in &init_dirs {
         for ent in cx.dir(dir) {
@@ -537,7 +546,10 @@ fn sysv(cx: &mut Ctx) -> Vec<Entry> {
                 continue;
             }
             let rel = dir.join(&ent.name);
-            let e = script_entry(cx, Kind::SysvInit, &rel, &ent.name, Trigger::Boot);
+            let mut e = script_entry(cx, kind, &rel, &ent.name, Trigger::Boot);
+            if openrc.is_some() && !first_of_name.insert(ent.name.as_bytes().to_vec()) {
+                e.note("shadowed_by", "a script of the same name in an earlier init.d");
+            }
             index.insert((*id, ent.name.as_bytes().to_vec()), scripts.len());
             scripts.push(e);
             links.push(Links::default());
@@ -617,17 +629,29 @@ fn sysv(cx: &mut Ctx) -> Vec<Entry> {
                     if let Some(j) = &joined {
                         e.target_path = Some(cx.root.abs(normalize(j)));
                     }
+                    if openrc.is_some() {
+                        // OpenRC never reads rc?.d; a link there starts
+                        // nothing until something else does.
+                        e.enabled = Enablement::Disabled;
+                        e.note("not_run", "OpenRC reads /etc/runlevels, not rc?.d");
+                    }
                     out.push(e);
                 }
             }
         }
     }
 
+    let mut conf_d: BTreeSet<PathBuf> = BTreeSet::new();
     for (i, mut e) in scripts.into_iter().enumerate() {
         let l = &links[i];
-        // The whole point: an S-link somewhere is enablement, sitting in
-        // init.d is not.
-        e.enabled = if l.start.is_empty() { Enablement::Disabled } else { Enablement::Enabled };
+        match &openrc {
+            None => {
+                // The whole point: an S-link somewhere is enablement, sitting
+                // in init.d is not.
+                e.enabled = if l.start.is_empty() { Enablement::Disabled } else { Enablement::Enabled };
+            }
+            Some(rc) => openrc_service(cx, rc, &mut e, &mut conf_d),
+        }
         for (key, set) in
             [("start_runlevels", &l.start), ("stop_runlevels", &l.stop), ("start_priority", &l.priority)]
         {
@@ -636,6 +660,252 @@ fn sysv(cx: &mut Ctx) -> Vec<Entry> {
             }
         }
         out.push(e);
+    }
+    if let Some(rc) = &openrc {
+        out.extend(openrc_extras(cx, rc, &first_of_name, conf_d));
+    }
+    out
+}
+
+// --------------------------------------------------------------- OpenRC ----
+
+/// OpenRC's search prefixes as Alpine builds it, in its own order: a script
+/// or a conf.d file in an earlier prefix is found first.
+const OPENRC_PREFIXES: [&str; 3] = ["usr/local/etc", "usr/etc", "etc"];
+const OPENRC_RUN: [&str; 2] = ["sbin/openrc-run", "usr/sbin/openrc-run"];
+const OPENRC_RUNLEVELS: &str = "etc/runlevels";
+/// The runlevels rc starts on the way to any other: sysinit, then boot.
+const OPENRC_BOOT_LEVELS: [&str; 2] = ["sysinit", "boot"];
+
+/// What /etc/runlevels says, once read as OpenRC reads it.
+struct Openrc {
+    /// Each runlevel directory: the service names in it (any entry that
+    /// exists, is not a dotfile and does not end in .sh, as ls_dir lists
+    /// them), and the runlevels it stacks (its subdirectories that name one).
+    levels: BTreeMap<String, (BTreeSet<String>, Vec<String>)>,
+    /// The levels whose services start at boot: sysinit, boot, and whatever
+    /// inittab hands to `openrc`.
+    boot: BTreeSet<String>,
+}
+
+/// OpenRC is the service manager where openrc-run is installed and PID 1 is
+/// not systemd, which never runs it: sysvinit and BusyBox start it from
+/// inittab. Under systemd the same init.d scripts run through
+/// systemd-sysv-generator from their rc?.d links, and read as SysV.
+fn openrc_state(cx: &mut Ctx) -> Option<Openrc> {
+    if !OPENRC_RUN.iter().any(|p| cx.root.exists(p)) {
+        return None;
+    }
+    if cx.root.resolve(Path::new("sbin/init")).ok().is_some_and(|p| p.file_name().is_some_and(|n| n == "systemd")) {
+        return None;
+    }
+    let mut levels: BTreeMap<String, (BTreeSet<String>, Vec<String>)> = BTreeMap::new();
+    let names: Vec<String> = cx
+        .dir(OPENRC_RUNLEVELS)
+        .into_iter()
+        .filter(|e| e.is_dir && !e.name.as_bytes().starts_with(b"."))
+        .map(|e| e.name.to_string_lossy().into_owned())
+        .collect();
+    for level in &names {
+        let dir = Path::new(OPENRC_RUNLEVELS).join(level);
+        let mut services = BTreeSet::new();
+        let mut stacked = Vec::new();
+        for ent in cx.dir(&dir) {
+            let raw = ent.name.as_bytes();
+            if raw.starts_with(b".") {
+                continue;
+            }
+            // ls_dir stats through the link: a dangling one is not there.
+            let Ok(meta) = cx.root.stat_follow(dir.join(&ent.name)) else { continue };
+            let name = ent.name.to_string_lossy().into_owned();
+            if meta.is_dir {
+                if names.contains(&name) && name != *level {
+                    stacked.push(name);
+                }
+                continue;
+            }
+            if raw.ends_with(b".sh") {
+                continue;
+            }
+            services.insert(name);
+        }
+        levels.insert(level.clone(), (services, stacked));
+    }
+    let mut boot: BTreeSet<String> = OPENRC_BOOT_LEVELS.iter().map(|s| s.to_string()).collect();
+    if let Some(bytes) = cx.read("etc/inittab") {
+        for line in bytes.split(|b| *b == b'\n') {
+            let process = line.rsplit(|b| *b == b':').next().unwrap_or(line);
+            let words: Vec<&[u8]> = process.split(|b| b.is_ascii_whitespace()).filter(|w| !w.is_empty()).collect();
+            for pair in words.windows(2) {
+                if pair[0].ends_with(b"openrc") && !pair[1].starts_with(b"-") {
+                    boot.insert(String::from_utf8_lossy(pair[1]).into_owned());
+                }
+            }
+        }
+    }
+    Some(Openrc { levels, boot })
+}
+
+impl Openrc {
+    /// The runlevels a service is in, its stacked runlevels followed the
+    /// way get_runlevel_chain follows them, a loop stopping where it started.
+    fn runlevels_of(&self, service: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for level in self.levels.keys() {
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            let mut todo = vec![level.as_str()];
+            let mut found = false;
+            while let Some(l) = todo.pop() {
+                if !seen.insert(l) {
+                    continue;
+                }
+                let Some((services, stacked)) = self.levels.get(l) else { continue };
+                if services.contains(service) {
+                    found = true;
+                    break;
+                }
+                todo.extend(stacked.iter().map(String::as_str));
+            }
+            if found {
+                out.push(level.clone());
+            }
+        }
+        out
+    }
+}
+
+/// Enablement and notes for one init.d script under OpenRC: a name in a
+/// runlevel is what starts it — rc_service_in_runlevel is access(F_OK) on
+/// /etc/runlevels/<level>/<name>, whatever the entry is — and the conf.d
+/// files openrc-run sources for it before its own code are recorded and
+/// become entries of their own.
+fn openrc_service(cx: &mut Ctx, rc: &Openrc, e: &mut Entry, conf_d: &mut BTreeSet<PathBuf>) {
+    let name = e.name.clone();
+    if name.ends_with(".sh") {
+        e.enabled = Enablement::Disabled;
+        e.note("not_run", ".sh files are not init scripts to OpenRC");
+        return;
+    }
+    if e.raw.contains_key("shadowed_by") {
+        e.enabled = Enablement::Disabled;
+        return;
+    }
+    let levels = rc.runlevels_of(&name);
+    e.enabled = if levels.is_empty() { Enablement::Disabled } else { Enablement::Enabled };
+    if !levels.is_empty() {
+        e.note("runlevels", levels.join(", "));
+        e.note("starts_at_boot", levels.iter().any(|l| rc.boot.contains(l)).to_string());
+    }
+    // net.eth0 loads conf.d/net and then conf.d/net.eth0; each may have a
+    // per-runlevel variant that replaces it in that runlevel.
+    let mut stems: Vec<String> = Vec::new();
+    if let Some((base, _)) = name.split_once('.') {
+        stems.push(base.to_string());
+    }
+    stems.push(name.clone());
+    let mut sourced: Vec<String> = Vec::new();
+    for prefix in OPENRC_PREFIXES.iter().rev() {
+        for stem in &stems {
+            let mut files = vec![format!("{prefix}/conf.d/{stem}")];
+            files.extend(rc.levels.keys().map(|l| format!("{prefix}/conf.d/{stem}.{l}")));
+            for f in files {
+                if cx.root.stat_follow(&f).is_ok_and(|m| m.is_file) {
+                    sourced.push(cx.root.abs(&f).display().to_string());
+                    conf_d.insert(PathBuf::from(f));
+                }
+            }
+        }
+    }
+    if !sourced.is_empty() {
+        e.note("conf_d", sourced.join(", "));
+    }
+}
+
+/// What OpenRC runs besides the scripts: rc.conf and rc.conf.d, sourced by
+/// every service; the conf.d files the services above source; local.d,
+/// whose executable *.start and *.stop files the `local` service runs with
+/// eval; and a name in a runlevel that no init.d holds, which rc reports as
+/// a service that does not exist.
+fn openrc_extras(cx: &mut Ctx, rc: &Openrc, scripts: &BTreeSet<Vec<u8>>, conf_d: BTreeSet<PathBuf>) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let sourced = |cx: &mut Ctx, rel: &Path, name: String, by: &str| -> Entry {
+        let mut e = cx.entry(Kind::OpenrcService, rel, name);
+        e.trigger = Trigger::Boot;
+        e.principal = Some(ROOT.to_string());
+        e.target_path = Some(cx.root.abs(rel));
+        e.enabled = Enablement::Enabled;
+        e.note("sourced_by", by);
+        e
+    };
+    for prefix in OPENRC_PREFIXES {
+        let rel = PathBuf::from(prefix).join("rc.conf");
+        if cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
+            out.push(sourced(cx, &rel, "rc.conf".to_string(), "every service, before its conf.d"));
+        }
+        let dir = PathBuf::from(prefix).join("rc.conf.d");
+        let mut names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir && e.name.as_bytes().ends_with(b".conf")).map(|e| e.name).collect();
+        names.sort();
+        for name in names {
+            let rel = dir.join(&name);
+            out.push(sourced(cx, &rel, format!("rc.conf.d/{}", name.to_string_lossy()), "every service, before its conf.d"));
+        }
+    }
+    for rel in conf_d {
+        let stem = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let by = format!("the service {} at every start", stem.split('.').next().unwrap_or(&stem));
+        out.push(sourced(cx, &rel, format!("conf.d/{stem}"), &by));
+    }
+
+    // local.d sits beside the init.d that holds the local script.
+    let local_levels = rc.runlevels_of("local");
+    let local_prefix = OPENRC_PREFIXES.iter().find(|p| cx.root.stat_follow(format!("{p}/init.d/local")).is_ok_and(|m| m.is_file));
+    for prefix in OPENRC_PREFIXES {
+        let dir = PathBuf::from(prefix).join("local.d");
+        let mut names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
+        names.sort();
+        for name in names {
+            let raw = name.as_bytes();
+            let stops = raw.ends_with(b".stop");
+            if !stops && !raw.ends_with(b".start") {
+                continue;
+            }
+            let rel = dir.join(&name);
+            let mut e = script_entry(cx, Kind::RcLocal, &rel, &name, if stops { Trigger::PowerEvent } else { Trigger::Boot });
+            e.note("run_by", "OpenRC's local service, with eval");
+            let exec = exec_mode(cx, &rel) != 0;
+            e.note("executable", exec.to_string());
+            e.enabled = Enablement::Disabled;
+            if local_prefix != Some(&prefix) {
+                e.note("not_run", "the local service reads the local.d beside its own init.d");
+            } else if local_levels.is_empty() {
+                e.note("not_run", "the local service is in no runlevel");
+            } else if !exec {
+                e.note("not_run", "the local service runs only executable files");
+            } else {
+                e.enabled = Enablement::Enabled;
+                e.note("runlevels", local_levels.join(", "));
+            }
+            out.push(e);
+        }
+    }
+
+    for (level, (services, _)) in &rc.levels {
+        for name in services {
+            if scripts.contains(name.as_bytes()) {
+                continue;
+            }
+            let rel = Path::new(OPENRC_RUNLEVELS).join(level).join(name);
+            let mut e = cx.entry(Kind::OpenrcService, &rel, format!("{level}/{name}"));
+            e.trigger = Trigger::Boot;
+            e.principal = Some(ROOT.to_string());
+            e.enabled = Enablement::Disabled;
+            e.note("runlevels", level.clone());
+            e.note("not_run", format!("no init.d holds a script named {name}; rc reports a service that does not exist"));
+            if let Ok(t) = cx.root.read_link(&rel) {
+                e.note("link_target", t.display().to_string());
+            }
+            out.push(e);
+        }
     }
     out
 }
@@ -1204,6 +1474,141 @@ exec /usr/sbin/sshd\n";
             "insserv's cache is not a script"
         );
         assert_eq!(of_kind(&s, Kind::SysvInit).len(), 2, "one entry per script, links folded in");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    const OPENRC_SSHD: &[u8] = b"#!/sbin/openrc-run\ncommand=/usr/sbin/sshd\n";
+
+    /// An OpenRC host: openrc-run installed and BusyBox as PID 1.
+    fn openrc_host(dir: &Path) {
+        put(dir, "sbin/openrc-run", b"\x7fELF openrc-run", 0o755);
+        put(dir, "bin/busybox", b"\x7fELF BusyBox /etc/inittab", 0o755);
+        link(dir, "/bin/busybox", "sbin/init");
+        put(dir, "etc/inittab", b"::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\n::shutdown:/sbin/openrc shutdown\n", 0o644);
+    }
+
+    #[test]
+    fn openrc_starts_what_a_runlevel_names_and_reads_nothing_from_rc_d() {
+        let dir = tree("openrc");
+        openrc_host(&dir);
+        for svc in ["sshd", "crond", "local", "dormant", "net.eth0", "later", "nonet-only"] {
+            put(&dir, &format!("etc/init.d/{svc}"), OPENRC_SSHD, 0o755);
+        }
+        put(&dir, "etc/init.d/functions.sh", b"# helpers\n", 0o644);
+        put(&dir, "usr/local/etc/init.d/sshd", b"#!/sbin/openrc-run\ncommand=/opt/sshd\n", 0o755);
+        for d in ["sysinit", "boot", "default", "nonetwork", "shutdown"] {
+            fs::create_dir_all(dir.join("etc/runlevels").join(d)).unwrap();
+        }
+        link(&dir, "/etc/init.d/sshd", "etc/runlevels/default/sshd");
+        // A plain file, a dangling link and a .sh name: only the first counts.
+        put(&dir, "etc/runlevels/default/crond", b"", 0o644);
+        link(&dir, "/etc/init.d/gone", "etc/runlevels/default/gone");
+        link(&dir, "/etc/init.d/functions.sh", "etc/runlevels/default/functions.sh");
+        // A name with no script behind it starts nothing, and is a row; the
+        // link's target only matters in that a dangling one is not listed.
+        put(&dir, "opt/evil", b"#!/bin/sh\n", 0o755);
+        link(&dir, "/opt/evil", "etc/runlevels/default/evil");
+        put(&dir, "etc/runlevels/default/ghost", b"", 0o644);
+        // nonetwork stacks default; later is only in nonetwork.
+        link(&dir, "../default", "etc/runlevels/nonetwork/default");
+        link(&dir, "/etc/init.d/later", "etc/runlevels/nonetwork/later");
+        link(&dir, "/etc/init.d/nonet-only", "etc/runlevels/nonetwork/nonet-only");
+        link(&dir, "/etc/init.d/net.eth0", "etc/runlevels/boot/net.eth0");
+        link(&dir, "/etc/init.d/local", "etc/runlevels/default/local");
+        // An rc?.d link, which OpenRC never reads.
+        link(&dir, "../init.d/dormant", "etc/rc2.d/S20dormant");
+        link(&dir, "/opt/payload.sh", "etc/rc3.d/S99payload");
+        // conf.d, with a per-runlevel variant and the net stem.
+        put(&dir, "etc/conf.d/sshd", b"SSHD_OPTS=\n", 0o644);
+        put(&dir, "etc/conf.d/sshd.nonetwork", b"SSHD_OPTS=-x\n", 0o644);
+        put(&dir, "etc/conf.d/net", b"config_eth0=dhcp\n", 0o644);
+        put(&dir, "usr/local/etc/conf.d/sshd", b"SSHD_OPTS=-y\n", 0o644);
+        put(&dir, "etc/rc.conf", b"rc_parallel=NO\n", 0o644);
+        put(&dir, "etc/rc.conf.d/site.conf", b"rc_logger=YES\n", 0o644);
+        put(&dir, "etc/rc.conf.d/notes.txt", b"x\n", 0o644);
+        // local.d: executable, not executable, a stop file, a stray.
+        put(&dir, "etc/local.d/10-agent.start", b"#!/bin/sh\n/opt/agent &\n", 0o755);
+        put(&dir, "etc/local.d/20-quiet.start", b"#!/bin/sh\n/opt/quiet\n", 0o644);
+        put(&dir, "etc/local.d/90-bye.stop", b"#!/bin/sh\n/opt/bye\n", 0o755);
+        put(&dir, "etc/local.d/README", b"docs\n", 0o644);
+
+        let s = scan(&dir);
+        assert!(matches!(status(&s), Status::Complete), "{:?}", status(&s));
+        assert!(of_kind(&s, Kind::SysvInit).iter().all(|e| e.raw.contains_key("runlevel")), "init.d scripts are OpenRC services here");
+
+        // Two scripts of one name: the /usr/local/etc one is found first and
+        // is the service; the /etc one is a row that says it is shadowed.
+        let sshds: Vec<&Entry> = of_kind(&s, Kind::OpenrcService).into_iter().filter(|e| e.name == "sshd").collect();
+        assert_eq!(sshds.len(), 2);
+        let sshd = sshds.iter().find(|e| e.source.starts_with(dir.join("usr/local"))).unwrap();
+        let shadowed = sshds.iter().find(|e| e.source.starts_with(dir.join("etc"))).unwrap();
+        assert_eq!((sshd.enabled, sshd.raw["runlevels"].as_str(), sshd.raw["starts_at_boot"].as_str()), (Enablement::Enabled, "default, nonetwork", "true"));
+        assert!(!sshd.raw.contains_key("shadowed_by"));
+        assert_eq!((shadowed.enabled, shadowed.raw["shadowed_by"].as_str()), (Enablement::Disabled, "a script of the same name in an earlier init.d"));
+        assert_eq!(sshd.raw["interpreter"], "/sbin/openrc-run");
+        let confs = sshd.raw["conf_d"].clone();
+        for f in ["etc/conf.d/sshd", "etc/conf.d/sshd.nonetwork", "usr/local/etc/conf.d/sshd"] {
+            assert!(confs.contains(&dir.join(f).display().to_string()), "{f} in {confs}");
+        }
+        let crond = one(&s, Kind::OpenrcService, "crond");
+        assert_eq!(crond.enabled, Enablement::Enabled, "any entry of the name counts, a plain file included");
+        assert_eq!(one(&s, Kind::OpenrcService, "dormant").enabled, Enablement::Disabled, "an rc2.d link enables nothing");
+        assert_eq!(one(&s, Kind::OpenrcService, "dormant").raw["start_runlevels"], "2");
+        let later = one(&s, Kind::OpenrcService, "later");
+        assert_eq!((later.raw["runlevels"].as_str(), later.raw["starts_at_boot"].as_str()), ("nonetwork", "false"));
+        let net = one(&s, Kind::OpenrcService, "net.eth0");
+        assert!(net.raw["conf_d"].contains("etc/conf.d/net"), "net.eth0 sources conf.d/net: {}", net.raw["conf_d"]);
+        assert_eq!(one(&s, Kind::OpenrcService, "functions.sh").raw["not_run"], ".sh files are not init scripts to OpenRC");
+        let payload = one(&s, Kind::SysvInit, "S99payload");
+        assert_eq!(payload.enabled, Enablement::Disabled);
+        assert_eq!(payload.raw["not_run"], "OpenRC reads /etc/runlevels, not rc?.d");
+
+        let names: Vec<&str> = of_kind(&s, Kind::OpenrcService).iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(&"default/gone"), "a dangling entry is not there to OpenRC: {names:?}");
+        assert!(!names.contains(&"default/functions.sh"));
+        let evil = one(&s, Kind::OpenrcService, "default/evil");
+        assert_eq!((evil.enabled, evil.raw["link_target"].as_str()), (Enablement::Disabled, "/opt/evil"));
+        assert!(evil.raw["not_run"].starts_with("no init.d holds a script named evil"));
+        assert!(names.contains(&"default/ghost"));
+
+        assert_eq!(one(&s, Kind::OpenrcService, "rc.conf").raw["sourced_by"], "every service, before its conf.d");
+        assert!(names.contains(&"rc.conf.d/site.conf"));
+        assert!(!names.contains(&"rc.conf.d/notes.txt"));
+        let conf = one(&s, Kind::OpenrcService, "conf.d/sshd.nonetwork");
+        assert_eq!(conf.raw["sourced_by"], "the service sshd at every start");
+        assert_eq!(conf.target_path, Some(dir.join("etc/conf.d/sshd.nonetwork")));
+        assert_eq!(names.iter().filter(|n| **n == "conf.d/net").count(), 1, "one entry however many services source it");
+
+        let agent = one(&s, Kind::RcLocal, "10-agent.start");
+        assert_eq!((agent.enabled, agent.trigger, agent.raw["runlevels"].as_str()), (Enablement::Enabled, Trigger::Boot, "default, nonetwork"), "local is in default, and nonetwork stacks default");
+        assert_eq!(agent.raw["run_by"], "OpenRC's local service, with eval");
+        assert_eq!(one(&s, Kind::RcLocal, "20-quiet.start").raw["not_run"], "the local service runs only executable files");
+        let bye = one(&s, Kind::RcLocal, "90-bye.stop");
+        assert_eq!((bye.enabled, bye.trigger), (Enablement::Enabled, Trigger::PowerEvent));
+        assert!(!of_kind(&s, Kind::RcLocal).iter().any(|e| e.name == "README"));
+
+        // Take local out of every runlevel: local.d runs nothing.
+        fs::remove_file(dir.join("etc/runlevels/default/local")).unwrap();
+        let s = scan(&dir);
+        assert_eq!(one(&s, Kind::RcLocal, "10-agent.start").raw["not_run"], "the local service is in no runlevel");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn under_systemd_an_installed_openrc_changes_nothing() {
+        let dir = tree("openrc-systemd");
+        put(&dir, "sbin/openrc-run", b"\x7fELF openrc-run", 0o755);
+        put(&dir, "lib/systemd/systemd", b"\x7fELF systemd", 0o755);
+        link(&dir, "/lib/systemd/systemd", "sbin/init");
+        put(&dir, "etc/init.d/ssh", SSH, 0o755);
+        link(&dir, "../init.d/ssh", "etc/rc2.d/S01ssh");
+        fs::create_dir_all(dir.join("etc/runlevels/default")).unwrap();
+        link(&dir, "/etc/init.d/ssh", "etc/runlevels/default/ssh");
+        put(&dir, "etc/local.d/x.start", b"#!/bin/sh\n", 0o755);
+        let s = scan(&dir);
+        assert_eq!(one(&s, Kind::SysvInit, "ssh").enabled, Enablement::Enabled, "the generator reads rc2.d");
+        assert!(of_kind(&s, Kind::OpenrcService).is_empty());
+        assert!(of_kind(&s, Kind::RcLocal).is_empty());
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -11,7 +11,7 @@ Finds what runs automatically on Linux.
 What it reads, grouped by when each thing runs:
 
 - Boot: systemd units, generators and presets, SysV init scripts and
-  rc.local, inittab, kernel modules and modprobe `install` lines, tmpfiles.d, what
+  rc.local, inittab, OpenRC services and local.d, kernel modules and modprobe `install` lines, tmpfiles.d, what
   builds the initramfs (initramfs-tools, dracut, DKMS), cloud-init,
   crypttab keyscripts, display-manager scripts, systemd's sleep and
   shutdown hooks

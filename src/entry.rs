@@ -111,6 +111,7 @@ str_enum!(Kind {
     Incron => "incron",
     ExternalFact => "external_fact",
     Inittab => "inittab",
+    OpenrcService => "openrc_service",
 });
 
 str_enum!(Trigger {

@@ -1,7 +1,7 @@
 # ATT&CK Enterprise 19.2: every technique with Linux or Containers among its platforms and persistence or privilege-escalation among its tactics, plus T1574 and its sub-techniques. Regenerate the first four columns with ci/attack-list.py; the answer is curated. answer is `kinds: a, b` (the entry kinds that report it), `out-of-scope: ` (decided, with the reason in notes) or `gap` (a TODO).
 technique	name	tactics	platforms	answer	notes
 T1037	Boot or Logon Initialization Scripts	persistence,privilege-escalation	Linux	kinds: rc_local, sysv_init, shell_profile, display_manager, systemd_hook, inittab	
-T1037.004	RC Scripts	persistence,privilege-escalation	Linux	kinds: rc_local, sysv_init	
+T1037.004	RC Scripts	persistence,privilege-escalation	Linux	kinds: rc_local, sysv_init, openrc_service	
 T1053	Scheduled Task/Job	execution,persistence,privilege-escalation	Containers,Linux	kinds: cron, at_job, systemd_timer, logrotate, salt_schedule, monitor_plugin	
 T1053.002	At	execution,persistence,privilege-escalation	Linux	kinds: at_job	
 T1053.003	Cron	execution,persistence,privilege-escalation	Linux	kinds: cron	
@@ -38,7 +38,7 @@ T1525	Implant Internal Image	persistence	Containers	out-of-scope	containers
 T1542	Pre-OS Boot	persistence,stealth	Linux	kinds: initramfs_hook, kernel_module	what builds the initramfs and goes into it (initramfs-tools hooks and scripts, dracut modules and conf, DKMS) is read; the built image, GRUB and firmware are not parsed (spec §5)
 T1542.002	Component Firmware	persistence,stealth	Linux	out-of-scope	firmware
 T1542.003	Bootkit	persistence,stealth	Linux	kinds: initramfs_hook	a hook or module planted for the initramfs is read at its source; a modified bootloader or image is not parsed (spec §5)
-T1543	Create or Modify System Process	persistence,privilege-escalation	Containers,Linux	kinds: systemd_unit, sysv_init, inetd_service, dbus_service, inittab	
+T1543	Create or Modify System Process	persistence,privilege-escalation	Containers,Linux	kinds: systemd_unit, sysv_init, inetd_service, dbus_service, inittab, openrc_service	
 T1543.002	Systemd Service	persistence,privilege-escalation	Linux	kinds: systemd_unit	
 T1543.005	Container Service	persistence,privilege-escalation	Containers	out-of-scope	containers
 T1546	Event Triggered Execution	persistence,privilege-escalation	Linux	kinds: event_handler, udev, pam, network_dispatcher, incron, systemd_hook, polkit_rule, tcp_wrapper, logrotate, pkg_hook, alternative, dpkg_diversion, kernel_callout	
