@@ -329,6 +329,17 @@ fn desktop_file(cx: &mut Ctx, rel: &Path, file: &OsStr, principal: Option<&str>)
     }
     if let Some(v) = keys.get("TryExec") {
         e.note("tryexec", lossy(v));
+        // A launcher starts nothing when TryExec names a program that is not
+        // there or cannot be run. Only an absolute path is judged: a bare name
+        // is looked up in the session's PATH, which is not on disk.
+        if v.first() == Some(&b'/') {
+            let program = Path::new(OsStr::from_bytes(v.trim_ascii_end()));
+            let runs = cx.root.stat_follow(program).is_ok_and(|m| m.is_file && m.mode & 0o111 != 0);
+            if !runs {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "TryExec names a program that is not there or not executable");
+            }
+        }
     }
     for (key, note) in [("Type", "desktop_type"), ("Name", "desktop_name"), ("NoDisplay", "nodisplay")] {
         if let Some(v) = keys.get(key) {
@@ -1093,6 +1104,27 @@ mod tests {
 
     fn by_name<'a>(entries: &'a [Entry], kind: Kind, name: &str) -> Vec<&'a Entry> {
         entries.iter().filter(|e| e.kind == kind && e.name == name).collect()
+    }
+
+    #[test]
+    fn an_autostart_whose_tryexec_is_missing_or_not_executable_starts_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tree("tryexec");
+        let desktop = |try_exec: &str| format!("[Desktop Entry]\nType=Application\nExec=/opt/agent\nTryExec={try_exec}\n").into_bytes();
+        put(&dir, "opt/present", b"#!/bin/sh\n");
+        std::fs::set_permissions(dir.join("opt/present"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        put(&dir, "opt/plain", b"data");
+        put(&dir, "etc/xdg/autostart/present.desktop", &desktop("/opt/present"));
+        put(&dir, "etc/xdg/autostart/absent.desktop", &desktop("/opt/absent"));
+        put(&dir, "etc/xdg/autostart/plain.desktop", &desktop("/opt/plain"));
+        put(&dir, "etc/xdg/autostart/bare.desktop", &desktop("agent"));
+        let (entries, _) = run(&dir);
+        let state = |name: &str| by_name(&entries, Kind::XdgAutostart, name)[0].enabled;
+        assert_eq!(state("present.desktop"), Enablement::Enabled);
+        assert_eq!(state("absent.desktop"), Enablement::Disabled);
+        assert_eq!(state("plain.desktop"), Enablement::Disabled);
+        assert_eq!(state("bare.desktop"), Enablement::Enabled, "a bare name is the session's PATH to look up");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A dconf database in the real on-disk format, written by gvdb itself.
