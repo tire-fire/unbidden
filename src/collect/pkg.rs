@@ -1139,12 +1139,23 @@ fn rpm_scriptlets(cx: &mut Ctx) -> (Vec<Entry>, &'static str) {
         if s.prog == "<lua>" || s.prog.is_empty() {
             e.note("target_unverifiable", "rpm runs this itself; no program is named");
         }
+        if is_shell(s.prog.as_bytes()) {
+            e.note("script_shell", "true");
+        }
         out.push(e);
     }
     (out, RPM_CAVEAT)
 }
 
 // ------------------------------------------------------------------ apk ----
+
+/// Whether an interpreter line (a path and its options) names a POSIX-style
+/// shell: what a body has to be for its text to be read as shell.
+fn is_shell(line: &[u8]) -> bool {
+    let program = line.trim_ascii_start().split(|b| b.is_ascii_whitespace()).next().unwrap_or_default();
+    let name = program.rsplit(|b| *b == b'/').next().unwrap_or_default();
+    [&b"sh"[..], b"bash", b"dash", b"ash", b"zsh"].contains(&name)
+}
 
 /// The scripts apk keeps for every installed package, and its triggers. A
 /// package's pre- and post-install, -upgrade and -deinstall scripts run as
@@ -1184,9 +1195,14 @@ fn apk_hooks(cx: &mut Ctx) -> Vec<Entry> {
             }
         }
         set_command(&mut e, &s.body);
-        // apk runs the script as a file of its own, so the interpreter is
-        // the shebang's, and the enrichment pass reads that from the body.
+        // apk runs the script as a file of its own, so the interpreter is the
+        // shebang's. No file on disk is that program; where the shebang names
+        // a shell, the body is shell text and the enrichment pass reads the
+        // programs it starts out of it.
         e.note("target_unverifiable", "apk runs the script from its archive; no file on disk is the program");
+        if s.body.strip_prefix(b"#!").is_some_and(|line| is_shell(line.split(|b| *b == b'\n').next().unwrap_or_default())) {
+            e.note("script_shell", "true");
+        }
         out.push(e);
     }
     // A trigger registered for a package whose script is not in the archive
@@ -1780,6 +1796,16 @@ mod tests {
         assert_eq!(ignored.enabled, Enablement::Disabled, "apt never reads a .sh fragment");
         assert!(ignored.raw.contains_key("not_read_by_apt"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_shells_interpreter_line_marks_a_body_as_shell_text() {
+        for yes in ["/bin/sh", "/usr/bin/bash -e", "/bin/ash", " /bin/dash"] {
+            assert!(is_shell(yes.as_bytes()), "{yes}");
+        }
+        for no in ["<lua>", "", "/usr/bin/python3", "/bin/sh-not", "/usr/bin/perl -w"] {
+            assert!(!is_shell(no.as_bytes()), "{no}");
+        }
     }
 
     #[test]

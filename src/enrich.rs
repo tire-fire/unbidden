@@ -240,39 +240,47 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
     // findings with two triggers, not one.
     let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
     for entry in entries.iter_mut() {
-        if entry.raw.contains_key("target_unverifiable") {
+        // A body that is shell text run by an interpreter (a package
+        // scriptlet) is a script, not a command line: its target is the
+        // interpreter, and each program the text starts is an entry of its own.
+        let script = entry.raw.contains_key("script_shell");
+        if entry.raw.contains_key("target_unverifiable") && !script {
             continue;
         }
         let Some(command) = entry.command.clone() else { continue };
         let command = command.as_slice();
         let lines = commands(&String::from_utf8_lossy(command), 0);
         let Some(first) = lines.first().and_then(|c| c.first()) else { continue };
-        // systemd's ExecStart= prefixes.
-        let head = first.trim_start_matches(['-', '@', '+', '!', ':']).to_string();
+        // systemd's ExecStart= prefixes. Not in a script, where `:` is the
+        // no-op builtin and `!` negates a pipeline.
+        let prefixes: &[char] = if script { &[] } else { &['-', '@', '+', '!', ':'] };
+        let head = first.trim_start_matches(prefixes).to_string();
         // Only where argv[0] is what the collector took as the target: a PAM
         // module or a udev key has a target that is not the command word.
         let head_name = Path::new(&head).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        if entry.target_path.as_ref().is_some_and(|t| t.file_name().and_then(|n| n.to_str()) != Some(head_name.as_str())) {
+        if !script && entry.target_path.as_ref().is_some_and(|t| t.file_name().and_then(|n| n.to_str()) != Some(head_name.as_str())) {
             continue;
         }
         let mut runs = Vec::new();
         for mut words in lines {
             if let Some(w) = words.first_mut() {
-                *w = w.trim_start_matches(['-', '@', '+', '!', ':']).to_string();
+                *w = w.trim_start_matches(prefixes).to_string();
             }
             programs(words, Vec::new(), 0, &mut runs);
         }
         // The one case with nothing to change: a single program, reached
         // directly, which is what the collector already has.
         if let [run] = runs.as_slice() {
-            if entry.target_path.is_some() && run.by.is_empty() && run.program.as_deref() == Some(head.as_str()) {
+            if !script && entry.target_path.is_some() && run.by.is_empty() && run.program.as_deref() == Some(head.as_str()) {
                 continue;
             }
         }
         match runs.as_slice() {
             // Only builtins: the shell itself is what runs.
             [] => {}
-            [run] => {
+            // One program: it is the target, unless the entry is a script,
+            // whose target is its interpreter whatever it starts.
+            [run] if !script => {
                 if !run.by.is_empty() {
                     entry.note("target_wrapped_by", run.by.join(" "));
                 }
@@ -309,7 +317,7 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
                     if !run.by.is_empty() {
                         e.note("target_wrapped_by", run.by.join(" "));
                     }
-                    e.note("chain", "command line");
+                    e.note("chain", if script { "script" } else { "command line" });
                     e.note("declared_by_entry", &entry.id);
                     if let Some(how) = run.program.as_deref().and_then(|p| guarded_by_test(command, p.as_bytes())) {
                         e.note("guarded_by_test", how);
@@ -2512,6 +2520,35 @@ mod tests {
         e.target_path = Some(dir.join("bin/sh"));
         assert_eq!(look_through_wrappers(&root, std::slice::from_mut(&mut e)).len(), 2);
         assert!(!e.raw.contains_key("commands_listed"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_shell_scriptlet_starts_programs_and_keeps_its_interpreter() {
+        let dir = std::env::temp_dir().join(format!("unbidden-scriptlet-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        let mk = |shell: bool| {
+            let mut e = Entry::new(Kind::PkgHook, dir.join("lib/apk/db/scripts.tar"), "pkg:post-install");
+            e.command = Some(b"#!/bin/sh\n: nothing\nif [ -x /opt/x ]; then /tmp/evil & fi\n/bin/true\n".to_vec());
+            e.note("target_unverifiable", "apk runs the script from its archive");
+            if shell {
+                e.note("script_shell", "true");
+            }
+            e
+        };
+        let mut e = mk(true);
+        let more = look_through_wrappers(&root, std::slice::from_mut(&mut e));
+        let names: Vec<&str> = more.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["/tmp/evil", "/bin/true"], "the no-op builtin is not a program");
+        assert!(e.target_path.is_none(), "the script's own target is untouched");
+        assert!(more.iter().all(|m| m.raw["chain"] == "script" && m.raw["declared_by_entry"] == e.id));
+        assert_eq!(more[0].target_path, Some(root.abs("tmp/evil")));
+
+        // Text the entry does not say is a shell's is left alone, as before.
+        let mut e = mk(false);
+        assert!(look_through_wrappers(&root, std::slice::from_mut(&mut e)).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

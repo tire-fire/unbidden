@@ -144,8 +144,12 @@ pub fn suppressed(e: &Entry) -> bool {
 /// would buy nothing and cost the default view several hundred rows of vendor
 /// scriptlets, which is the noise §8 exists to remove.
 ///
-/// A scriptlet carrying any finding at all is still shown, so an encoded
-/// payload or an unresolvable target in one reaches the operator.
+/// A scriptlet carrying any finding at all is still shown. Its own findings
+/// are few (its text not being UTF-8, its database altered), so what it starts
+/// is judged where it is found: a shell scriptlet's programs are entries of
+/// their own, and one that starts a program no package owns, or one the shell
+/// cannot name without running, is shown through that entry. A scriptlet in
+/// another language (lua, python) is judged by its interpreter alone.
 ///
 /// The one thing that can be established about a maintainer script is when
 /// it last changed, and one changed after its package was installed is shown:
