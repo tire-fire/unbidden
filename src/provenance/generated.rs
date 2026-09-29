@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::entry::Provenance;
+use crate::entry::{Producer, Provenance};
 use crate::root::Root;
 
 use super::Answers;
@@ -33,7 +33,7 @@ pub fn classify(root: &Root, unclaimed: &BTreeSet<PathBuf>) -> Answers {
     let mut out = Answers::new();
     for path in unclaimed {
         if let Some(by) = producer(root, &snaps, path) {
-            out.insert(path.clone(), Provenance::GeneratedBy { by: by.to_string() });
+            out.insert(path.clone(), Provenance::GeneratedBy { by });
         }
     }
     out
@@ -68,7 +68,7 @@ impl Snaps {
     }
 }
 
-fn producer(root: &Root, snaps: &Snaps, rel: &Path) -> Option<&'static str> {
+fn producer(root: &Root, snaps: &Snaps, rel: &Path) -> Option<Producer> {
     let text = rel.to_string_lossy();
 
     // The contents of a mounted snap: a read-only squashfs image of an
@@ -76,19 +76,19 @@ fn producer(root: &Root, snaps: &Snaps, rel: &Path) -> Option<&'static str> {
     if let Some(rest) = text.strip_prefix("snap/") {
         let mut parts = rest.splitn(3, '/');
         let (snap, rev) = (parts.next()?, parts.next()?);
-        return snaps.has_revision(snap, rev).then_some("snapd");
+        return snaps.has_revision(snap, rev).then_some(Producer::Snapd);
     }
 
     // Written by systemd itself, into directories only root can write.
     // Each is a different writer, and the name says which.
     if text.starts_with("run/systemd/generator") {
-        return Some("systemd-generator");
+        return Some(Producer::SystemdGenerator);
     }
     if text.starts_with("run/systemd/transient/") {
-        return Some("systemd-transient");
+        return Some(Producer::SystemdTransient);
     }
     if text.starts_with("run/systemd/system.control/") || text.starts_with("etc/systemd/system.control/") {
-        return Some("systemctl-set-property");
+        return Some(Producer::SystemctlSetProperty);
     }
 
     // cloud-init's runtime state; its units and binaries are packaged and so
@@ -97,26 +97,26 @@ fn producer(root: &Root, snaps: &Snaps, rel: &Path) -> Option<&'static str> {
     // `scripts/per-boot` was not written by cloud-init.
     const ADMIN_WRITTEN: [&str; 3] = ["var/lib/cloud/scripts/", "var/lib/cloud/handlers/", "var/lib/cloud/seed/"];
     if text.starts_with("run/cloud-init/") || (text.starts_with("var/lib/cloud/") && !ADMIN_WRITTEN.iter().any(|d| text.starts_with(d))) {
-        return Some("cloud-init");
+        return Some(Producer::CloudInit);
     }
     // apk's own state: the installed database, the scripts archive and the
     // triggers file it rewrites on every transaction. No package ships
     // them, and apk info -W owns up to none of them.
     if text.starts_with("lib/apk/db/") {
-        return Some("apk");
+        return Some(Producer::Apk);
     }
 
     let unit_dir = ["etc/systemd/system/", "etc/systemd/user/"].iter().any(|d| {
         text.strip_prefix(d).is_some_and(|rest| !rest.contains('/'))
     });
     if unit_dir && snap_unit(root, snaps, rel) {
-        return Some("snapd");
+        return Some(Producer::Snapd);
     }
     if preset_link(root, rel) {
-        return Some("systemd-preset");
+        return Some(Producer::SystemdPreset);
     }
     if postinst_mask(root, rel) {
-        return Some("dpkg-postinst");
+        return Some(Producer::DpkgPostinst);
     }
     None
 }
@@ -316,7 +316,7 @@ mod tests {
         // nothing is hidden on the strength of them.
         assert!(classify(&Root::at(&dir).unwrap(), &wanted).is_empty());
         let out = classify(&root, &wanted);
-        assert_eq!(out.get(Path::new("usr/lib/systemd/system/screen-cleanup.service")), Some(&Provenance::GeneratedBy { by: "dpkg-postinst".into() }));
+        assert_eq!(out.get(Path::new("usr/lib/systemd/system/screen-cleanup.service")), Some(&Provenance::GeneratedBy { by: Producer::DpkgPostinst }));
         assert_eq!(out.get(Path::new("usr/lib/systemd/system/auditd.service")), None, "no maintainer script names it");
         assert_eq!(out.get(Path::new("etc/systemd/system/screen-cleanup.service")), None, "the administrator's directory is the administrator's");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -331,9 +331,9 @@ mod tests {
         let root = Root::at(&dir).unwrap();
         let snaps = Snaps(BTreeMap::new());
         for (path, by) in [
-            ("var/lib/cloud/instance/scripts/part-001", Some("cloud-init")),
-            ("var/lib/cloud/instances/i-1/user-data.txt", Some("cloud-init")),
-            ("var/lib/cloud/data/result.json", Some("cloud-init")),
+            ("var/lib/cloud/instance/scripts/part-001", Some(Producer::CloudInit)),
+            ("var/lib/cloud/instances/i-1/user-data.txt", Some(Producer::CloudInit)),
+            ("var/lib/cloud/data/result.json", Some(Producer::CloudInit)),
             ("var/lib/cloud/scripts/per-boot/evil.sh", None),
             ("var/lib/cloud/handlers/part-handler.py", None),
             ("var/lib/cloud/seed/nocloud/user-data", None),
@@ -374,7 +374,7 @@ mod tests {
         .collect();
         let out = classify(&root, &wanted);
         let by = |p: &str| out.get(Path::new(p)).cloned();
-        assert_eq!(by("etc/systemd/system/getty.target.wants/getty@tty1.service"), Some(Provenance::GeneratedBy { by: "systemd-preset".into() }), "the template's DefaultInstance, enabled by systemd's own preset");
+        assert_eq!(by("etc/systemd/system/getty.target.wants/getty@tty1.service"), Some(Provenance::GeneratedBy { by: Producer::SystemdPreset }), "the template's DefaultInstance, enabled by systemd's own preset");
         assert_eq!(by("etc/systemd/system/getty.target.wants/getty@tty9.service"), None, "another instance is somebody's enable");
         assert_eq!(by("etc/systemd/system/getty.target.wants/container-getty@evil.service"), None, "a preset in /etc vouches for nothing");
         assert_eq!(by("etc/systemd/system/multi-user.target.wants/evil@x.service"), None, "a link out of the vendor tree");
@@ -406,7 +406,7 @@ mod tests {
     }
 
     fn snapd() -> Option<Provenance> {
-        Some(Provenance::GeneratedBy { by: "snapd".into() })
+        Some(Provenance::GeneratedBy { by: Producer::Snapd })
     }
 
     #[test]
@@ -474,10 +474,10 @@ mod tests {
             Provenance::GeneratedBy { by } => by,
             other => panic!("{other:?}"),
         });
-        assert_eq!(v("run/systemd/generator/foo.service").as_deref(), Some("systemd-generator"));
-        assert_eq!(v("run/systemd/generator.late/foo.service").as_deref(), Some("systemd-generator"));
-        assert_eq!(v("run/systemd/transient/run-u1.service").as_deref(), Some("systemd-transient"));
-        assert_eq!(v("run/systemd/system.control/ssh.service.d/50-CPUQuota.conf").as_deref(), Some("systemctl-set-property"));
+        assert_eq!(v("run/systemd/generator/foo.service"), Some(Producer::SystemdGenerator));
+        assert_eq!(v("run/systemd/generator.late/foo.service"), Some(Producer::SystemdGenerator));
+        assert_eq!(v("run/systemd/transient/run-u1.service"), Some(Producer::SystemdTransient));
+        assert_eq!(v("run/systemd/system.control/ssh.service.d/50-CPUQuota.conf"), Some(Producer::SystemctlSetProperty));
         assert_eq!(v("etc/systemd/system/evil.service"), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }

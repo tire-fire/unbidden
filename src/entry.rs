@@ -161,6 +161,28 @@ str_enum!(Integrity {
     Unknown => "unknown",
 });
 
+str_enum!(Producer {
+    Snapd => "snapd",
+    SystemdGenerator => "systemd-generator",
+    SystemdTransient => "systemd-transient",
+    SystemctlSetProperty => "systemctl-set-property",
+    CloudInit => "cloud-init",
+    Apk => "apk",
+    SystemdPreset => "systemd-preset",
+    DpkgPostinst => "dpkg-postinst",
+});
+
+impl Producer {
+    /// What the producer writes is derived from packaged inputs (an init
+    /// script, the kernel command line, an installed snap, a preset naming a
+    /// template), so an entry it wrote is quiet once its program verifies.
+    /// The others write what some program decided at runtime, which is that
+    /// program's doing and stays in view.
+    pub fn derives_from_packaged_inputs(self) -> bool {
+        matches!(self, Producer::SystemdGenerator | Producer::Snapd | Producer::SystemdPreset | Producer::DpkgPostinst)
+    }
+}
+
 /// Which package, if any, claims the file an entry was read from.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "verdict", rename_all = "kebab-case")]
@@ -168,7 +190,7 @@ pub enum Provenance {
     Packaged { package: String, version: String, integrity: Integrity },
     /// Produced at runtime by a named component — snapd, cloud-init, a systemd
     /// generator. Neither packaged nor attacker-authored.
-    GeneratedBy { by: String },
+    GeneratedBy { by: Producer },
     /// No package owns the file, but it is byte for byte what `by` makes from
     /// files that are packaged and intact: a template a maintainer script
     /// copied, a stack pam-auth-update assembled. As trustworthy as those.

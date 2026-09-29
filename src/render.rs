@@ -108,16 +108,11 @@ pub fn suppressed(e: &Entry) -> bool {
         return target_verified && e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
     }
     // What a generator, snapd or a vendor preset wrote is derived from
-    // packaged inputs — an init script, the kernel command line, an
-    // installed snap, a preset naming a template — and runs a program that
-    // verifies; the product itself is nobody's file to digest.
-    // A transient unit or one written into /run/systemd/system by some
-    // program at runtime is not in this set: it is that program's own
-    // doing, and stays in view.
-    let derived = matches!(
-        &e.provenance,
-        crate::entry::Provenance::GeneratedBy { by } if matches!(by.as_str(), "systemd-generator" | "snapd" | "systemd-preset" | "dpkg-postinst")
-    );
+    // packaged inputs and runs a program that verifies; the product itself is
+    // nobody's file to digest. The rest of what is generated is not in this
+    // set (`Producer::derives_from_packaged_inputs`): a transient unit is the
+    // program's own doing, and stays in view.
+    let derived = matches!(&e.provenance, crate::entry::Provenance::GeneratedBy { by } if by.derives_from_packaged_inputs());
     // A file whose inode changed after its package installed it was touched
     // by something other than the package manager, however it verifies.
     let untouched = !e.raw.contains_key("changed_after_install");
@@ -504,7 +499,7 @@ mod tests {
     #[test]
     fn what_a_generator_or_snapd_wrote_is_quiet_once_its_program_verifies() {
         let generated = |by: &str| {
-            let mut e = entry("exim4.service", Provenance::GeneratedBy { by: by.into() }, &[]);
+            let mut e = entry("exim4.service", Provenance::GeneratedBy { by: crate::entry::Producer::parse(by).unwrap() }, &[]);
             e.note("target_provenance", "exim4-base (intact)");
             e
         };
