@@ -25,6 +25,12 @@ use crate::root::Root;
 
 pub type Answers = BTreeMap<PathBuf, Provenance>;
 
+/// What a failure says of a database that was there but not read whole. A
+/// panic reading one is a defect, and this is the difference the fuzz harness
+/// tells them apart by: a hostile database that cannot be read is an answer,
+/// not a crash.
+pub const NOT_READ_WHOLE: &str = "not read to the end";
+
 /// What one backend made of its database.
 pub enum Outcome {
     /// There is no database of this kind on the root.
@@ -101,7 +107,7 @@ fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Back
             }
             Ok(Outcome::Incomplete(answers, why)) => {
                 out.extend(answers);
-                failures.push(format!("{name} database: {why}"));
+                failures.push(format!("{name} database {NOT_READ_WHOLE}: {why}"));
                 backend_failed = true;
             }
             Ok(Outcome::Absent) => {}
@@ -432,7 +438,7 @@ mod tests {
         let root = Root::at(&dir).unwrap();
         let wanted: BTreeSet<PathBuf> = ["usr/bin/ok", "etc/other"].iter().map(PathBuf::from).collect();
         let r = resolve_with(&root, &wanted, &[("dpkg", half_read)]);
-        assert_eq!(r.failures, ["dpkg database: status is larger than the read cap"]);
+        assert_eq!(r.failures, ["dpkg database not read to the end: status is larger than the read cap"]);
         assert_eq!(r.answers[Path::new("usr/bin/ok")], Provenance::Unpackaged, "what it did answer stands");
         assert_eq!(r.answers[Path::new("etc/other")], Provenance::Unknown, "the rest might have been in the part not read");
         std::fs::remove_dir_all(&dir).unwrap();

@@ -80,7 +80,9 @@ fn run(root: &Root, collector: Box<dyn Collector>, enrich: bool) {
     // The same holds for an enrichment stage: isolated, it costs the
     // operator a provenance verdict rather than the scan, but it is still a
     // panic on hostile input.
-    if let Some(f) = scan.header.enrichment_failures.first() {
+    // A package database the input made unreadable is recorded as such, and
+    // is the tool working: only a panic reading it is a defect.
+    if let Some(f) = scan.header.enrichment_failures.iter().find(|f| !f.contains(unbidden::provenance::NOT_READ_WHOLE)) {
         panic!("enrichment failed on fuzzed input: {f}");
     }
 }

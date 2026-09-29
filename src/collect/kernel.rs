@@ -1125,7 +1125,7 @@ mod tests {
 
     #[test]
     fn a_same_named_file_in_a_later_directory_is_not_read() {
-        let dir = tree("shadow");
+        let dir = tree("module-shadow");
         put(&dir, "etc/modprobe.d/10-x.conf", b"install a /bin/local\n");
         put(&dir, "usr/lib/modprobe.d/10-x.conf", b"install a /bin/vendor\n");
         put(&dir, "usr/lib/modprobe.d/20-only.conf", b"install b /bin/only\n");
