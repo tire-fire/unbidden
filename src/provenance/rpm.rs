@@ -297,19 +297,32 @@ struct Claim {
     mode: Option<u32>,
 }
 
+/// Each file a header lists: its index in the header's parallel arrays, its
+/// path as every other path in the tool is written (root-relative; rpm stores
+/// absolute ones) and its rpm file flags. A file whose directory index points
+/// nowhere is skipped.
+fn files_of(header: &Header) -> Vec<(usize, PathBuf, u32)> {
+    let basenames = header.string_array(TAG_BASENAMES);
+    let dirnames = header.string_array(TAG_DIRNAMES);
+    let dirindexes = header.int_array(TAG_DIRINDEXES);
+    let flags = header.int_array(TAG_FILEFLAGS);
+    let mut out = Vec::with_capacity(basenames.len());
+    for (i, base) in basenames.iter().enumerate() {
+        let Some(dir) = dirindexes.get(i).and_then(|d| dirnames.get(*d as usize)) else { continue };
+        let mut path = String::with_capacity(dir.len() + base.len());
+        path.push_str(dir.trim_start_matches('/'));
+        path.push_str(base);
+        out.push((i, PathBuf::from(path), flags.get(i).copied().unwrap_or(0) as u32));
+    }
+    out
+}
+
 fn collect_claims(
     header: &Header,
     alias_to_wanted: &BTreeMap<PathBuf, Vec<PathBuf>>,
     claims: &mut BTreeMap<PathBuf, Vec<Claim>>,
 ) {
-    let basenames = header.string_array(TAG_BASENAMES);
-    if basenames.is_empty() {
-        return;
-    }
-    let dirnames = header.string_array(TAG_DIRNAMES);
-    let dirindexes = header.int_array(TAG_DIRINDEXES);
     let digests = header.string_array(TAG_FILEDIGESTS);
-    let flags = header.int_array(TAG_FILEFLAGS);
     let links = header.string_array(TAG_FILELINKTOS);
     // INT16, read signed; the mode is the low sixteen bits.
     let modes = header.int_array(TAG_FILEMODES);
@@ -318,15 +331,8 @@ fn collect_claims(
     let name = header.string(TAG_NAME).unwrap_or_default();
     let version = nevr(header);
 
-    for (i, base) in basenames.iter().enumerate() {
-        let Some(dir) = dirindexes.get(i).and_then(|d| dirnames.get(*d as usize)) else { continue };
-        let file_flags = flags.get(i).copied().unwrap_or(0) as u32;
-        // rpm stores absolute paths; every other path in the tool is
-        // root-relative.
-        let mut path = String::with_capacity(dir.len() + base.len());
-        path.push_str(dir.trim_start_matches('/'));
-        path.push_str(base);
-        let Some(wanted) = alias_to_wanted.get(Path::new(&path)) else { continue };
+    for (i, path, file_flags) in files_of(header) {
+        let Some(wanted) = alias_to_wanted.get(&path) else { continue };
 
         let claim = Claim {
             package: name.clone(),
@@ -362,17 +368,7 @@ pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
     let Some(blobs) = read_blobs(root) else { return out };
     for blob in blobs {
         let Some(h) = Header::parse(&blob) else { continue };
-        let basenames = h.string_array(TAG_BASENAMES);
-        let dirnames = h.string_array(TAG_DIRNAMES);
-        let dirindexes = h.int_array(TAG_DIRINDEXES);
-        let flags = h.int_array(TAG_FILEFLAGS);
-        for (i, base) in basenames.iter().enumerate() {
-            let Some(dir) = dirindexes.get(i).and_then(|d| dirnames.get(*d as usize)) else { continue };
-            if flags.get(i).copied().unwrap_or(0) as u32 & RPMFILE_GHOST != 0 {
-                continue;
-            }
-            out.insert(PathBuf::from(format!("{}{base}", dir.trim_start_matches('/'))));
-        }
+        out.extend(files_of(&h).into_iter().filter(|(_, _, flags)| flags & RPMFILE_GHOST == 0).map(|(_, path, _)| path));
     }
     out
 }
