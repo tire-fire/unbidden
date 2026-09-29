@@ -543,6 +543,9 @@ cp -p /etc/passwd /etc/passwd.unbidden-backup
 mkdir -p /home/unbidden-link
 echo "unbidden-link:x:4242:4242::/home/unbidden-link:/bin/sh" >> /etc/passwd
 ln -sf /etc/shadow /home/unbidden-link/.bashrc
+# The account made it, so the account owns it: the scan trusts links only root
+# made, since root could read their targets itself.
+chown -h 4242:4242 /home/unbidden-link/.bashrc
 "$BIN" --save "$out.base" > /dev/null
 linkscan=$("$BIN" --json --all)
 diffed=$("$BIN" --against "$out.base" --json 2>&1) || diffrc=$?

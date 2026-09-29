@@ -305,6 +305,7 @@ impl Root {
         };
         // The home itself may be a link (/home/carol -> /srv/carol); what the
         // path must stay inside is where the home really is.
+        let declared = home.clone();
         let resolved = self.resolve(&home).and_then(|real_home| {
             let resolved = self.resolve(&here)?;
             Ok((real_home, resolved))
@@ -312,8 +313,30 @@ impl Root {
         match resolved {
             Err(e) => Confinement::Unresolvable(e),
             Ok((home, resolved)) if resolved.starts_with(&home) => Confinement::Inside(resolved),
+            // A path that leaves the home through links only root made is
+            // not a confused deputy: root could read the target itself. Alpine
+            // links /var/spool/cron/crontabs to /etc/crontabs, and the `cron`
+            // account is homed at /var/spool/cron.
+            Ok(_) if !self.planted_link(&here, &declared) => Confinement::NoHome,
             Ok((_, resolved)) => Confinement::Escapes(Path::new("/").join(resolved)),
         }
+    }
+
+    /// Whether some link on the way from `home` down to `here` belongs to
+    /// someone other than root, so an account could have made it.
+    fn planted_link(&self, here: &Path, home: &Path) -> bool {
+        let mut prefix = PathBuf::new();
+        for component in here.components() {
+            prefix.push(component);
+            if prefix.starts_with(home) && prefix != home {
+                if let Ok(meta) = self.statat_unjudged(&prefix, AtFlags::SYMLINK_NOFOLLOW) {
+                    if meta.is_symlink && meta.uid != 0 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Opens a regular file for reading, or says why not with a `Refusal`.
