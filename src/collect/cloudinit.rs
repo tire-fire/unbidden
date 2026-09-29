@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::entry::{Enablement, Entry, Kind, Trigger, dedup_ids};
+use crate::entry::{Enablement, Entry, Kind, Trigger};
 use crate::scan::{Collector, Ctx};
 use crate::yaml::{self, Value};
 
@@ -48,7 +48,6 @@ impl Collector for CloudInit {
         }
         scripts(cx, &mut out, &modules, &gate);
         hooks(cx, &mut out, &gate);
-        dedup_ids(&mut out);
         out
     }
 }

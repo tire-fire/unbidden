@@ -33,7 +33,6 @@ impl Collector for Browsers {
         let mut out = Vec::new();
         chromium(cx, &mut out);
         firefox(cx, &mut out);
-        crate::entry::dedup_ids(&mut out);
         out
     }
 }

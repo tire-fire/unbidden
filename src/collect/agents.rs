@@ -122,7 +122,6 @@ impl Collector for Agents {
         zabbix(cx, &mut out);
         nrpe(cx, &mut out);
         salt(cx, &mut out);
-        crate::entry::dedup_ids(&mut out);
         out
     }
 }

@@ -700,7 +700,6 @@ fn rsyslog(cx: &mut Ctx, out: &mut Vec<Entry>) {
             out.push(e);
         }
     }
-    crate::entry::dedup_ids(out);
 }
 
 fn rsyslog_file(cx: &mut Ctx, rel: &Path, depth: usize, seen: &mut std::collections::BTreeSet<PathBuf>, out: &mut Vec<(PathBuf, String)>) {

@@ -397,6 +397,10 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
                             for e in &mut entries {
                                 e.collector = Some(c.name().to_string());
                             }
+                            // Two identical lines are two entries, and a
+                            // duplicate id would make a diff refuse the scan.
+                            // Done here, once, rather than in each collector.
+                            crate::entry::dedup_ids(&mut entries);
                             let status = if unreadable.is_empty() {
                                 Status::Complete
                             } else {
@@ -546,6 +550,31 @@ mod tests {
         fn collect(&self, _: &mut Ctx) -> Vec<Entry> {
             panic!("hostile input, line 3");
         }
+    }
+
+    /// The same line twice in one file, which is what a collector reading a
+    /// crontab with a repeated job produces.
+    struct Twice;
+    impl Collector for Twice {
+        fn name(&self) -> &'static str {
+            "twice"
+        }
+        fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
+            vec![cx.entry(Kind::Cron, "etc/crontab", "job"), cx.entry(Kind::Cron, "etc/crontab", "job")]
+        }
+    }
+
+    #[test]
+    fn identical_entries_from_a_collector_get_distinct_ids_without_its_help() {
+        let dir = std::env::temp_dir().join(format!("unbidden-twice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Twice)];
+        let s = run(&root, &Options { deep: false }, &collectors);
+        let ids: std::collections::BTreeSet<&str> = s.entries.iter().map(|e| e.id.as_str()).collect();
+        let names: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!((ids.len(), names), (2, vec!["job", "job#2"]));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     struct Fine;

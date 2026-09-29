@@ -70,7 +70,6 @@ impl Collector for Sources {
             e.target_path = Some(cx.root.abs(&rel));
             out.push(e);
         }
-        crate::entry::dedup_ids(&mut out);
         out
     }
 }

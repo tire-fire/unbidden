@@ -13,7 +13,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use super::{expand_glob, glob_match, include_rel};
-use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, dedup_ids};
+use crate::entry::{Enablement, Entry, Flag, Kind, Trigger};
 use crate::scan::{Collector, Ctx};
 
 pub struct Auth;
@@ -34,7 +34,6 @@ impl Collector for Auth {
         sudo_conf(cx, &mut out);
         doas(cx, &mut out);
         ssh_client(cx, &mut out);
-        dedup_ids(&mut out);
         out
     }
 }

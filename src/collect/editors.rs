@@ -43,7 +43,6 @@ impl Collector for Editors {
         emacs(cx, &mut out);
         tmux(cx, &mut out);
         screen(cx, &mut out);
-        crate::entry::dedup_ids(&mut out);
         out
     }
 }

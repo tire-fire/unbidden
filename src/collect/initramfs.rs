@@ -42,7 +42,6 @@ impl Collector for Initramfs {
         initramfs_tools(cx, &mut out);
         dracut(cx, &mut out);
         dkms(cx, &mut out);
-        crate::entry::dedup_ids(&mut out);
         out
     }
 }

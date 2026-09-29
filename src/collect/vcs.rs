@@ -58,7 +58,6 @@ impl Collector for Vcs {
                 out.push(e);
             }
         }
-        crate::entry::dedup_ids(&mut out);
         out
     }
 }

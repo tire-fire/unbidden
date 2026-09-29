@@ -57,7 +57,6 @@ impl Collector for Plugins {
         }
         opencl(cx, &libdirs, &mut out);
         gdk_pixbuf(cx, &mut out);
-        crate::entry::dedup_ids(&mut out);
         out
     }
 }

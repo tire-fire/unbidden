@@ -43,7 +43,6 @@ impl Collector for Logrotate {
                 e.note("not_run", "logrotate is not installed");
             }
         }
-        crate::entry::dedup_ids(&mut out);
         out
     }
 }

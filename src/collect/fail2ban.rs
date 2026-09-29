@@ -105,7 +105,6 @@ impl Collector for Fail2ban {
                 out.push(e);
             }
         }
-        crate::entry::dedup_ids(&mut out);
         out
     }
 }

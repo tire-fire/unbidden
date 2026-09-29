@@ -78,7 +78,6 @@ impl Collector for Python {
                 }
             }
         }
-        crate::entry::dedup_ids(&mut out);
         out
     }
 }
