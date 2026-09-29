@@ -85,9 +85,9 @@ impl Collector for Cron {
         }
 
         anacrontab(cx, &mut out);
-        // After every job that could name a directory has been read.
-        // Read once: it is the run-parts binary, and every directory below is
-        // judged by it.
+        // After every job that could name a directory has been read. The
+        // run-parts binary is read once, and every directory below is judged
+        // by it.
         let run_parts_flavour = super::run_parts_flavour(cx);
         for period in ["hourly", "daily", "weekly", "monthly"] {
             run_parts(cx, run_parts_flavour, period, &mut out);
