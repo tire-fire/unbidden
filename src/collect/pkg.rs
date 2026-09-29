@@ -630,15 +630,12 @@ const MAINTAINER_SCRIPTS: &[&str] = &["preinst", "postinst", "prerm", "postrm"];
 /// On an image copied rather than mounted the ctimes are the copy's, and the
 /// comparison says nothing; it only ever adds a note, never takes one away.
 fn note_changed_after_install(cx: &Ctx, e: &mut Entry, rel: &Path, stem: &[u8]) {
-    let mut list = stem.to_vec();
-    list.extend_from_slice(b".list");
-    let list_rel = Path::new(DPKG_INFO).join(OsStr::from_bytes(&list));
-    let (Ok(script), Ok(list)) = (cx.root.stat(rel), cx.root.stat(&list_rel)) else { return };
-    let (Some(changed), Some(installed)) = (script.ctime, list.ctime) else { return };
+    let Some((list, installed)) = crate::provenance::dpkg::list_written(cx.root, &String::from_utf8_lossy(stem)) else { return };
+    let Some(changed) = cx.root.stat(rel).ok().and_then(|m| m.ctime) else { return };
     if let Some(after) = changed_after_install(changed, installed) {
         e.note(
             "changed_after_install",
-            format!("inode changed {}s after {} was written", after.as_secs(), cx.root.abs(&list_rel).display()),
+            format!("inode changed {}s after {} was written", after.as_secs(), cx.root.abs(Path::new(DPKG_INFO).join(list)).display()),
         );
     }
 }

@@ -19,6 +19,7 @@ use super::{Answers, Outcome, spellings};
 const INFO: &str = "var/lib/dpkg/info";
 const STATUS: &str = "var/lib/dpkg/status";
 const DIVERSIONS: &str = "var/lib/dpkg/diversions";
+const STATOVERRIDE: &str = "var/lib/dpkg/statoverride";
 
 /// File lists and the status database are large on a full desktop but are
 /// root-owned system files; the cap is a backstop, not a parsing limit.
@@ -48,6 +49,38 @@ pub(crate) const INSTALL_WINDOW: std::time::Duration = std::time::Duration::from
 /// and the comparison says nothing either way.
 pub(crate) fn changed_after_install(file: std::time::SystemTime, list: std::time::SystemTime) -> Option<std::time::Duration> {
     file.duration_since(list).ok().filter(|after| *after > INSTALL_WINDOW)
+}
+
+/// When dpkg wrote the file list of `package`, which is the moment it
+/// unpacked it, and the name of that list. `package` is the name as dpkg's own
+/// metadata files spell it: bare for a package of the native architecture or
+/// of none, `name:arch` for a multiarch one. A bare name that has only the
+/// multiarch spelling on disk finds that one, so a caller holding just a
+/// package name, as a verdict gives it, need not know which it is.
+pub(crate) fn list_written(root: &Root, package: &str) -> Option<(String, std::time::SystemTime)> {
+    let when = |name: &str| root.stat(Path::new(INFO).join(name)).ok()?.ctime;
+    let exact = format!("{package}.list");
+    if let Some(t) = when(&exact) {
+        return Some((exact, t));
+    }
+    let prefix = format!("{package}:");
+    let found = root
+        .read_dir_optional(INFO)
+        .ok()?
+        .into_iter()
+        .map(|d| d.name.to_string_lossy().into_owned())
+        .find(|n| n.starts_with(&prefix) && n.ends_with(".list"))?;
+    let t = when(&found)?;
+    Some((found, t))
+}
+
+/// Whether `dpkg-statoverride` records a mode for `path` (root-relative).
+/// dpkg records no modes of its own, so an override is the one way a packaged
+/// file's mode differs from what it shipped with, legitimately.
+pub(crate) fn statoverridden(root: &Root, path: &Path) -> bool {
+    let want = format!("/{}", path.display());
+    root.read_capped(STATOVERRIDE, 1 << 20)
+        .is_ok_and(|(b, _)| String::from_utf8_lossy(&b).lines().any(|l| l.split_whitespace().nth(3) == Some(want.as_str())))
 }
 
 /// Every path the file lists claim, root-relative, for a scan that asks
@@ -345,13 +378,13 @@ fn link_by_change_time(root: &Root, link: &Path, pkg: &str) -> Integrity {
     if !root.is_live() {
         return Integrity::Unknown;
     }
-    let (Ok(link), Ok(list)) = (root.stat(link), root.stat(format!("{INFO}/{pkg}.list"))) else {
+    let (Ok(link), Some((_, installed))) = (root.stat(link), list_written(root, pkg)) else {
         return Integrity::Unknown;
     };
-    match (link.ctime, list.ctime) {
-        (Some(changed), Some(installed)) if changed_after_install(changed, installed).is_some() => Integrity::Modified,
-        (Some(_), Some(_)) => Integrity::Intact,
-        _ => Integrity::Unknown,
+    match link.ctime {
+        Some(changed) if changed_after_install(changed, installed).is_some() => Integrity::Modified,
+        Some(_) => Integrity::Intact,
+        None => Integrity::Unknown,
     }
 }
 
@@ -425,6 +458,18 @@ mod tests {
     fn ask(root: &Root, paths: &[&str]) -> Answers {
         let wanted: BTreeSet<PathBuf> = paths.iter().map(PathBuf::from).collect();
         resolve(root, &wanted).unwrap()
+    }
+
+    #[test]
+    fn a_packages_list_is_found_by_either_spelling_of_its_name() {
+        let f = Fixture::new("spelling");
+        f.write(&format!("{INFO}/coreutils.list"), b"/bin/ls\n");
+        f.write(&format!("{INFO}/libc6:amd64.list"), b"/lib/x\n");
+        let root = f.root();
+        assert_eq!(list_written(&root, "coreutils").map(|(n, _)| n).as_deref(), Some("coreutils.list"));
+        assert_eq!(list_written(&root, "libc6:amd64").map(|(n, _)| n).as_deref(), Some("libc6:amd64.list"));
+        assert_eq!(list_written(&root, "libc6").map(|(n, _)| n).as_deref(), Some("libc6:amd64.list"), "a verdict names the package without its architecture");
+        assert!(list_written(&root, "libc").is_none(), "a prefix of a name is not the name");
     }
 
     #[test]

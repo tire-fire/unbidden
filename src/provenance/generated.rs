@@ -128,7 +128,9 @@ fn postinst_mask(root: &Root, rel: &Path) -> bool {
     let in_vendor_dir = ["usr/lib/systemd/system/", "lib/systemd/system/", "usr/lib/systemd/user/"]
         .iter()
         .any(|d| text.strip_prefix(d).is_some_and(|rest| !rest.contains('/')));
-    if !in_vendor_dir || root.read_link(rel).ok().as_deref() != Some(Path::new("/dev/null")) {
+    // The link's change time is what says dpkg made it, and a copied tree
+    // has only the copy's: nothing is hidden on the strength of that.
+    if !in_vendor_dir || !root.is_live() || root.read_link(rel).ok().as_deref() != Some(Path::new("/dev/null")) {
         return false;
     }
     let Some(unit) = rel.file_name().map(|n| n.to_string_lossy().into_owned()) else { return false };
@@ -141,8 +143,8 @@ fn postinst_mask(root: &Root, rel: &Path) -> bool {
         if !script.windows(unit.len()).any(|w| w == unit.as_bytes()) {
             continue;
         }
-        let Ok(list) = root.stat(Path::new(INFO).join(format!("{pkg}.list"))) else { continue };
-        if let (Some(changed), Some(installed)) = (link.ctime, list.ctime) {
+        let Some((_, installed)) = super::dpkg::list_written(root, pkg) else { continue };
+        if let Some(changed) = link.ctime {
             if super::dpkg::changed_after_install(changed, installed).is_none() && changed >= installed {
                 return true;
             }
@@ -302,11 +304,14 @@ mod tests {
         link("usr/lib/systemd/system/screen-cleanup.service");
         link("usr/lib/systemd/system/auditd.service");
         link("etc/systemd/system/screen-cleanup.service");
-        let root = Root::at(&dir).unwrap();
+        let root = Root::at_as_live(&dir).unwrap();
         let wanted: BTreeSet<PathBuf> = ["usr/lib/systemd/system/screen-cleanup.service", "usr/lib/systemd/system/auditd.service", "etc/systemd/system/screen-cleanup.service"]
             .iter()
             .map(PathBuf::from)
             .collect();
+        // A tree that may be a copy has only the copy's change times, and
+        // nothing is hidden on the strength of them.
+        assert!(classify(&Root::at(&dir).unwrap(), &wanted).is_empty());
         let out = classify(&root, &wanted);
         assert_eq!(out.get(Path::new("usr/lib/systemd/system/screen-cleanup.service")), Some(&Provenance::GeneratedBy { by: "dpkg-postinst".into() }));
         assert_eq!(out.get(Path::new("usr/lib/systemd/system/auditd.service")), None, "no maintainer script names it");

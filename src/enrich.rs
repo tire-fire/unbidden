@@ -1415,7 +1415,6 @@ fn interpreter_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
 /// one. Live roots only: on a copied image every change time is the copy's.
 /// rpm records modes and is checked exactly, in provenance.
 fn setuid_changed_after_install(root: &Root, e: &mut Entry) {
-    const INFO: &str = "var/lib/dpkg/info";
     if e.kind != Kind::SuidBinary || !root.is_live() {
         return;
     }
@@ -1425,21 +1424,10 @@ fn setuid_changed_after_install(root: &Root, e: &mut Entry) {
     if file.mode & 0o6000 == 0 {
         return;
     }
-    let list = root
-        .read_dir_optional(INFO)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|d| d.name.to_string_lossy().into_owned())
-        .find(|n| n == &format!("{package}.list") || (n.starts_with(&format!("{package}:")) && n.ends_with(".list")));
-    let Some(list) = list else { return };
-    let Ok(listed) = root.stat(Path::new(INFO).join(&list)) else { return };
-    let (Some(changed), Some(installed)) = (file.ctime, listed.ctime) else { return };
+    let Some((list, installed)) = crate::provenance::dpkg::list_written(root, package) else { return };
+    let Some(changed) = file.ctime else { return };
     let Some(after) = crate::provenance::dpkg::changed_after_install(changed, installed) else { return };
-    let path = format!("/{}", rel.display());
-    let overridden = root
-        .read_capped("var/lib/dpkg/statoverride", 1 << 20)
-        .is_ok_and(|(b, _)| String::from_utf8_lossy(&b).lines().any(|l| l.split_whitespace().nth(3) == Some(path.as_str())));
-    if !overridden {
+    if !crate::provenance::dpkg::statoverridden(root, &rel) {
         e.note("changed_after_install", format!("inode changed {}s after {list} was written", after.as_secs()));
     }
 }
