@@ -609,19 +609,10 @@ const DPKG_INFO: &str = "var/lib/dpkg/info";
 /// reported.
 const MAINTAINER_SCRIPTS: &[&str] = &["preinst", "postinst", "prerm", "postrm"];
 
-/// Every maintainer script on the host, several hundred of them, all packaged.
-/// They are emitted rather than filtered because the filter belongs downstream:
-/// §8 suppresses a packaged, intact script by default, and a script that is
-/// *not* packaged or not intact in this directory is one of the loudest
-/// findings the tool can produce. Filtering here would delete that signal.
 /// No digest exists for a maintainer script, so its contents cannot be
-/// checked — but when it changed can be. dpkg writes `<pkg>.list` and the
-/// package's scripts in one unpack, and an inode's change time cannot be set
-/// from userspace. A script whose ctime is well after its package's list was
-/// edited or planted since, by something other than dpkg.
-///
-/// On an image copied rather than mounted the ctimes are the copy's, and the
-/// comparison says nothing; it only ever adds a note, never takes one away.
+/// checked, but when it changed can be: a script whose change time is well
+/// after its package's list was written was edited or planted since (the
+/// reasoning is on `changed_after_install`). It only ever adds a note.
 fn note_changed_after_install(cx: &Ctx, e: &mut Entry, rel: &Path, stem: &[u8]) {
     let Some((list, installed)) = crate::provenance::dpkg::list_written(cx.root, &String::from_utf8_lossy(stem)) else { return };
     let Some(changed) = cx.root.stat(rel).ok().and_then(|m| m.ctime) else { return };
@@ -635,6 +626,11 @@ fn note_changed_after_install(cx: &Ctx, e: &mut Entry, rel: &Path, stem: &[u8]) 
 
 use crate::provenance::dpkg::changed_after_install;
 
+/// Every maintainer script on the host, several hundred of them, all packaged.
+/// They are emitted rather than filtered because the filter belongs downstream:
+/// §8 suppresses a packaged, intact script by default, and a script that is
+/// *not* packaged or not intact in this directory is one of the loudest
+/// findings the tool can produce. Filtering here would delete that signal.
 fn dpkg_scripts(cx: &mut Ctx) -> Vec<Entry> {
     let listing = cx.dir(DPKG_INFO);
     let with_triggers: BTreeSet<Vec<u8>> = listing
@@ -782,8 +778,8 @@ fn dnf_plugins(cx: &mut Ctx) -> Vec<Entry> {
     // etc/dnf/protected.d holds package names that may not be removed. It
     // executes nothing and gets no entries.
     //
-    // The interpreter directories are read only once a plugin needs looking
-    // up: on a host with no dnf at all this collector never touches /usr/lib.
+    // The Python library directories are listed only once a plugin needs
+    // looking up, or, in `dnf_modules_without_conf`, on a host with dnf.
     let mut pythons: Option<Vec<PathBuf>> = None;
     let mut out = Vec::new();
     for (dir, manager, global) in PLUGIN_DIRS {

@@ -30,8 +30,8 @@ const DB: &str = "var/lib/rpm/rpmdb.sqlite";
 /// Where the database lives. Fedora 36 moved it under /usr and left
 /// /var/lib/rpm as a symlink to it; rpm 4.16-era systems keep the real
 /// directory in /var. The real file is looked for first so that an entry
-/// naming the database as its source names the path rpm's own manifest owns
-/// — through the compatibility symlink, that path is nobody's file.
+/// naming the database as its source names the file itself and not the
+/// compatibility symlink that leads to it.
 const DBS: [&str; 2] = ["usr/lib/sysimage/rpm/rpmdb.sqlite", DB];
 
 /// An rpm database on a large workstation runs to tens of megabytes. The cap

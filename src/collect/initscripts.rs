@@ -1072,7 +1072,7 @@ fn script_entry(
 
 fn script_facts(cx: &mut Ctx, e: &mut Entry, rel: &Path) {
     // Only a regular file is read; the root refuses the rest, and the scan
-    // records a directory or FIFO as a limit rather than a failure (§7).
+    // records a directory or FIFO as a limit rather than a failure (§3).
     let outcome = cx.read_outcome(rel, crate::root::READ_CAP);
     cx.record(rel, crate::root::READ_CAP, &outcome);
     let bytes = match outcome {

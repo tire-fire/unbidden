@@ -1,7 +1,8 @@
 //! Programs daemons run as root when something happens to the machine: an
 //! ACPI event, a ZFS event, a failing disk, a crash, a certificate update.
-//! Each is read only where its daemon or tool is installed, by the rule it
-//! uses to choose what to run.
+//! Each is read by the rule its daemon or tool uses to choose what to run:
+//! most only where it is installed, and acpid, rsyslog, ClamAV, Kea and
+//! libreport wherever their files are, reported off where the program is not.
 //!
 //! acpid (acpid(8)): regular files in /etc/acpi/events named with letters,
 //! digits, `_` and `-` only, not starting `.` nor ending `~`; each rule's

@@ -88,7 +88,7 @@ impl<'a> Ctx<'a> {
     /// A bounded read that records what it could not open. Absent paths are
     /// normal — most search paths do not exist on most hosts — but an
     /// unreadable one is the difference between "nothing there" and "could
-    /// not look", and §7 of the spec makes that distinction load-bearing.
+    /// not look", and §3 of the spec makes that distinction load-bearing.
     pub fn read(&mut self, rel: impl AsRef<Path>) -> Option<Vec<u8>> {
         self.read_capped(rel, READ_CAP)
     }
@@ -132,9 +132,9 @@ impl<'a> Ctx<'a> {
             }
             Read::Bytes { .. } | Read::Absent => {}
             // A FIFO planted where a config belongs is a hang waiting for a
-            // reader, and a directory in the same place fails with EISDIR,
-            // which would demote the collector to Partial over one planted
-            // symlink.
+            // reader, and a directory or device there is no config either.
+            // The root never opens any of them, and any account can plant
+            // one, so none may demote the collector to Partial (§3).
             Read::NotRegular => self.truncated.push(format!("{}: not a regular file, not read", rel.display())),
             Read::NotFollowed(target) => self.note_left_home(rel, target),
             Read::Failed(e) => self.note_failed(rel, e),

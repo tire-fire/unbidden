@@ -1,7 +1,9 @@
 //! The second phase. Collectors are independent by design and know nothing
 //! of each other, so every fact that needs more than one of them lives here:
 //! package provenance, whether a target exists, which unit shadows which, and
-//! the LD_PRELOAD assignments that turn up in six different kinds of file.
+//! the LD_PRELOAD assignments that turn up in every kind of file that can set
+//! an environment: shell profiles, units, crontabs, init scripts, udev rules,
+//! desktop entries, authorized_keys options, sshd's SetEnv and ~/.ssh/environment.
 //!
 //! This is also where a rule engine would eventually go. The Entry record
 //! carries the raw facts precisely so that it could.
@@ -635,9 +637,11 @@ fn unwrap(w: &(&str, &[&str], usize), args: &[String], depth: usize) -> Unwrappe
 ///
 /// The walk is iterative: a tree built from hostile text is as deep as its
 /// nesting, and a recursive walk would overflow on it. Substitutions count
-/// against `MAX_NESTING`; past it, and wherever the text does not parse, a
-/// command whose program cannot be known stands in, so the entry reads as
-/// unresolvable rather than as whatever parsed.
+/// against `MAX_NESTING`; past it, and wherever the text has a syntax error, a
+/// command whose program cannot be known is listed, first for a syntax error,
+/// so the entry reads as unresolvable rather than as whatever parsed.
+/// `look_through_wrappers` leaves an entry alone when its collector took a
+/// target that is not the command's first word.
 fn commands(text: &str, depth: usize) -> Vec<Vec<String>> {
     let unknown = || vec!["$(".to_string()];
     let mut parser = tree_sitter::Parser::new();
@@ -771,10 +775,11 @@ fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
 /// is vim), a packaged link dpkg can vouch for only by its change time
 /// (/usr/bin/python3 -> python3.10, which another package ships, and which
 /// may have been trojaned behind an untouched link), and the same links
-/// pointed at /tmp, which end at an unpackaged file. Two things keep the
+/// pointed at /tmp, which end at an unpackaged file. Three things keep the
 /// link's own verdict: a link that was itself changed since its package
-/// installed it, which is the finding, and a link to a device — a unit
-/// masked to /dev/null — which leads to nothing that runs.
+/// installed it, which is the finding; a link that ends at anything but a
+/// regular file, such as a unit masked to /dev/null, which leads to nothing
+/// that runs; and an end the package backends gave no answer for.
 fn through_link(
     root: &Root,
     entry: &mut Entry,
@@ -1239,8 +1244,9 @@ fn encoded_run(command: &[u8]) -> Option<(usize, usize, &'static str)> {
 /// `Kind::SshAuthorizedKey` is deliberately not exempt. Its key material
 /// never reaches `command`: the collector puts the blob's fingerprint in the
 /// entry name and the options in `raw`, and sets `command` only from a
-/// `command="..."` forced command or an `AuthorizedKeysCommand` directive.
-/// Exempting the kind would blind the flag on the one field of that entry
+/// `command="..."` forced command or an sshd_config `ForceCommand`,
+/// `AuthorizedKeysCommand` or `AuthorizedPrincipalsCommand` directive.
+/// Exempting the kind would blind the flag on the one field of those entries
 /// that really is a command, and a forced command is where an attacker who
 /// already has a key line puts a payload.
 fn apply_encoding(entry: &mut Entry) {
@@ -1392,12 +1398,11 @@ fn cross_reference_suid(entries: &mut [Entry]) {
     }
 }
 
-/// §5 promises an ld_preload entry for every LD_PRELOAD assignment found by
-/// the shell and systemd collectors, and §14.4 forbids a collector from
-/// knowing about another's output. Both hold if the collectors record the
-/// assignment as ordinary data and the entries are made here — which also
-/// catches the assignments in PAM environment files, crontabs and udev rules
-/// that neither section thought to list.
+/// §5 promises an ld_preload entry for every LD_PRELOAD assignment a
+/// collector finds, and §14.4 forbids a collector from knowing about
+/// another's output. Both hold if the collectors record the assignment as an
+/// ordinary `env.*` note and the entries are made here, which is also why a
+/// collector that starts recording environment needs no change to be covered.
 fn preload_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut seen: BTreeSet<(PathBuf, String)> = BTreeSet::new();
@@ -1602,9 +1607,11 @@ const SCRIPT_HEAD: usize = 8 * 1024;
 /// `--deep` gate §5 puts on this finding buys nothing and is not applied.
 ///
 /// One hop, and only where the path is written out in full. A `source
-/// "$DIR/x"`, a relative interpreter, or anything else the shell would have
-/// to expand is left alone rather than guessed at, and nothing recurses: the
-/// entries this emits are not themselves followed.
+/// "$DIR/x"`, or anything else the shell would have to expand, is left alone
+/// rather than guessed at. A bare name such as the `python3` of `env python3`
+/// is looked up on the search path the way a bare ExecStart is, and a
+/// relative path with a slash in it is reported without a target. Nothing
+/// recurses: the entries this emits are not themselves followed.
 fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
     use std::os::unix::ffi::OsStrExt;
 

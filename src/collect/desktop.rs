@@ -201,7 +201,9 @@ fn autostart(cx: &mut Ctx) -> Vec<Entry> {
     // gsd-xsettings (gnome-settings-daemon 3.36 on, gsd-xsettings-manager.c):
     // in a Wayland session, every regular executable file in each
     // $XDG_CONFIG_DIRS/Xwayland-session.d, in name order, is spawned as the
-    // user when the daemon starts, before any X11 client can.
+    // user when the daemon starts, before any X11 client can. Only
+    // /etc/xdg is read here; a session that puts other directories in
+    // $XDG_CONFIG_DIRS is not followed.
     let gsd = cx.root.exists("usr/libexec/gsd-xsettings");
     let dir = Path::new("etc/xdg/Xwayland-session.d");
     let names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
@@ -282,8 +284,11 @@ fn desktop_file(cx: &mut Ctx, rel: &Path, file: &OsStr, principal: Option<&str>)
     name_from_os(&mut e, file);
     e.trigger = Trigger::Login;
     e.principal = principal.map(str::to_string);
-    // An autostart file runs unless it says otherwise; the keys below are the
-    // only things that stop it.
+    // An autostart file runs unless it says otherwise. What stops it that is
+    // on disk is `Hidden`, `X-GNOME-Autostart-enabled=false` and a `TryExec`
+    // that names a program that is not there; `OnlyShowIn` and `NotShowIn`
+    // depend on the running desktop, which the scan cannot know, and are
+    // recorded rather than applied.
     e.enabled = Enablement::Enabled;
 
     let pairs = desktop_entry_group(&bytes);

@@ -11,9 +11,11 @@
 //!
 //! What a difference means is apk's protected-paths rule. A file under a
 //! protected path (`+etc` by default) is kept when its package upgrades, so
-//! a change there is what configuration is for; under a symlinks-only path
-//! (`@etc/init.d`) or an unprotected one the package's copy comes back on
-//! the next upgrade, so a change is a modified package file. `apk audit`
+//! a change there is what configuration is for. Under an unprotected path the
+//! package's copy comes back on the next upgrade, so a change is a modified
+//! package file. Under a symlinks-only path (`@etc/init.d`) that holds for a
+//! changed regular file, while a changed link is kept and counts as
+//! configuration. `apk audit`
 //! itself skips a changed regular file under `@etc/init.d` in both of its
 //! modes, which makes this the one place on an Alpine host where the check
 //! sees what the package manager does not.

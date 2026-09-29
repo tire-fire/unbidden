@@ -129,13 +129,13 @@ fn verify_unchanged(w: &mut impl Write, root: &Root, entry: &Entry) -> io::Resul
 }
 
 fn write_source(w: &mut impl Write, root: &Root, entry: &Entry) -> io::Result<()> {
-    // Some entries were read out of a binary database, not a text file.
-    // Dumping twenty lines of mangled sqlite helps nobody, and the record
-    // itself is already above in `command`.
+    // Some entries were read out of a package database or an archive, not
+    // out of a script file of their own. There is nothing at the source to
+    // show as text, and the record itself is already above in `command`.
     if let Some(from) = entry.raw.get(key::READ_FROM) {
         writeln!(
             w,
-            "source is the {} database at {}, not a text file",
+            "read out of the {} at {}, not out of a file of its own",
             visible(from, false),
             visible(&entry.source.to_string_lossy(), false)
         )?;

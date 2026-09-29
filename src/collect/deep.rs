@@ -7,10 +7,11 @@
 //!
 //! The traversal rules matter more than what is collected. A walk that
 //! descends into an unresponsive NFS mount hangs on exactly the host where
-//! hanging costs most, so this one never leaves the device the scan root sits
-//! on, never descends through a symlink, refuses a directory it has already
-//! been in, and gives up at a ceiling rather than following a tree that
-//! generates itself.
+//! hanging costs most, so this one never leaves the filesystem the scan root
+//! sits on (a btrfs subvolume of it is the same storage and is entered),
+//! never descends through a symlink, refuses a directory it has already been
+//! in, and gives up at a ceiling rather than following a tree that generates
+//! itself.
 
 use crate::text::{normalize};
 use crate::collect::first_absolute;

@@ -6,9 +6,10 @@
 //! run something — because that is what an operator greps and what the
 //! enrichment pass of §14.4 correlates.
 //!
-//! The extraction is a line-oriented scan, not a shell parser. Shell cannot be
-//! parsed without evaluating it, and evaluating attacker-authored shell is the
-//! one thing this tool must never do. The blind spots are listed on
+//! The extraction is a line-oriented scan, not a shell interpreter. Shell
+//! cannot be understood without evaluating it (expansion, sourcing and
+//! conditionals decide what runs), and evaluating attacker-authored shell is
+//! the one thing this tool must never do. The blind spots are listed on
 //! `scan_shell` and are deliberate.
 
 use crate::text::{unquote};
@@ -57,7 +58,7 @@ const USER_PROFILES: &[&str] = &[
     ".zlogout",
 ];
 
-/// The one system file in the list above that is not shell (§ PAM reads it).
+/// The one system file in the list above that is not shell: pam_env reads it.
 const PAM_ENV: &str = "etc/environment";
 
 /// pam_env's own configuration, which sets variables for every PAM session —
@@ -662,9 +663,7 @@ fn scan_segment(seg: &[Word], s: &mut Scanned) -> bool {
     }
 }
 
-/// `/etc/environment` is read by pam_env, not by a shell: plain `KEY=value`
-/// lines, no `export`, no expansion, no commands. Parsing it as shell would
-/// invent findings that cannot happen.
+/// `/etc/security/pam_env.conf` is read by pam_env, not by a shell: lines of
 /// `VARIABLE DEFAULT=value OVERRIDE=value`, where OVERRIDE wins when both are
 /// present. Either may be quoted, and either may be absent.
 fn scan_pam_env_conf(bytes: &[u8]) -> Scanned {
@@ -704,6 +703,9 @@ fn scan_pam_env_conf(bytes: &[u8]) -> Scanned {
     s
 }
 
+/// `/etc/environment` is read by pam_env, not by a shell: plain `KEY=value`
+/// lines, no `export`, no expansion, no commands. Parsing it as shell would
+/// invent findings that cannot happen.
 fn scan_pam_env(bytes: &[u8]) -> Scanned {
     let mut s = Scanned::default();
     for raw in bytes.split(|b| *b == b'\n') {

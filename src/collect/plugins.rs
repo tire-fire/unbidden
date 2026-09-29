@@ -234,9 +234,11 @@ fn icd_json(cx: &mut Ctx, dir: &Path, framework: &str, trigger: Trigger, libdirs
         if layer {
             e.note("kind", "implicit layer, loaded into every Vulkan program");
         }
-        // A JSON library_path relative to the manifest is relative to its
-        // own directory, not the loader path (Vulkan loader rule); a bare
-        // soname is searched.
+        // A library_path with a slash that is not absolute is taken as
+        // relative to the manifest's own directory, which is the Vulkan
+        // loader's rule. libglvnd hands an EGL library_path to dlopen, which
+        // reads such a path against the working directory, so for EGL this is
+        // the best guess the scan can make. A bare soname is searched.
         if !lib.starts_with('/') && (lib.contains('/') || lib.starts_with('.')) {
             let cand = dir.join(&lib);
             e.target_path = Some(cx.root.abs(&cand));
