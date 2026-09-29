@@ -1086,7 +1086,7 @@ fn standard_roots(kind: Kind) -> &'static [&'static str] {
         Kind::SystemdPreset => {
             &["/etc/systemd/", "/run/systemd/", "/usr/local/lib/systemd/", "/usr/lib/systemd/", "/lib/systemd/"]
         }
-        Kind::Cron => &["/etc/crontab", "/etc/cron", "/etc/anacrontab", "/var/spool/cron"],
+        Kind::Cron => &["/etc/crontab", "/etc/cron", "/etc/anacrontab", "/etc/periodic", "/var/spool/cron"],
         _ => &[],
     }
 }
@@ -1124,10 +1124,12 @@ fn apply_location(root: &Root, entry: &mut Entry) {
     // does not inherit the analyst's own directory names.
     let in_root = |p: &Path| Path::new("/").join(root.rel(p));
 
-    // The source is always inside a search path, because that is where the
-    // collector looked. What matters is where a symlink from inside one
-    // actually leads: `systemctl link /tmp/evil.service` leaves a perfectly
-    // ordinary-looking unit name in /etc.
+    // The source is normally inside a search path, because that is where the
+    // collector looked, and where it is not (a file an include named, a home
+    // outside its own tree) it is flagged below. What matters most is where a
+    // symlink from inside one actually leads: `systemctl link
+    // /tmp/evil.service` leaves a perfectly ordinary-looking unit name in
+    // /etc.
     if let Some(target) = entry.raw.get(key::SYMLINK_TARGET) {
         // Masking is a link to /dev/null. That is the documented way to turn
         // a unit off, not a mechanism hiding outside its search path.
@@ -2603,6 +2605,22 @@ mod tests {
             [&command, &target, &source, &plain].map(|e| e.has_flag(Flag::EncodingAnomaly)),
             [true, true, true, false]
         );
+    }
+
+    #[test]
+    fn a_cron_file_in_any_of_the_directories_a_crond_reads_is_in_its_place() {
+        let dir = crate::testing::Tree::new("cron-location");
+        let root = Root::at(&dir).unwrap();
+        let flagged = |source: &str| {
+            let mut e = Entry::new(Kind::Cron, dir.join(source), "x");
+            apply_location(&root, &mut e);
+            e.has_flag(Flag::NonStandardLocation)
+        };
+        for home in ["etc/crontab", "etc/cron.d/x", "etc/cron.daily/x", "etc/anacrontab", "etc/periodic/daily/x", "etc/crontabs/root", "var/spool/cron/crontabs/root"] {
+            assert!(!flagged(home), "{home}");
+        }
+        assert!(flagged("tmp/evil.cron"));
+        assert!(flagged("home/alice/.cron/x"));
     }
 
     #[test]
