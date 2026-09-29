@@ -17,11 +17,11 @@
 //! before its first boot.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::entry::{Enablement, Entry, Flag, Kind};
+use crate::entry::{Enablement, Entry, Flag, Kind, Scope};
 use crate::root::Root;
 
 /// How the system manager names itself in an answer. User managers are
@@ -336,10 +336,15 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
         // A template instance has no unit file of its own: getty@tty1's
         // only file is the .wants link, which ListUnitFiles never lists.
         // The template's answer stands in, and the entry says so.
-        let via_template = manager.by_path.get(&e.source).is_none()
-            && e.name.contains('@')
-            && e.raw.get("symlink_target").is_some_and(|t| t.contains("@."));
-        let key = if via_template { PathBuf::from(&e.raw["symlink_target"]) } else { e.source.clone() };
+        // The link leads to the template the collector named for this
+        // instance, and only then does the template's file speak for it.
+        let template_file = e
+            .raw
+            .get("symlink_target")
+            .filter(|t| e.raw.get("template_unit").is_some_and(|template| Path::new(t.as_str()).file_name().is_some_and(|n| n == template.as_str())))
+            .filter(|_| manager.by_path.get(&e.source).is_none());
+        let via_template = template_file.is_some();
+        let key = template_file.map_or_else(|| e.source.clone(), PathBuf::from);
         let Some(file) = manager.by_path.get(&key) else { continue };
 
         if file.by_manager.len() > 1 {
@@ -353,11 +358,11 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
         // and a unit on the shared user search path from any user manager —
         // which is then one account's view, and says whose.
         let owner_manager = e.raw.get("scope_uid").map(|uid| format!("user:{uid}"));
-        let scope = e.raw.get("scope").map(String::as_str).unwrap_or("system");
-        let may_answer = |m: &str| match scope {
-            "user" => m.starts_with("user:"),
-            s if s.starts_with("user:") => owner_manager.as_deref() == Some(m),
-            _ => m == SYSTEM,
+        let scope = e.raw.get("scope").and_then(|s| Scope::from_label(s)).unwrap_or(Scope::System);
+        let may_answer = |m: &str| match &scope {
+            Scope::User => m.starts_with("user:"),
+            Scope::Home(_) => owner_manager.as_deref() == Some(m),
+            Scope::System => m == SYSTEM,
         };
         let Some((state, from)) = file.agreed(may_answer) else { continue };
 
@@ -470,6 +475,7 @@ mod tests {
         e.enabled = Enablement::Enabled;
         e.flag(Flag::DegradedEnablement);
         e.note("symlink_target", "/usr/lib/systemd/system/getty@.service");
+        e.note("template_unit", "getty@.service");
         e.note("enabled_by", "/etc/systemd/system/getty.target.wants/getty@tty1.service");
         let manager = manager_of(vec![("/usr/lib/systemd/system/getty@.service", answers(&[("system", "enabled")]))]);
         let mut entries = vec![e];

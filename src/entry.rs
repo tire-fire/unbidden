@@ -161,6 +161,37 @@ str_enum!(Integrity {
     Unknown => "unknown",
 });
 
+/// Which service manager a systemd unit belongs to. Units in one scope
+/// shadow each other; units in different scopes never do. The record carries
+/// it as the `scope` note, written by `label` and read back by `from_label`,
+/// so nothing else matches on the spelling.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Scope {
+    System,
+    /// The shared user search path, which any user manager reads.
+    User,
+    /// One account's own directories.
+    Home(String),
+}
+
+impl Scope {
+    pub fn label(&self) -> String {
+        match self {
+            Scope::System => "system".to_string(),
+            Scope::User => "user".to_string(),
+            Scope::Home(who) => format!("user:{who}"),
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Scope> {
+        match label {
+            "system" => Some(Scope::System),
+            "user" => Some(Scope::User),
+            other => other.strip_prefix("user:").map(|who| Scope::Home(who.to_string())),
+        }
+    }
+}
+
 /// The note that carries an entry's `TargetVerdict`.
 const TARGET_PROVENANCE: &str = "target_provenance";
 

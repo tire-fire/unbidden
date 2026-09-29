@@ -919,11 +919,7 @@ fn apply_target(root: &Root, entry: &mut Entry) {
                 // Absent, but tested for before it would run: a script's
                 // `[ -x ]` around it, or the unit's own Condition on it.
                 // The script or unit is written for a host without it.
-                let guard = entry.raw.get("guarded_by_test").cloned().or_else(|| {
-                    entry.raw.get("condition_fails")?.split("; ").find(|c| {
-                        c.split_once('=').is_some_and(|(_, v)| root.rel(Path::new(v.trim_start_matches(['|', '!']))) == rel)
-                    }).map(|c| c.to_string())
-                });
+                let guard = entry.raw.get("guarded_by_test").or_else(|| entry.raw.get("guarded_by_condition")).cloned();
                 match guard {
                     Some(how) => entry.set_target_verdict(TargetVerdict::AbsentGuarded { by: how }),
                     None => entry.flag(Flag::TargetMissing),

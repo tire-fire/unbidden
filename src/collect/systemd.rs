@@ -25,7 +25,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use super::{glob_match, replaceable};
-use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, name_from_os};
+use crate::entry::{Scope, Enablement, Entry, Flag, Kind, Trigger, name_from_os};
 use crate::scan::{Collector, Ctx};
 
 pub struct Systemd;
@@ -154,24 +154,6 @@ const TIMER_KEYS: [&str; 4] = ["OnCalendar", "OnBootSec", "OnUnitActiveSec", "Pe
 /// outside them is still reported, annotated, because it is evidence of intent
 /// even where the manager ignores it.
 const EXEC_SECTIONS: [&str; 5] = ["Service", "Socket", "Mount", "Swap", "Scope"];
-
-/// Units in one scope shadow each other; units in different scopes never do.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Scope {
-    System,
-    User,
-    Home(String),
-}
-
-impl Scope {
-    fn label(&self) -> String {
-        match self {
-            Scope::System => "system".to_string(),
-            Scope::User => "user".to_string(),
-            Scope::Home(who) => format!("user:{who}"),
-        }
-    }
-}
 
 /// A unit file or a drop-in conf located on the search path.
 struct Found {
@@ -1187,6 +1169,9 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
     // Each list is a conjunction of its plain conditions, and of one
     // disjunction: if any are marked `|`, at least one of those must hold too.
     let mut fails = Vec::new();
+    // A failing condition on the very file the unit runs: the unit is written
+    // for a host without it, and its absence is not an orphan.
+    let mut guard = None;
     for list in ["Condition", "Assert"] {
         let (mut triggers, mut any_holds, mut unknown) = (Vec::new(), false, false);
         for (key, raw) in f.conditions.iter().filter(|(k, _)| condition_list(k) == list) {
@@ -1220,6 +1205,10 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
                 any_holds |= ok;
                 triggers.push(shown);
             } else if !ok {
+                let names_target = e.target_path.as_ref().is_some_and(|t| cx.root.rel(t) == cx.root.rel(&path));
+                if names_target {
+                    guard.get_or_insert_with(|| shown.clone());
+                }
                 fails.push(shown);
             }
         }
@@ -1229,6 +1218,9 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
     }
     if !fails.is_empty() {
         e.note("condition_fails", fails.join("; "));
+        if let Some(how) = guard {
+            e.note("guarded_by_condition", how);
+        }
         e.note("not_run", format!("a condition of the unit does not hold: {}", fails[0]));
     }
     for (i, spec) in f.env_files.iter().enumerate() {
@@ -1471,6 +1463,8 @@ mod tests {
         let s = scan(&dir);
         let quotaon = one(&s, "quotaon.service");
         assert_eq!(quotaon.raw["condition_fails"], "ConditionPathExists=/sbin/quotaon");
+        assert_eq!(quotaon.raw["guarded_by_condition"], "ConditionPathExists=/sbin/quotaon", "the condition is on the file the unit runs");
+        assert!(!one(&s, "rc-local.service").raw.contains_key("guarded_by_condition") || one(&s, "rc-local.service").raw["condition_fails"].contains("/etc/rc.local"));
         assert!(quotaon.raw["not_run"].starts_with("a condition of the unit does not hold"));
         let rc_local = one(&s, "rc-local.service");
         assert_eq!(rc_local.raw["condition_fails"], "ConditionFileIsExecutable=/etc/rc.local", "present but not executable");
