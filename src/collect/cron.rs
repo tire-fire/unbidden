@@ -86,10 +86,13 @@ impl Collector for Cron {
 
         anacrontab(cx, &mut out);
         // After every job that could name a directory has been read.
+        // Read once: it is the run-parts binary, and every directory below is
+        // judged by it.
+        let run_parts_flavour = super::run_parts_flavour(cx);
         for period in ["hourly", "daily", "weekly", "monthly"] {
-            run_parts(cx, period, &mut out);
+            run_parts(cx, run_parts_flavour, period, &mut out);
         }
-        periodic(cx, &mut out);
+        periodic(cx, run_parts_flavour, &mut out);
 
         for dir in ["var/spool/cron/atjobs", "var/spool/at"] {
             if !first_visit(cx, dir, &mut seen) {
@@ -326,25 +329,24 @@ fn busybox_tokens(line: &[u8]) -> Option<(Vec<&[u8]>, &[u8])> {
 /// /etc/periodic/{15min,hourly,daily,weekly,monthly}: Alpine's run-parts
 /// directories, which crond runs only because root's packaged crontab says
 /// `run-parts /etc/periodic/<period>` on that schedule.
-fn periodic(cx: &mut Ctx, out: &mut Vec<Entry>) {
+fn periodic(cx: &mut Ctx, flavour: super::RunParts, out: &mut Vec<Entry>) {
     for period in ["15min", "hourly", "daily", "weekly", "monthly"] {
-        run_parts_scripts(cx, &format!("etc/periodic/{period}"), period, out);
+        run_parts_scripts(cx, flavour, &format!("etc/periodic/{period}"), period, out);
     }
 }
 
 /// /etc/cron.{hourly,daily,weekly,monthly}. These are scripts run by
 /// run-parts, not crontab lines: there is no command to parse, the script
 /// itself is the target, and the schedule comes from the directory.
-fn run_parts(cx: &mut Ctx, period: &str, out: &mut Vec<Entry>) {
-    run_parts_scripts(cx, &format!("etc/cron.{period}"), period, out);
+fn run_parts(cx: &mut Ctx, flavour: super::RunParts, period: &str, out: &mut Vec<Entry>) {
+    run_parts_scripts(cx, flavour, &format!("etc/cron.{period}"), period, out);
 }
 
 /// The scripts of one run-parts directory. Each is a cron entry, on when
 /// run-parts would run it and a loaded crontab or anacron job names its
 /// directory: nothing but such a job ever points run-parts at it, so a
 /// directory no job names is scripts nobody runs, however executable.
-fn run_parts_scripts(cx: &mut Ctx, dir: &str, period: &str, out: &mut Vec<Entry>) {
-    let flavour = super::run_parts_flavour(cx);
+fn run_parts_scripts(cx: &mut Ctx, flavour: super::RunParts, dir: &str, period: &str, out: &mut Vec<Entry>) {
     let files = super::run_parts_dir(cx, flavour, Path::new(dir));
     if files.is_empty() {
         return;

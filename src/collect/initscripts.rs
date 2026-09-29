@@ -61,11 +61,13 @@ impl Collector for InitScripts {
         out.extend(dhcpcd_hooks(cx));
         out.extend(crypttab(cx));
         out.extend(networkd_dispatcher(cx));
-        out.extend(ifupdown(cx));
-        out.extend(ppp(cx));
+        // The run-parts binary is read once for the three that use it.
+        let run_parts = super::run_parts_flavour(cx);
+        out.extend(ifupdown(cx, run_parts));
+        out.extend(ppp(cx, run_parts));
         out.extend(wireguard(cx));
         out.extend(openvpn(cx));
-        out.extend(ifplugd(cx));
+        out.extend(ifplugd(cx, run_parts));
         out
     }
 }
@@ -129,10 +131,9 @@ fn networkd_dispatcher(cx: &mut Ctx) -> Vec<Entry> {
 /// interface, and the commands the `pre-up`, `up`, `post-up`, `pre-down`,
 /// `down` and `post-down` options of /etc/network/interfaces give, with
 /// the files its `source` lines name.
-fn ifupdown(cx: &mut Ctx) -> Vec<Entry> {
+fn ifupdown(cx: &mut Ctx, flavour: super::RunParts) -> Vec<Entry> {
     let mut out = Vec::new();
     let installed = ["sbin/ifup", "usr/sbin/ifup"].iter().any(|p| cx.root.exists(p));
-    let flavour = super::run_parts_flavour(cx);
     for phase in ["pre-up", "up", "down", "post-down"] {
         let dir = PathBuf::from(format!("etc/network/if-{phase}.d"));
         for f in super::run_parts_dir(cx, flavour, &dir) {
@@ -213,12 +214,11 @@ fn interfaces(cx: &mut Ctx, rel: &Path, depth: usize, seen: &mut BTreeSet<PathBu
 /// pppd's /etc/ppp/ip-up and ip-down (Debian's ppp) run `run-parts` over
 /// their `.d` directories, IPv6 likewise, unless an executable ip-up.local
 /// or ip-down.local exists, which they exec instead.
-fn ppp(cx: &mut Ctx) -> Vec<Entry> {
+fn ppp(cx: &mut Ctx, flavour: super::RunParts) -> Vec<Entry> {
     let mut out = Vec::new();
     if !["usr/sbin/pppd", "sbin/pppd"].iter().any(|p| cx.root.exists(p)) {
         return out;
     }
-    let flavour = super::run_parts_flavour(cx);
     for phase in ["ip-up", "ip-down", "ipv6-up", "ipv6-down"] {
         let local = PathBuf::from(format!("etc/ppp/{phase}.local"));
         let local_runs = exec_mode(cx, &local) != 0 && phase.starts_with("ip-");
@@ -412,12 +412,11 @@ fn openvpn(cx: &mut Ctx) -> Vec<Entry> {
 
 /// ifplugd's action script (Debian's) runs `run-parts` over
 /// /etc/ifplugd/action.d on each link going up or down.
-fn ifplugd(cx: &mut Ctx) -> Vec<Entry> {
+fn ifplugd(cx: &mut Ctx, flavour: super::RunParts) -> Vec<Entry> {
     let mut out = Vec::new();
     if !cx.root.exists("usr/sbin/ifplugd") {
         return out;
     }
-    let flavour = super::run_parts_flavour(cx);
     for f in super::run_parts_dir(cx, flavour, Path::new("etc/ifplugd/action.d")) {
         let mut e = script_entry(cx, Kind::NetworkDispatcher, &f.rel, &f.name, Trigger::NetworkEvent);
         e.note("dispatcher", "ifplugd");
