@@ -1058,17 +1058,19 @@ struct Facts {
     has_install: bool,
     /// Set when ExecStart= sits in a section where systemd would ignore it.
     exec_section: Option<String>,
-    /// Condition*= and Assert*= lines that name a path, key and value as
-    /// written; an empty value clears the key's list, as systemd does.
+    /// Every Condition*= and Assert*= line, key and value as written. An
+    /// empty value clears the whole list it belongs to, Condition or Assert
+    /// as the case may be, whatever the key: that is how systemd resets them.
+    /// Only the path ones can be tested here, but a `|` on one that cannot
+    /// still decides whether the triggering ones matter.
     conditions: Vec<(String, Vec<u8>)>,
 }
 
-/// The condition and assertion keys whose value is a path this pass can
-/// test without running anything: existence, kind, the execute bit, a
-/// non-empty file. A glob, a mount point or an encrypted path is left to
-/// systemd.
-const PATH_CONDITIONS: [&str; 5] =
-    ["PathExists", "PathIsDirectory", "PathIsSymbolicLink", "FileNotEmpty", "FileIsExecutable"];
+/// Which of a unit's two lists a key belongs to: systemd keeps Conditions,
+/// which skip the unit, apart from Asserts, which fail it.
+fn condition_list(key: &str) -> &str {
+    if key.starts_with("Assert") { "Assert" } else { "Condition" }
+}
 
 fn parse_into_facts(cx: &mut Ctx, rel: &Path) -> Facts {
     match cx.read_capped(rel, crate::root::READ_CAP) {
@@ -1109,9 +1111,10 @@ fn facts(ds: &[Directive]) -> Facts {
                 }
             }
             "EnvironmentFile" => accumulate(&mut f.env_files, &d.value),
-            k if k.strip_prefix("Condition").or_else(|| k.strip_prefix("Assert")).is_some_and(|c| PATH_CONDITIONS.contains(&c)) => {
+            k if k.starts_with("Condition") || k.starts_with("Assert") => {
                 if d.value.is_empty() {
-                    f.conditions.retain(|(key, _)| key != k);
+                    let list = condition_list(k);
+                    f.conditions.retain(|(key, _)| condition_list(key) != list);
                 } else {
                     f.conditions.push((k.to_string(), d.value.clone()));
                 }
@@ -1183,26 +1186,48 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
     // quotaon.service only if /sbin/quotaon exists. Evaluated here the way
     // systemd evaluates them — `|` marks a triggering condition and `!`
     // negates — so an absent target the unit itself tests for is not an
-    // orphan.
+    // orphan. A `|` line is not required by itself: one of them must hold.
+    // Each list is a conjunction of its plain conditions, and of one
+    // disjunction: if any are marked `|`, at least one of those must hold too.
     let mut fails = Vec::new();
-    for (key, raw) in &f.conditions {
-        let mut spec = raw.as_slice();
-        while spec.first() == Some(&b'|') {
-            spec = &spec[1..];
+    for list in ["Condition", "Assert"] {
+        let (mut triggers, mut any_holds, mut unknown) = (Vec::new(), false, false);
+        for (key, raw) in f.conditions.iter().filter(|(k, _)| condition_list(k) == list) {
+            let mut spec = raw.as_slice();
+            let triggering = spec.first() == Some(&b'|');
+            if triggering {
+                spec = &spec[1..];
+            }
+            let negate = spec.first() == Some(&b'!');
+            let path = PathBuf::from(OsString::from_vec(if negate { spec[1..].to_vec() } else { spec.to_vec() }));
+            let test = key.trim_start_matches("Condition").trim_start_matches("Assert");
+            // The keys whose value is a path this pass can test without running
+            // anything: existence, kind, the execute bit, a non-empty file. A
+            // glob, a mount point or an encrypted path is left to systemd.
+            let holds = match test {
+                "PathExists" => cx.root.stat_follow(&path).is_ok(),
+                "PathIsDirectory" => cx.root.stat_follow(&path).is_ok_and(|m| m.is_dir),
+                "PathIsSymbolicLink" => cx.root.stat(&path).is_ok_and(|m| m.is_symlink),
+                "FileNotEmpty" => cx.root.stat_follow(&path).is_ok_and(|m| m.is_file && m.size > 0),
+                "FileIsExecutable" => cx.root.stat_follow(&path).is_ok_and(|m| m.is_file && m.mode & 0o111 != 0),
+                // Not testable here: it may hold, so nothing is claimed of
+                // the unit it sits in unless it is a plain one that fails.
+                _ => {
+                    unknown |= triggering;
+                    continue;
+                }
+            };
+            let ok = holds != negate;
+            let shown = format!("{key}={}", String::from_utf8_lossy(raw));
+            if triggering {
+                any_holds |= ok;
+                triggers.push(shown);
+            } else if !ok {
+                fails.push(shown);
+            }
         }
-        let negate = spec.first() == Some(&b'!');
-        let path = PathBuf::from(OsString::from_vec(if negate { spec[1..].to_vec() } else { spec.to_vec() }));
-        let test = key.trim_start_matches("Condition").trim_start_matches("Assert");
-        let holds = match test {
-            "PathExists" => cx.root.stat_follow(&path).is_ok(),
-            "PathIsDirectory" => cx.root.stat_follow(&path).is_ok_and(|m| m.is_dir),
-            "PathIsSymbolicLink" => cx.root.stat(&path).is_ok_and(|m| m.is_symlink),
-            "FileNotEmpty" => cx.root.stat_follow(&path).is_ok_and(|m| m.is_file && m.size > 0),
-            "FileIsExecutable" => cx.root.stat_follow(&path).is_ok_and(|m| m.is_file && m.mode & 0o111 != 0),
-            _ => continue,
-        };
-        if holds == negate {
-            fails.push(format!("{key}={}", String::from_utf8_lossy(raw)));
+        if !triggers.is_empty() && !any_holds && !unknown {
+            fails.push(format!("none of the {} lines marked `|` holds: {}", list, triggers.join(", ")));
         }
     }
     if !fails.is_empty() {
@@ -1454,6 +1479,30 @@ mod tests {
         assert_eq!(rc_local.raw["condition_fails"], "ConditionFileIsExecutable=/etc/rc.local", "present but not executable");
         assert!(!one(&s, "held.service").raw.contains_key("condition_fails"), "a negated absent path, a directory and a present file all hold");
         assert!(!one(&s, "reset.service").raw.contains_key("condition_fails"), "an empty assignment clears the list");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_triggering_condition_needs_only_one_of_its_kind_to_hold() {
+        let dir = tree("triggers");
+        let unit = |lines: &str| format!("[Unit]\n{lines}[Service]\nExecStart=/opt/x\n").into_bytes();
+        let w = |name: &str, lines: &str| write(&dir, &format!("usr/lib/systemd/system/{name}.service"), &unit(lines));
+        w("none-holds", "ConditionPathExists=|/nowhere\nConditionPathExists=|/nowhere2\n");
+        w("one-holds", "ConditionPathExists=|/nowhere\nConditionPathIsDirectory=|/usr\n");
+        // A `|` line this pass cannot test may be the one that holds.
+        w("untestable", "ConditionPathExists=|/nowhere\nConditionVirtualization=|container\n");
+        w("plain-and-trigger", "ConditionPathExists=/nowhere\nConditionPathIsDirectory=|/usr\n");
+        // Empty assignment clears the whole Condition list, whatever the key,
+        // and leaves the Assert list alone.
+        w("reset-all", "ConditionPathExists=/nowhere\nConditionPathIsDirectory=/nowhere2\nConditionVirtualization=\n");
+        w("reset-not-asserts", "AssertPathExists=/nowhere\nConditionVirtualization=\n");
+        let s = scan(&dir);
+        assert!(one(&s, "none-holds.service").raw["condition_fails"].starts_with("none of the Condition lines marked `|` holds"));
+        assert!(!one(&s, "one-holds.service").raw.contains_key("condition_fails"));
+        assert!(!one(&s, "untestable.service").raw.contains_key("condition_fails"));
+        assert_eq!(one(&s, "plain-and-trigger.service").raw["condition_fails"], "ConditionPathExists=/nowhere");
+        assert!(!one(&s, "reset-all.service").raw.contains_key("condition_fails"));
+        assert_eq!(one(&s, "reset-not-asserts.service").raw["condition_fails"], "AssertPathExists=/nowhere");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
