@@ -192,6 +192,12 @@ const WRAPPERS: &[(&str, &[&str], usize)] = &[
     ("zsh", &["-o"], 0),
     // Inside `sh -c` text, the shell hands itself over to what follows.
     ("exec", &["-a"], 0),
+    // Another user's shell, run for `-c` text; runuser also takes `-u user
+    // command`. Their arguments are read by `unwrap_switch_user`.
+    ("su", &[], 0),
+    ("runuser", &[], 0),
+    // The applet is the first argument: `busybox sh -c ...`, `busybox nohup x`.
+    ("busybox", &[], 0),
 ];
 
 /// Shell builtins and keywords that name no program. Their words are skipped
@@ -410,12 +416,16 @@ fn programs(mut words: Vec<String>, by: Vec<&'static str>, depth: usize, out: &m
         }
         // A shell given no script and no -c text is itself what runs: the
         // emergency and debug shells are exactly that.
-        Unwrapped::Nothing if SHELLS.contains(&w.0) => out.push(Run { by, program: Some(word), words }),
+        Unwrapped::Nothing if SHELLS.contains(&w.0) || SWITCH_USER.contains(&w.0) => out.push(Run { by, program: Some(word), words }),
         Unwrapped::Nothing => out.push(Run { by: by_next, program: None, words }),
     }
 }
 
 const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh"];
+
+/// Programs that run the target user's shell: with `-c` text it is a shell
+/// command, and with none it is an interactive shell and `su` is what runs.
+const SWITCH_USER: &[&str] = &["su", "runuser"];
 
 fn wrapper(name: &str) -> Option<&'static (&'static str, &'static [&'static str], usize)> {
     WRAPPERS.iter().find(|w| w.0 == name)
@@ -427,8 +437,57 @@ enum Unwrapped {
     Nothing,
 }
 
+/// `su [options] [-] [user]` and `runuser [options] user` run the user's
+/// shell, on `-c` text if given. `runuser -u user [--] command args` execs the
+/// command directly. Options that take a value are skipped with it.
+fn unwrap_switch_user(name: &str, args: &[String]) -> Unwrapped {
+    const VALUED: &[&str] = &["-s", "--shell", "-g", "--group", "-G", "--supp-group", "-w", "--whitelist-environment", "-P"];
+    let mut i = 0;
+    let mut user_seen = false;
+    while i < args.len() {
+        let a = args[i].as_str();
+        match a {
+            "--" => {
+                i += 1;
+                // runuser -u user -- command
+                return if user_seen && name == "runuser" { rest_as_argv(&args[i..]) } else { Unwrapped::Nothing };
+            }
+            "-c" | "--command" => return args.get(i + 1).map_or(Unwrapped::Nothing, |t| Unwrapped::Text(t.clone())),
+            "-u" | "--user" if name == "runuser" => {
+                user_seen = true;
+                i += 2;
+                // Everything after the user is the command, `--` or not.
+                if args.get(i).map(String::as_str) == Some("--") {
+                    i += 1;
+                }
+                return rest_as_argv(args.get(i..).unwrap_or_default());
+            }
+            _ if VALUED.contains(&a) => i += 2,
+            _ if a.starts_with("--command=") => return Unwrapped::Text(a["--command=".len()..].to_string()),
+            // A cluster holding -c: -lc, -c with its text next.
+            _ if a.starts_with('-') && !a.starts_with("--") && a.len() > 1 && a.contains('c') => {
+                return args.get(i + 1).map_or(Unwrapped::Nothing, |t| Unwrapped::Text(t.clone()));
+            }
+            _ if a.starts_with('-') => i += 1,
+            // The user; what follows it is the shell's own arguments.
+            _ => {
+                user_seen = true;
+                i += 1;
+            }
+        }
+    }
+    Unwrapped::Nothing
+}
+
+fn rest_as_argv(rest: &[String]) -> Unwrapped {
+    if rest.is_empty() { Unwrapped::Nothing } else { Unwrapped::Argv(rest.to_vec()) }
+}
+
 /// What a wrapper hands on: an argv, shell text, or nothing at all.
 fn unwrap(w: &(&str, &[&str], usize), args: &[String], depth: usize) -> Unwrapped {
+    if SWITCH_USER.contains(&w.0) {
+        return unwrap_switch_user(w.0, args);
+    }
     let (name, valued, mut operands) = *w;
     let takes_text = SHELLS.contains(&name) || name == "flock";
     let mut i = 0;
@@ -2185,7 +2244,7 @@ mod tests {
         for f in [
             "usr/bin/env", "usr/bin/nice", "usr/bin/sudo", "usr/bin/timeout", "usr/bin/flock", "usr/bin/true",
             "usr/bin/cat", "usr/bin/logger", "usr/bin/sed", "bin/sh", "bin/bash", "sbin/modprobe",
-            "usr/local/bin/evil", "opt/x",
+            "usr/local/bin/evil", "opt/x", "usr/bin/su", "usr/bin/runuser", "bin/busybox",
         ] {
             std::fs::write(dir.join(f), b"").unwrap();
         }
@@ -2218,6 +2277,16 @@ mod tests {
         lands("/bin/sh -ec '/usr/bin/true'", "bin/sh", Some("usr/bin/true"), "sh");
         lands("/usr/bin/env -S \"/tmp/evil a\"", "usr/bin/env", Some("tmp/evil"), "env");
         lands("/bin/sh -c 'FOO=1 BAR=2 /tmp/evil'", "bin/sh", Some("tmp/evil"), "sh");
+        // Another user's shell, on -c text or the command runuser -u execs.
+        lands("su -c /tmp/evil nobody", "usr/bin/su", Some("tmp/evil"), "su");
+        lands("/usr/bin/su - root -s /bin/sh -c '/opt/x --y'", "usr/bin/su", Some("opt/x"), "su");
+        lands("/usr/bin/su -lc /opt/x nobody", "usr/bin/su", Some("opt/x"), "su");
+        lands("runuser -u nobody -- /tmp/evil a", "usr/bin/runuser", Some("tmp/evil"), "runuser");
+        lands("runuser -l nobody --command=/opt/x", "usr/bin/runuser", Some("opt/x"), "runuser");
+        lands("busybox sh -c /tmp/evil", "bin/busybox", Some("tmp/evil"), "busybox sh");
+        // No -c: su is what runs, an interactive shell, and the user is not a program.
+        let (e, more) = run("su nobody", Some("usr/bin/su"));
+        assert_eq!((e.target_path, e.raw.get("target_wrapped_by"), more.len()), (Some(dir.join("usr/bin/su")), None, 0));
         // A trap's action runs when its signal arrives; reset and ignore run
         // nothing.
         let (e, more) = run("/bin/sh -c 'trap \"/opt/x --cleanup\" EXIT INT; /usr/bin/true'", Some("bin/sh"));
