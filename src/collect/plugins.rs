@@ -201,14 +201,23 @@ fn p11_kit(cx: &mut Ctx, libdirs: &[String], out: &mut Vec<Entry>) {
     }
 }
 
-/// The value of a JSON string key, at any nesting: `"key" : "value"`.
-fn json_string(text: &str, key: &str) -> Option<String> {
-    let needle = format!("\"{key}\"");
-    let at = text.find(&needle)?;
-    let rest = text[at + needle.len()..].trim_start();
-    let rest = rest.strip_prefix(':')?.trim_start();
-    let rest = rest.strip_prefix('"')?;
-    Some(rest[..rest.find('"')?].to_string())
+/// The first string under `key`, at any nesting, in a document that is JSON.
+/// A manifest the loader's own JSON parser would refuse is not loaded, so it
+/// is not reported as if it were.
+fn json_string(text: &[u8], key: &str) -> Option<String> {
+    fn find(v: &serde_json::Value, key: &str) -> Option<String> {
+        match v {
+            serde_json::Value::Object(map) => match map.get(key) {
+                Some(serde_json::Value::String(s)) => Some(s.clone()),
+                _ => map.values().find_map(|v| find(v, key)),
+            },
+            serde_json::Value::Array(items) => items.iter().find_map(|v| find(v, key)),
+            _ => None,
+        }
+    }
+    // serde_json refuses nesting past 128 levels rather than recursing, so a
+    // hostile file cannot overflow the stack here.
+    find(&serde_json::from_slice(text).ok()?, key)
 }
 
 fn icd_json(cx: &mut Ctx, dir: &Path, framework: &str, trigger: Trigger, libdirs: &[String], out: &mut Vec<Entry>) {
@@ -217,8 +226,7 @@ fn icd_json(cx: &mut Ctx, dir: &Path, framework: &str, trigger: Trigger, libdirs
             continue;
         }
         let Some(bytes) = cx.read_capped(&rel, CAP) else { continue };
-        let text = String::from_utf8_lossy(&bytes);
-        let lib = json_string(&text, "library_path");
+        let lib = json_string(&bytes, "library_path");
         let Some(lib) = lib.filter(|l| !l.is_empty()) else { continue };
         let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let layer = rel.parent().map(|p| p.ends_with("implicit_layer.d")).unwrap_or(false);
@@ -334,6 +342,8 @@ mod tests {
         put(&d, "usr/share/glvnd/egl_vendor.d/50_mesa.json", b"{ \"ICD\": { \"library_path\": \"libEGL_mesa.so.0\" } }");
         put(&d, "etc/egl/egl_external_platform.d/99_evil.json", b"{ \"file_format_version\": \"1.0.0\", \"ICD\": { \"library_path\": \"/opt/platform.so\" } }");
         put(&d, "usr/share/vulkan/implicit_layer.d/beacon.json", b"{ \"layer\": { \"library_path\": \"/opt/layer.so\" } }");
+        // A manifest the loader's JSON parser refuses is not loaded.
+        put(&d, "usr/share/vulkan/implicit_layer.d/broken.json", b"{ \"layer\": { \"library_path\": \"/opt/never.so\", } }");
         // OpenCL.
         put(&d, "etc/OpenCL/vendors/mesa.icd", b"/usr/lib/libMesaOpenCL.so.1\n");
         put(&d, "usr/lib64/gdk-pixbuf-2.0/2.10.0/loaders.cache", b"# generated\n\n\"/usr/lib64/gdk-pixbuf-2.0/2.10.0/loaders/libpixbufloader-png.so\"\n\"png\" 5 \"gdk-pixbuf\" \"PNG\" \"LGPL\"\n\"image/png\" \"\"\n\"png\" \"\"\n\"\\211PNG\\r\\n\\032\\n\" \"\" 100\n\n\"/opt/evil.so\"\n\"evil\" 5 \"gdk-pixbuf\" \"x\" \"x\"\n");
