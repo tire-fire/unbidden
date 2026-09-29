@@ -22,7 +22,7 @@ impl Collector for Cron {
 
     fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
         let mut out = Vec::new();
-        let mut seen = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
         let flavour = flavour(cx);
 
         let system = out.len();
@@ -54,7 +54,7 @@ impl Collector for Cron {
         match flavour {
             Flavour::Debian | Flavour::Cronie | Flavour::Unknown => {
                 for dir in ["var/spool/cron", "var/spool/cron/crontabs"] {
-                    if !first_visit(cx, dir, &mut seen) {
+                    if cx.first_visit(dir, &mut seen).is_none() {
                         continue;
                     }
                     for ent in cx.dir(dir) {
@@ -70,7 +70,7 @@ impl Collector for Cron {
             }
             Flavour::BusyBox => {
                 for dir in busybox_crontab_dirs(cx) {
-                    if !first_visit(cx, &dir, &mut seen) {
+                    if cx.first_visit(&dir, &mut seen).is_none() {
                         continue;
                     }
                     let mut names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
@@ -95,7 +95,7 @@ impl Collector for Cron {
         periodic(cx, run_parts_flavour, &mut out);
 
         for dir in ["var/spool/cron/atjobs", "var/spool/at"] {
-            if !first_visit(cx, dir, &mut seen) {
+            if cx.first_visit(dir, &mut seen).is_none() {
                 continue;
             }
             for ent in cx.dir(dir) {
@@ -842,21 +842,6 @@ pub(crate) fn set_command(e: &mut Entry, bytes: &[u8]) {
 
 fn is_symlink(cx: &Ctx, rel: &Path) -> bool {
     cx.root.stat(rel).map(|m| m.is_symlink).unwrap_or(false)
-}
-
-/// Two spool paths can be one directory — /var/spool/at is a link to the at
-/// jobs spool on some layouts — and walking it twice would emit every job
-/// twice under two source paths that never reconcile in a diff.
-fn first_visit(cx: &Ctx, rel: &str, seen: &mut Vec<(u64, u64)>) -> bool {
-    match cx.root.dir_identity(rel) {
-        Ok(id) if seen.contains(&id) => false,
-        Ok(id) => {
-            seen.push(id);
-            true
-        }
-        // Absent or unreadable; cx.dir records which.
-        Err(_) => true,
-    }
 }
 
 /// Splits `n` whitespace-separated fields off the front, returning the span

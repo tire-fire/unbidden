@@ -60,7 +60,7 @@ impl Collector for Python {
             // sitecustomize is looked for on the whole path, the standard
             // library's directory first.
             for dir in stdlib.iter().chain(&dirs) {
-                if distinct(cx, &mut seen, dir) {
+                if cx.first_visit(dir, &mut seen).is_some() {
                     site_dir(cx, &mut out, Path::new(dir), None, dir.ends_with("-packages"));
                 }
             }
@@ -73,7 +73,7 @@ impl Collector for Python {
             }
             for v in &versions {
                 let dir = u.in_home(&format!(".local/lib/{v}/site-packages"));
-                if distinct(cx, &mut seen, &dir) {
+                if cx.first_visit(&dir, &mut seen).is_some() {
                     site_dir(cx, &mut out, &dir, Some(&u.name), true);
                 }
             }
@@ -96,19 +96,6 @@ fn versions(cx: &mut Ctx) -> Vec<String> {
         }
     }
     out.into_iter().collect()
-}
-
-/// Whether a directory exists and has not been read under another name, as
-/// /usr/lib64 and /usr/lib can be one directory.
-fn distinct(cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>, dir: impl AsRef<Path>) -> bool {
-    match cx.root.dir_identity(dir.as_ref()) {
-        Ok(id) => seen.insert(id),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-        Err(e) => {
-            cx.note_failed(dir.as_ref(), &e);
-            false
-        }
-    }
 }
 
 fn site_dir(cx: &mut Ctx, out: &mut Vec<Entry>, dir: &Path, user: Option<&str>, site: bool) {

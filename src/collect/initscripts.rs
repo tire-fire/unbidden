@@ -516,7 +516,7 @@ fn sysv(cx: &mut Ctx) -> Vec<Entry> {
         dirs.extend(OPENRC_PREFIXES.iter().map(|p| ((), PathBuf::from(p).join("init.d"))));
     }
     dirs.extend(INIT_DIRS.iter().map(|d| ((), PathBuf::from(*d))));
-    let init_dirs = distinct_dirs(cx, dirs);
+    let init_dirs = cx.distinct_dirs(dirs);
     let init_ids: BTreeSet<(u64, u64)> = init_dirs.iter().map(|(_, id, _)| *id).collect();
     let kind = if openrc.is_some() { Kind::OpenrcService } else { Kind::SysvInit };
     let systemd = init_is_systemd(cx);
@@ -554,7 +554,7 @@ fn sysv(cx: &mut Ctx) -> Vec<Entry> {
         .collect();
 
     let mut out = Vec::new();
-    for (level, _, dir) in distinct_dirs(cx, candidates) {
+    for (level, _, dir) in cx.distinct_dirs(candidates) {
         for ent in cx.dir(&dir) {
             let raw = ent.name.as_bytes();
             // /etc/init.d/rc globs S* and K*; anything else in the directory
@@ -976,7 +976,7 @@ fn dispatcher(cx: &mut Ctx) -> Vec<Entry> {
     let mut out = Vec::new();
     // A name in an earlier directory is the one NetworkManager runs, per phase.
     let mut first_of: BTreeSet<(String, Vec<u8>)> = BTreeSet::new();
-    for (phase, _, dir) in distinct_dirs(cx, candidates) {
+    for (phase, _, dir) in cx.distinct_dirs(candidates) {
         for ent in cx.dir(&dir) {
             if ent.is_dir {
                 continue;
@@ -1151,25 +1151,6 @@ fn env_assignment(line: &[u8]) -> Option<(&[u8], &[u8])> {
         }
     };
     Some((name, value))
-}
-
-/// Search paths that are two names for one directory are walked once, so a
-/// merged-usr host does not report every script twice under two ids (§5).
-fn distinct_dirs<T>(cx: &mut Ctx, candidates: Vec<(T, PathBuf)>) -> Vec<(T, (u64, u64), PathBuf)> {
-    let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();
-    let mut out = Vec::new();
-    for (label, dir) in candidates {
-        match cx.root.dir_identity(&dir) {
-            Ok(id) => {
-                if seen.insert(id) {
-                    out.push((label, id, dir));
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => cx.note_unreadable(format!("{}: {e}", dir.display())),
-        }
-    }
-    out
 }
 
 /// Lexical tidying for display only — what the operator would type to reach

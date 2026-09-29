@@ -5,7 +5,7 @@
 //! before anything is emitted (§5).
 
 use crate::text::{lossy, short_hash, take_word};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -807,21 +807,8 @@ fn logical_lines(bytes: &[u8], join: Join) -> Vec<Vec<u8>> {
 /// returned rank is the position in the candidate list, which does not move
 /// when one of the directories is absent.
 fn distinct_dirs(cx: &mut Ctx, candidates: &[&'static str]) -> Vec<(usize, &'static str)> {
-    let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();
-    let mut out = Vec::new();
-    for (rank, dir) in candidates.iter().enumerate() {
-        let identity = cx.root.dir_identity(dir);
-        match identity {
-            Ok(id) => {
-                if seen.insert(id) {
-                    out.push((rank, *dir));
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => cx.note_unreadable(format!("{dir}: {e}")),
-        }
-    }
-    out
+    let listed = candidates.iter().enumerate().map(|(rank, dir)| (rank, PathBuf::from(dir))).collect();
+    cx.distinct_dirs(listed).into_iter().map(|(rank, _, _)| (rank, candidates[rank])).collect()
 }
 
 
@@ -856,6 +843,12 @@ fn path_note(cx: &Ctx, rel: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::root::Root;
+    use crate::scan::{Options, Scan, Status, run};
+    use std::collections::BTreeSet;
+    use std::fs;
+
     fn joined(bytes: &str, join: Join) -> Vec<String> {
         logical_lines(bytes.as_bytes(), join).into_iter().map(|l| String::from_utf8(l).unwrap()).collect()
     }
@@ -881,11 +874,6 @@ mod tests {
         assert!(joined("# a comment \\\ninstall foo /bin/true\n", Join::Kmod).is_empty());
         assert_eq!(joined("install bar /bin/fal\\\nse\n", Join::Kmod), ["install bar /bin/false"]);
     }
-
-    use super::*;
-    use crate::root::Root;
-    use crate::scan::{Options, Scan, Status, run};
-    use std::fs;
 
     fn tree(tag: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("unbidden-kernel-{tag}-{}", std::process::id()));

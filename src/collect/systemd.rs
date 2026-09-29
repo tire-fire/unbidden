@@ -259,17 +259,8 @@ impl Walk {
             _ => None,
         };
         let dir = canonical.as_deref().unwrap_or(dir);
-        match cx.root.dir_identity(dir) {
-            Ok(id) => {
-                if !seen.insert(id) {
-                    return;
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-            Err(e) => {
-                cx.note_failed(&dir, &e);
-                return;
-            }
+        if cx.first_visit(dir, seen).is_none() {
+            return;
         }
 
         for ent in cx.dir(dir) {
@@ -589,17 +580,8 @@ fn linked_entry(cx: &mut Ctx, l: &Link) -> Entry {
 fn generators(cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>) -> Vec<Entry> {
     let mut out = Vec::new();
     for dir in GENERATOR_PATHS {
-        match cx.root.dir_identity(dir) {
-            Ok(id) => {
-                if !seen.insert(id) {
-                    continue;
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                cx.note_failed(&dir, &e);
-                continue;
-            }
+        if cx.first_visit(dir, seen).is_none() {
+            continue;
         }
         let scope = if dir.contains("/user-") { "user" } else { "system" };
         for ent in cx.dir(dir) {
@@ -671,14 +653,8 @@ fn power_hooks(cx: &mut Ctx) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();
     for (dir, hook) in POWER_HOOK_DIRS {
-        match cx.root.dir_identity(dir) {
-            Ok(id) if seen.insert(id) => {}
-            Ok(_) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                cx.note_failed(dir, &e);
-                continue;
-            }
+        if cx.first_visit(dir, &mut seen).is_none() {
+            continue;
         }
         let mut ents = cx.dir(dir);
         ents.sort_by(|a, b| a.name.cmp(&b.name));

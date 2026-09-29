@@ -138,14 +138,8 @@ impl Collector for Shell {
         // twice, once under the alias (§5).
         let mut walked: BTreeSet<(u64, u64)> = BTreeSet::new();
         for dir in ENVIRONMENT_D {
-            match cx.root.dir_identity(dir) {
-                Ok(id) if walked.insert(id) => {}
-                Ok(_) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => {
-                    cx.note_failed(dir, &e);
-                    continue;
-                }
+            if cx.first_visit(dir, &mut walked).is_none() {
+                continue;
             }
             for ent in cx.dir(dir) {
                 if ent.is_dir || !ent.name.to_string_lossy().ends_with(".conf") {

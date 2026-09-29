@@ -6,6 +6,7 @@
 //! failed collector and the scan continues, because a scan that aborts on the
 //! one file the attacker crafted is a scan the attacker controls.
 
+use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -57,6 +58,38 @@ pub enum Read {
 }
 
 impl<'a> Ctx<'a> {
+    /// The directory's identity, if it is worth walking now: it exists, could
+    /// be looked at, and has not been walked already under another name.
+    /// Merged /usr makes `lib/x` and `usr/lib/x` one directory, and walking
+    /// both reports every file twice under ids that never reconcile in a
+    /// diff (§5). Absent is normal and says nothing; anything else that
+    /// stops a look is recorded.
+    pub fn first_visit(&mut self, dir: impl AsRef<Path>, seen: &mut BTreeSet<(u64, u64)>) -> Option<(u64, u64)> {
+        let dir = dir.as_ref();
+        match self.root.dir_identity(dir) {
+            Ok(id) if seen.insert(id) => Some(id),
+            Ok(_) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                self.note_failed(dir, &e);
+                None
+            }
+        }
+    }
+
+    /// The candidates that are directories not already listed under another
+    /// name, in order, each with its label and identity.
+    pub fn distinct_dirs<T>(&mut self, candidates: Vec<(T, PathBuf)>) -> Vec<(T, (u64, u64), PathBuf)> {
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        for (label, dir) in candidates {
+            if let Some(id) = self.first_visit(&dir, &mut seen) {
+                out.push((label, id, dir));
+            }
+        }
+        out
+    }
+
     /// A bounded read that records what it could not open. Absent paths are
     /// normal — most search paths do not exist on most hosts — but an
     /// unreadable one is the difference between "nothing there" and "could

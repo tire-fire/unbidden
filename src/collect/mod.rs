@@ -284,14 +284,8 @@ pub(crate) fn replaceable(cx: &mut Ctx, dirs: &[&str], suffix: &str) -> Vec<(Pat
     let mut first: BTreeMap<OsString, PathBuf> = BTreeMap::new();
     let mut found = Vec::new();
     for dir in dirs {
-        match cx.root.dir_identity(dir) {
-            Ok(id) if seen.insert(id) => {}
-            Ok(_) => continue,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                cx.note_failed(dir, &e);
-                continue;
-            }
+        if cx.first_visit(dir, &mut seen).is_none() {
+            continue;
         }
         for ent in cx.dir(dir) {
             if ent.is_dir || !ent.name.as_encoded_bytes().ends_with(suffix.as_bytes()) {

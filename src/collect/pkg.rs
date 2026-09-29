@@ -1525,20 +1525,8 @@ fn xml_attrs(bytes: &[u8], needles: &[&[u8]]) -> BTreeSet<String> {
 /// every vendor file twice under two ids that never reconcile in a diff (§5),
 /// so each inode is walked once under the first name that reached it.
 fn distinct_dirs(cx: &mut Ctx, candidates: &[&'static str]) -> Vec<&'static str> {
-    let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();
-    let mut out = Vec::new();
-    for dir in candidates {
-        match cx.root.dir_identity(dir) {
-            Ok(id) => {
-                if seen.insert(id) {
-                    out.push(*dir);
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => cx.note_unreadable(format!("{dir}: {e}")),
-        }
-    }
-    out
+    let listed = candidates.iter().enumerate().map(|(rank, dir)| (rank, PathBuf::from(dir))).collect();
+    cx.distinct_dirs(listed).into_iter().map(|(rank, _, _)| candidates[rank]).collect()
 }
 
 /// Fills in everything derived from a command line at once, so no caller can
