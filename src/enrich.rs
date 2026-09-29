@@ -236,6 +236,31 @@ struct Run {
     words: Vec<String>,
 }
 
+/// An entry made out of another. It keeps what the carrier's mechanism gives
+/// it (collector, source, trigger, principal, enablement, owner, mode and
+/// time), so the location and ownership rules judge the file the fact hangs
+/// off, and names the carrier. `declared` also keys its id on the carrier: two
+/// cron lines can each start /tmp/evil, on different schedules, and those are
+/// two findings.
+fn made_from(root: &Root, carrier: &Entry, kind: Kind, name: &str, declared: bool) -> Entry {
+    let mut e = Entry::new(kind, &carrier.source, name);
+    e.collector = carrier.collector.clone();
+    let source = root.rel(&carrier.source);
+    if declared {
+        e.rekey_declared(&source, &carrier.id);
+    } else {
+        e.rekey(&source);
+    }
+    e.trigger = carrier.trigger;
+    e.principal = carrier.principal.clone();
+    e.enabled = carrier.enabled;
+    e.owner_uid = carrier.owner_uid;
+    e.mode = carrier.mode;
+    e.mtime = carrier.mtime;
+    e.note("declared_by_entry", &carrier.id);
+    e
+}
+
 /// Replaces a wrapper as an entry's target with what the wrapper runs, and
 /// returns one entry per further program where the command line starts more
 /// than one. Shell text is not a single program: `sh -c 'true; /tmp/evil'`
@@ -309,22 +334,13 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
                     }
                     // Kind and source are the carrier's, as in the interpreter
                     // chain: cron or systemd is still what makes this run.
-                    let mut e = Entry::new(entry.kind, &entry.source, &name);
-                    e.collector = entry.collector.clone();
-                    e.rekey_declared(&root.rel(&entry.source), &entry.id);
+                    let mut e = made_from(root, entry, entry.kind, &name, true);
                     e.target_path = run.program.as_deref().and_then(|p| program_path(root, entry.kind, p));
                     e.command = Some(run.words.join(" ").into_bytes());
-                    e.trigger = entry.trigger;
-                    e.principal = entry.principal.clone();
-                    e.enabled = entry.enabled;
-                    e.owner_uid = entry.owner_uid;
-                    e.mode = entry.mode;
-                    e.mtime = entry.mtime;
                     if !run.by.is_empty() {
                         e.note("target_wrapped_by", run.by.join(" "));
                     }
                     e.note("chain", if script { "script" } else { "command line" });
-                    e.note("declared_by_entry", &entry.id);
                     if let Some(how) = run.program.as_deref().and_then(|p| guarded_by_test(command, p.as_bytes())) {
                         e.note("guarded_by_test", how);
                     }
@@ -1333,20 +1349,11 @@ fn preload_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
                 if !seen.insert((carrier.source.clone(), library.to_string())) {
                     continue;
                 }
-                let mut e = Entry::new(Kind::LdPreload, &carrier.source, library);
-                e.collector = carrier.collector.clone();
-                e.rekey(&root.rel(&carrier.source));
+                let mut e = made_from(root, carrier, Kind::LdPreload, library, false);
                 e.command = Some(format!("{variable}={library}").into_bytes());
                 e.target_path = Some(root.abs(root.rel(Path::new(library))));
-                e.trigger = carrier.trigger;
-                e.principal = carrier.principal.clone();
-                e.owner_uid = carrier.owner_uid;
-                e.mode = carrier.mode;
-                e.mtime = carrier.mtime;
-                e.enabled = carrier.enabled;
                 e.note("variable", variable);
                 e.note("declared_in", carrier.source.to_string_lossy());
-                e.note("declared_by_entry", &carrier.id);
                 out.push(e);
             }
         }
@@ -1385,9 +1392,7 @@ fn interpreter_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
             if value.is_empty() {
                 continue;
             }
-            let mut e = Entry::new(Kind::InterpreterEnv, &carrier.source, variable);
-            e.collector = carrier.collector.clone();
-            e.rekey(&root.rel(&carrier.source));
+            let mut e = made_from(root, carrier, Kind::InterpreterEnv, variable, false);
             e.command = Some(format!("{variable}={value}").into_bytes());
             let file = match variable {
                 "BASH_ENV" | "ENV" | "PYTHONSTARTUP" => Some(value.as_str()),
@@ -1413,16 +1418,9 @@ fn interpreter_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
             }
             // What the variable holds is code or options, not a command line.
             e.note("target_unverifiable", "a variable an interpreter reads");
-            e.trigger = carrier.trigger;
-            e.principal = carrier.principal.clone();
-            e.owner_uid = carrier.owner_uid;
-            e.mode = carrier.mode;
-            e.mtime = carrier.mtime;
-            e.enabled = carrier.enabled;
             e.note("variable", variable);
             e.note("read_by", reads);
             e.note("declared_in", carrier.source.to_string_lossy());
-            e.note("declared_by_entry", &carrier.id);
             out.push(e);
         }
     }
@@ -1617,13 +1615,7 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
             // this code run is still cron or systemd, and the file the fact
             // hangs off is the one whose own location and ownership the
             // operator is already being shown.
-            let mut e = Entry::new(carrier.kind, &carrier.source, &name);
-            e.collector = carrier.collector.clone();
-            if via == "python" {
-                e.rekey_declared(&root.rel(&carrier.source), &carrier.id);
-            } else {
-                e.rekey(&root.rel(&carrier.source));
-            }
+            let mut e = made_from(root, carrier, carrier.kind, &name, via == "python");
             let path = Path::new(std::ffi::OsStr::from_bytes(&referenced));
             // Sourcing a file that is not there runs nothing, and init
             // scripts routinely source optional defaults after testing for
@@ -1646,15 +1638,8 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
                 e.note("referenced_raw_hex", crate::entry::hex(&referenced));
             }
             e.command = Some(referenced);
-            e.trigger = carrier.trigger;
-            e.principal = carrier.principal.clone();
-            e.enabled = carrier.enabled;
-            e.owner_uid = carrier.owner_uid;
-            e.mode = carrier.mode;
-            e.mtime = carrier.mtime;
             e.note("chain", via);
             e.note("chain_from", root.abs(&script).to_string_lossy());
-            e.note("declared_by_entry", &carrier.id);
             if let Some(how) = guarded_by_test(&head, e.command.as_deref().unwrap_or(b"")) {
                 e.note("guarded_by_test", how);
             }
@@ -3155,7 +3140,7 @@ mod tests {
         assert_eq!(hex.raw["encoded_run"], format!("hex, {} chars at offset 5", HEX_PAYLOAD.len()));
 
         // Everything a working host does with long encoding-alphabet runs.
-        for ordinary in ["pip", "generator", "wine", "lvm", "mount", "padding", "raw"] {
+        for ordinary in ["pip", "generator", "wine", "lvm", "mount", "padding"] {
             let e = find(&scan, ordinary);
             assert!(
                 !e.has_flag(Flag::EncodingAnomaly),
@@ -3164,6 +3149,11 @@ mod tests {
             );
             assert!(!e.raw.contains_key("encoded_run"));
         }
+        // Raw high bytes are not an encoding's alphabet, so no run is reported;
+        // that they are not text is what is flagged.
+        let raw = find(&scan, "raw");
+        assert!(raw.has_flag(Flag::EncodingAnomaly));
+        assert!(!raw.raw.contains_key("encoded_run"));
 
         // The key material never reaches `command` — the fingerprint is the
         // name and the blob stays in the file — so the kind needs no
