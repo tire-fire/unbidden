@@ -6,6 +6,7 @@
 //! that an operator has to notice are the same thing.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use serde::Serialize;
 
@@ -238,7 +239,7 @@ pub fn diff(baseline: &Scan, current: &Scan) -> Result<Vec<Diffed>, String> {
                 out.push(Diffed { entry, delta });
             }
             Some(before) => {
-                let fields = changed_fields(&before, &entry);
+                let fields = changed_fields(&before, &entry, (&baseline.header.root, &current.header.root));
                 // A timestamp that moved on its own is not a change. systemd
                 // rewrites every generated unit on each daemon-reload, so
                 // reporting mtime alone would fill a diff with rows whose
@@ -266,15 +267,28 @@ pub fn diff(baseline: &Scan, current: &Scan) -> Result<Vec<Diffed>, String> {
     Ok(out)
 }
 
-fn changed_fields(before: &Entry, after: &Entry) -> Vec<&'static str> {
+/// A path, or a note that holds paths, as it reads inside the scan root. The
+/// same image mounted at two places reports its files under two prefixes, and
+/// the prefix is where it was mounted, not something the host did.
+fn within<'a>(root: &Path, text: &'a str) -> std::borrow::Cow<'a, str> {
+    let prefix = root.to_string_lossy();
+    let prefix = prefix.trim_end_matches('/');
+    if prefix.is_empty() {
+        return text.into();
+    }
+    text.replace(&format!("{prefix}/"), "/").into()
+}
+
+fn changed_fields(before: &Entry, after: &Entry, roots: (&Path, &Path)) -> Vec<&'static str> {
     let mut out = Vec::new();
+    let target = |e: &Entry, root: &Path| e.target_path.as_ref().map(|t| within(root, &t.to_string_lossy()).into_owned());
     let mut check = |name: &'static str, differs: bool| {
         if differs {
             out.push(name);
         }
     };
     check("command", before.command != after.command);
-    check("target_path", before.target_path != after.target_path);
+    check("target_path", target(before, roots.0) != target(after, roots.1));
     check("target_sha256", before.target_sha256 != after.target_sha256);
     check("enabled", before.enabled != after.enabled);
     check("trigger", before.trigger != after.trigger);
@@ -294,10 +308,10 @@ fn changed_fields(before: &Entry, after: &Entry) -> Vec<&'static str> {
     // rather than its configuration — a loaded module's reference count, its
     // dependants. They move on their own, and a diff that reports them is a
     // diff whose real findings are buried.
-    fn settled(e: &Entry) -> BTreeMap<&String, &String> {
-        e.raw.iter().filter(|(k, _)| !k.starts_with("live.")).collect()
-    }
-    check("raw", settled(before) != settled(after));
+    let settled = |e: &Entry, root: &Path| -> BTreeMap<String, String> {
+        e.raw.iter().filter(|(k, _)| !k.starts_with("live.")).map(|(k, v)| (k.clone(), within(root, v).into_owned())).collect()
+    };
+    check("raw", settled(before, roots.0) != settled(after, roots.1));
     out
 }
 
@@ -382,6 +396,28 @@ mod tests {
                 assert!(fields.contains(&"target_sha256"));
             }
             other => panic!("expected a change naming its fields, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_same_image_mounted_in_two_places_is_not_a_change() {
+        let at = |mount: &str| {
+            let mut e = unit("ssh.service", b"/usr/sbin/sshd");
+            e.target_path = Some(format!("{mount}/usr/sbin/sshd").into());
+            e.raw.insert("shadows".into(), format!("{mount}/usr/lib/systemd/system/ssh.service"));
+            let mut s = scan_of(vec![e]);
+            // Reported with a trailing slash by some, without by others.
+            s.header.root = format!("{mount}/").into();
+            s.header.live = false;
+            s
+        };
+        assert_eq!(diff(&at("/mnt/a"), &at("/srv/image/b")).unwrap()[0].delta, Delta::Unchanged);
+        // What the host did still shows.
+        let mut moved = at("/mnt/b");
+        moved.entries[0].target_path = Some("/mnt/b/tmp/sshd".into());
+        match &diff(&at("/mnt/a"), &moved).unwrap()[0].delta {
+            Delta::Changed { fields } => assert_eq!(fields, &["target_path"]),
+            other => panic!("{other:?}"),
         }
     }
 
