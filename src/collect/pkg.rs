@@ -1082,25 +1082,39 @@ fn rpm_scriptlets(cx: &mut Ctx) -> (Vec<Entry>, &'static str) {
         return (Vec::new(), RPM_NO_DB);
     };
 
-    let mut used: BTreeMap<String, usize> = BTreeMap::new();
-    let mut out = Vec::new();
-    for s in scriptlets {
+    // Position in the header identifies nothing: a package holds several
+    // triggers of one type, and one added above the others must not
+    // re-identify them. What identifies a trigger is what fires it, so that is
+    // what the name is built from — never the body, which must be free to
+    // change without the entry becoming a different entry.
+    let base_name = |s: &crate::provenance::rpm::Scriptlet| {
         let pkg = match s.arch.is_empty() {
             true => s.package.clone(),
             false => format!("{}.{}", s.package, s.arch),
         };
-        // Position in the header identifies nothing: a package holds several
-        // triggers of one type, and one added above the others must not
-        // re-identify them. What identifies a trigger is what fires it, so
-        // that is what the name is built from — never the body, which must be
-        // free to change without the entry becoming a different entry.
-        let name = match s.fires_on.is_empty() {
+        match s.fires_on.is_empty() {
             true => format!("{pkg}:{}", s.kind),
             false => {
                 let fires = format!("{}\n{:?}", s.fires_on.join("\n"), s.priority);
                 format!("{pkg}:{}:{}", s.kind, short_hash(fires.as_bytes()))
             }
-        };
+        }
+    };
+    // Several kernels are installed side by side under one package name. A
+    // counter on the repeats would move whenever one is added or removed and
+    // read as every other's scriptlet changing; the version does not move.
+    let mut installed: BTreeMap<String, usize> = BTreeMap::new();
+    for s in &scriptlets {
+        *installed.entry(base_name(s)).or_default() += 1;
+    }
+
+    let mut used: BTreeMap<String, usize> = BTreeMap::new();
+    let mut out = Vec::new();
+    for s in scriptlets {
+        let mut name = base_name(&s);
+        if installed[&name] > 1 {
+            name = format!("{name}@{}", s.version);
+        }
 
         let mut e = cx.entry(Kind::PkgHook, db, uniq(&mut used, name));
         e.trigger = Trigger::PackageOp;
@@ -2157,6 +2171,31 @@ mod tests {
             .string(1085, "<lua>"); // PREINPROG
 
         write_rpmdb(&dir.join(rel), &[systemd.build(), evil.build()]);
+    }
+
+    #[test]
+    fn a_second_installed_kernel_does_not_rename_the_first_ones_scriptlets() {
+        use crate::provenance::rpm::tests::{HeaderBuilder, write_rpmdb};
+        let kernel = |version: &str| {
+            let mut h = HeaderBuilder::default();
+            h.string(1000, "kernel-core").string(1001, version).string(1002, "1.fc44").string(1022, "x86_64").bytes(1024, b"depmod\n").string(1086, "/bin/sh");
+            h.build()
+        };
+        let names = |order: &[&str]| {
+            let dir = tree(&format!("kernels-{}", order.len()));
+            write_rpmdb(&dir.join("var/lib/rpm/rpmdb.sqlite"), &order.iter().map(|v| kernel(v)).collect::<Vec<_>>());
+            let s = scan(&dir);
+            let mut names: Vec<String> = of_kind(&s, Kind::PkgHook).iter().map(|e| e.name.clone()).collect();
+            names.sort();
+            fs::remove_dir_all(&dir).unwrap();
+            names
+        };
+        // One kernel: the plain name. Two: each named by its own version, in
+        // whichever order the database holds them.
+        assert_eq!(names(&["6.1.0"]), ["kernel-core.x86_64:%post"]);
+        let both = ["kernel-core.x86_64:%post@6.1.0-1.fc44.x86_64", "kernel-core.x86_64:%post@6.2.0-1.fc44.x86_64"];
+        assert_eq!(names(&["6.1.0", "6.2.0"]), both);
+        assert_eq!(names(&["6.2.0", "6.1.0"]), both);
     }
 
     #[test]
