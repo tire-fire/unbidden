@@ -404,7 +404,8 @@ const PHASES: [&str; 7] =
 pub struct Script {
     pub package: String,
     pub version: String,
-    /// The package's own checksum, lower-case hex, as `C:` records it.
+    /// The package's own checksum, lower-case hex, decoded from the base64 that
+    /// the `C:` record holds.
     pub digest: String,
     pub phase: String,
     pub body: Vec<u8>,
@@ -465,7 +466,7 @@ pub fn triggers(root: &Root) -> Option<(&'static str, Vec<Trigger>)> {
     Some((TRIGGERS, out))
 }
 
-/// Every installed package by its `C:` checksum, lower-case hex.
+/// Every installed package by its `C:` checksum, decoded to lower-case hex.
 fn packages_by_checksum(root: &Root) -> BTreeMap<String, (String, String)> {
     let mut out = BTreeMap::new();
     let Ok((bytes, _)) = root.read_capped(INSTALLED, DB_CAP) else { return out };

@@ -16,7 +16,7 @@
 //! index and silently misattributes thousands of paths. Wrong provenance is
 //! worse than none, and the format is small enough to own.
 
-use crate::text::{lossy};
+use crate::text::lossy;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -38,7 +38,6 @@ const DBS: [&str; 2] = ["usr/lib/sysimage/rpm/rpmdb.sqlite", DB];
 /// is a backstop against a corrupt or hostile size, not a working limit.
 const DB_CAP: u64 = 512 << 20;
 
-// Header tags. The names are rpm's own.
 const TAG_NAME: u32 = 1000;
 const TAG_VERSION: u32 = 1001;
 const TAG_RELEASE: u32 = 1002;
@@ -254,13 +253,9 @@ fn try_blobs(root: &Root) -> Result<(Vec<Vec<u8>>, usize), String> {
     // image that has no -shm to go with it — which an in-memory copy never
     // has. The main file is a complete database as of the last checkpoint, so
     // the read and write format versions are set back to the rollback-journal
-    // value and the snapshot is read directly.
-    //
-    // The accepted consequence is the one above: a transaction sitting in a
-    // live -wal during a concurrent dnf run is not seen. A scanner reads a
-    // snapshot, and the alternative — opening the real file read-write so
-    // SQLite can recover the WAL — fails outright on a mounted image and
-    // writes to the host under examination.
+    // value and the snapshot is read directly. Opening the real file
+    // read-write so SQLite can recover the WAL fails outright on a mounted
+    // image and writes to the host under examination.
     bytes[SQLITE_WRITE_VERSION] = 1;
     bytes[SQLITE_READ_VERSION] = 1;
 

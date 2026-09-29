@@ -11,7 +11,7 @@
 //! `polkit._runRules`, and only 0.105 holds the local-authority backend.
 
 use crate::entry::key;
-use crate::text::{lossy};
+use crate::text::lossy;
 use std::path::Path;
 
 use super::replaceable;

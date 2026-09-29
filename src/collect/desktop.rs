@@ -9,7 +9,7 @@
 //! from the user database entirely, and its value comes from the compiled
 //! schema defaults instead.
 
-use crate::text::{lossy};
+use crate::text::lossy;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};

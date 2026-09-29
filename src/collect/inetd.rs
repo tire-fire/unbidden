@@ -7,7 +7,7 @@
 //! behind by a removed package starts nothing.
 
 use crate::entry::key;
-use crate::text::{lossy};
+use crate::text::lossy;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -183,7 +183,6 @@ fn defaults(attrs: &BTreeMap<String, String>, conf: &mut Xinetd) {
     }
 }
 
-/// A path xinetd names, root-relative.
 fn include_path(p: &[u8]) -> PathBuf {
     PathBuf::from(lossy(p).trim_start_matches('/'))
 }

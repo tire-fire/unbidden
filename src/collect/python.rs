@@ -79,8 +79,6 @@ impl Collector for Python {
     }
 }
 
-/// The installed Python 3 versions, as the `python3.N` directory names under
-/// /usr/lib and /usr/lib64.
 fn versions(cx: &mut Ctx) -> Vec<String> {
     let mut out = BTreeSet::new();
     for dir in ["usr/lib", "usr/lib64"] {

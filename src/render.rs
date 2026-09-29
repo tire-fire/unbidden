@@ -37,10 +37,11 @@ impl Filters {
 /// the spec's rule is "packaged and intact", and every other flag is a fact
 /// the operator asked to see.
 ///
-/// DegradedEnablement is the one exception. It says the enablement answer was
-/// inferred rather than read from systemd, which is a caveat about the row,
-/// not a finding about the host — and on a machine without a running systemd
-/// it is set on every entry, which would suppress nothing at all.
+/// DegradedEnablement is the flag every entry may carry. It says the
+/// enablement answer was inferred rather than read from systemd, which is a
+/// caveat about the row, not a finding about the host — and on a machine
+/// without a running systemd it is set on every entry, which would suppress
+/// nothing at all. A few kinds tolerate more, each where it is decided below.
 ///
 /// "Intact" covers what the entry runs as well as the file it was read from.
 /// A packaged unit whose ExecStart= names a file with no digest to check it
@@ -121,8 +122,8 @@ pub fn suppressed(e: &Entry) -> bool {
 ///
 /// That is different from §7's "missing md5sums" case, which is a gap in the
 /// evidence about a shipped file and must never be hidden. Here there is no
-/// evidence for anyone, ever, and an ordinary Debian host carries 851 of
-/// them. Reporting all of them on every run teaches an operator to skip the
+/// evidence for anyone, ever, and an ordinary Debian host carries hundreds
+/// of them. Reporting all of them on every run teaches an operator to skip the
 /// category, which costs more than it buys.
 ///
 /// Those are suppressed when a package owns them, which needs justifying

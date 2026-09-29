@@ -20,10 +20,9 @@ use crate::scan::{Collector, Ctx};
 
 pub struct Kernel;
 
-/// udev's own order. The first directory holding a given file name wins
-/// outright; whatever survives that is applied in lexical order by basename.
-// In the order udev and kmod read them, which for udev decides which of two
-// same-named rules files is used: /etc, /run, /usr/local/lib, /usr/lib.
+/// udev's own order: /etc, /run, /usr/local/lib, /usr/lib. The first directory
+/// holding a given file name wins outright; whatever survives that is applied
+/// in lexical order by basename.
 const UDEV_DIRS: &[&str] = &[
     "etc/udev/rules.d",
     "run/udev/rules.d",

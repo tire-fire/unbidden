@@ -104,7 +104,6 @@ fn chromium(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
-/// Firefox install directories that exist, each with its name.
 fn firefox_installs(cx: &mut Ctx) -> Vec<(PathBuf, &'static str)> {
     let mut out = Vec::new();
     for (dir, browser) in [
@@ -169,7 +168,7 @@ fn firefox(cx: &mut Ctx, out: &mut Vec<Entry>) {
             let Some(name) = pref_string(line, "general.config.filename") else { continue };
             let mut e = entry(cx, &rel, format!("{browser}:autoconfig:{name}"), browser, true);
             e.note("config_file", name.clone());
-            e.note("runs_when", "Firefox starts, as the browser, with chrome privileges");
+            e.note("runs_when", "Firefox starts, as the browser, evaluating the file as JavaScript");
             let target = if name.starts_with('/') { PathBuf::from(&name) } else { install.join(&name) };
             e.target_path = Some(if name.starts_with('/') { target } else { cx.root.abs(&target) });
             out.push(e);

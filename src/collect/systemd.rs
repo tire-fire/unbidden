@@ -22,14 +22,14 @@
 //! that into a flag.
 
 use crate::entry::key;
-use crate::text::{lossy};
+use crate::text::lossy;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 
 use super::{glob_match, replaceable};
-use crate::entry::{Scope, Enablement, Entry, Flag, Kind, Trigger, name_from_os};
+use crate::entry::{Enablement, Entry, Flag, Kind, Scope, Trigger, name_from_os};
 use crate::scan::{Collector, Ctx};
 
 pub struct Systemd;
@@ -355,9 +355,10 @@ impl Walk {
     /// a unit file of another name, itself found in the search path, is
     /// that unit under a second name: the Alias= `systemctl enable` writes,
     /// such as sshd.service for ssh.service. An alias a package ships in the
-    /// vendor directories is the package's own file and stays. Its enablement is already on the unit it names; the
-    /// link becomes a note there rather than an entry judged as a file no
-    /// package owns. An alias to anything else stays an entry of its own.
+    /// vendor directories is the package's own file and stays. Its
+    /// enablement is already on the unit it names; the link becomes a note
+    /// there rather than an entry judged as a file no package owns. An alias
+    /// to anything else stays an entry of its own.
     fn fold_aliases(&self, cx: &mut Ctx, out: &mut Vec<Entry>) {
         let files: BTreeMap<&Path, usize> = self
             .units
@@ -691,7 +692,6 @@ fn manager_environment(cx: &mut Ctx) -> Vec<Entry> {
     let version = systemd_version(cx);
     let mut out = Vec::new();
     for (file, scope) in [("system.conf", "system"), ("user.conf", "user")] {
-        // The main files in search order, and whether systemd reads each.
         let mut main_read = false;
         let mut files: Vec<(PathBuf, Option<String>)> = Vec::new();
         for (i, dir) in CONF_DIRS.iter().enumerate() {

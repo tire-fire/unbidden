@@ -13,9 +13,8 @@
 //! in, and gives up at a ceiling rather than following a tree that generates
 //! itself.
 
-use crate::text::{normalize};
 use crate::collect::first_absolute;
-use crate::text::{lossy};
+use crate::text::{lossy, normalize};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -94,7 +93,6 @@ impl Walk {
         }
     }
 
-    /// One unit of budget per directory entry looked at.
     fn spend(&mut self) -> bool {
         self.visited += 1;
         self.visited <= self.ceiling

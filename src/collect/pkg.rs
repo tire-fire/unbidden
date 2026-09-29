@@ -156,7 +156,6 @@ fn dpkg_cfg(cx: &mut Ctx) -> Vec<Entry> {
 /// (around apt, and daily): the executables in /etc/etckeeper/*.d whose
 /// names are letters, digits and `-` only.
 fn hook_dirs(cx: &mut Ctx) -> Vec<Entry> {
-    // Which names each directory's tool runs.
     enum Rule {
         All,
         NotBackup,
@@ -230,7 +229,6 @@ fn alternatives(cx: &mut Ctx) -> Vec<Entry> {
             let lines: Vec<&str> = text.lines().collect();
             let Some(sep) = lines.iter().skip(2).position(|l| l.is_empty()).map(|p| p + 2) else { continue };
             let slaves: Vec<&str> = lines[2..sep].chunks(2).map(|c| c[0]).collect();
-            // name -> the paths registered for it.
             let master = ent.name.to_string_lossy().into_owned();
             let mut choices: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
             let mut i = sep + 1;
@@ -565,7 +563,6 @@ fn apt_conf_pairs(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
     for tok in apt_tokens(bytes) {
         match tok {
             Tok::Word(w) => match tag.take() {
-                // `Tag "value"` — the pair is complete.
                 Some(t) => out.push((key_of(&stack, Some(&t)), w)),
                 None => tag = Some(w),
             },

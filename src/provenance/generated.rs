@@ -5,14 +5,13 @@
 //! the same verdict an attacker's unit gets, and the flag the tool leads
 //! with. That is the largest false-positive source in the supported set.
 //!
-//! The verdict takes Unpackaged away, so it has to be earned rather than
-//! claimed by a file name. Two rules keep it honest. It is only ever asked
-//! about a path no package database claims: a file a package ships is
-//! checked against the package, whatever it is called, so a trojaned
-//! `snap-confine` or `cloud-init` binary still reads as modified. And a snap
-//! verdict needs the snap to be installed and the file to have the shape
-//! snapd gives it — `snap.evil.service` running `/tmp/x` is not a snap unit
-//! because of its name.
+//! The verdict takes Unpackaged away, so a file name alone must not earn it.
+//! Two rules keep it honest. It is only ever asked about a path no package
+//! database claims: a file a package ships is checked against the package,
+//! whatever it is called, so a trojaned `snap-confine` or `cloud-init` binary
+//! still reads as modified. And a snap verdict needs the snap to be installed
+//! and the file to have the shape snapd gives it — `snap.evil.service`
+//! running `/tmp/x` is not a snap unit because of its name.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -26,8 +25,9 @@ use super::Answers;
 /// one of them.
 const UNIT_CAP: usize = 64 * 1024;
 
-/// Paths no package claims, classified where something on the host provably
-/// produced them. Anything else is left out and stays Unpackaged.
+/// Paths no package claims, classified where they are in a place a known
+/// producer writes and, for snaps, where the host holds the evidence that
+/// producer was there. Anything else is left out and stays Unpackaged.
 pub fn classify(root: &Root, unclaimed: &BTreeSet<PathBuf>) -> Answers {
     let snaps = Snaps::installed(root);
     let mut out = Answers::new();

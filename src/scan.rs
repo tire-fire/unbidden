@@ -456,8 +456,7 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
         for h in handles {
             match h.join() {
                 Ok(r) => results.push(r),
-                // catch_unwind already covers collector bodies; this is the
-                // belt to that suspenders.
+                // Reached only by a panic outside the catch_unwind above.
                 Err(payload) => results.push((
                     CollectorStatus {
                         name: "unknown".into(),

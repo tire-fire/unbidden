@@ -9,7 +9,8 @@
 //! The file is regenerated here the way its generator does it, from the
 //! generator's inputs, and compared byte for byte. It is Reproduced only when
 //! every input is itself packaged and intact. Any other byte, an added
-//! `auth sufficient pam_permit.so` included, leaves it Unpackaged.
+//! `auth sufficient pam_permit.so` included, earns no answer here, and the
+//! file keeps the verdict of a path no package claims.
 //!
 //! The two generators are implemented from their documentation and from what
 //! the real tools were seen to do, not from their source: pam-auth-update
@@ -34,8 +35,9 @@ const NSSWITCH_TEMPLATE: &str = "usr/share/libc-bin/nsswitch.conf";
 /// Files a package's postinst installs by copying a template it ships, so
 /// that dpkg owns the template and never the file: base-files' /etc/profile
 /// and root's dotfiles, libc-bin's nsswitch.conf, openssh-server's sshd_config
-/// from Debian 12 on, sysvinit-core's inittab. Byte for byte the template, the file is what the
-/// package wrote; edited, it is the operator's or an intruder's, and shows.
+/// from Debian 12 on, sysvinit-core's inittab. Byte for byte the template,
+/// the file is what the package wrote; edited, it is the operator's or an
+/// intruder's, and shows.
 const COPIES: [(&str, &str); 6] = [
     (NSSWITCH, NSSWITCH_TEMPLATE),
     ("etc/profile", "usr/share/base-files/profile"),

@@ -133,8 +133,6 @@ fn flag_non_utf8(e: &mut Entry, bytes: &[u8]) {
     }
 }
 
-// ------------------------------------------------------------------- part A
-
 /// Where a bare `pam_unix.so` resolves. libpam looks in one directory, the
 /// one it was built with; the multiarch and lib64 ones come first so that a
 /// copy planted in an unused /lib/security is not taken for the real module.
@@ -723,8 +721,6 @@ fn namespace_init(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
-// ------------------------------------------------------------------- part B
-
 struct KeyLine<'a> {
     options: Option<&'a [u8]>,
     keytype: &'a [u8],
@@ -1181,8 +1177,6 @@ fn sshd_config_file(
     }
 }
 
-// ------------------------------------------------------------------- part C
-
 const SUDO_TAGS: &[&str] = &[
     "NOPASSWD",
     "PASSWD",
@@ -1593,7 +1587,6 @@ const RIGHTS_GROUPS: [(&str, &str); 13] = [
     ("staff", "writes /usr/local and /home on Debian"),
 ];
 
-/// A colon-separated database's rows.
 fn colon_rows(bytes: &[u8]) -> Vec<Vec<String>> {
     String::from_utf8_lossy(bytes).lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()).map(|l| l.split(':').map(str::to_string).collect()).collect()
 }
@@ -2096,8 +2089,6 @@ const SSH_CLIENT_RUNS: [(&str, &str, bool); 6] = [
     ("xauthlocation", "XAuthLocation", false),
 ];
 
-/// One option line read out of a client configuration, with the Host and
-/// Match lines it sits under.
 struct SshOpt {
     rel: PathBuf,
     line: usize,
@@ -2111,7 +2102,6 @@ struct SshOpt {
 }
 
 impl SshOpt {
-    /// The conditions that decide whether this option applies.
     fn conditions(&self) -> impl Iterator<Item = &str> {
         self.scope.iter().filter(|(_, all)| !all).map(|(t, _)| t.as_str())
     }

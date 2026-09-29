@@ -185,7 +185,6 @@ impl Scanner {
         self.tokens.push_back(Token { tok, mark });
     }
 
-    // --- the public face
 
     fn need_more_tokens(&mut self) -> Result<bool, String> {
         if self.done {

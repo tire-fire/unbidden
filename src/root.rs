@@ -129,7 +129,8 @@ impl Root {
     }
 
     /// A mounted image or chroot. Live-only interfaces are unavailable and
-    /// resolution is confined to the root by the kernel.
+    /// resolution is confined to the root, by the kernel where it has
+    /// openat2 and by hand where it does not.
     pub fn at(path: impl AsRef<Path>) -> io::Result<Root> {
         Root::open_root(path.as_ref(), false)
     }

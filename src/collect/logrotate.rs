@@ -52,7 +52,6 @@ fn taboo(name: &[u8]) -> bool {
     name.windows(b".rhn-cfg-tmp-".len()).any(|w| w == b".rhn-cfg-tmp-") || TABOO.iter().any(|t| name.ends_with(t.as_bytes()))
 }
 
-/// A file, or every file of a directory, as `include` names it.
 fn include(cx: &mut Ctx, rel: &Path, depth: usize, seen: &mut std::collections::BTreeSet<PathBuf>, out: &mut Vec<Entry>) {
     match cx.root.stat_follow(rel) {
         Ok(m) if m.is_dir => {
@@ -74,7 +73,6 @@ fn read(cx: &mut Ctx, rel: &Path, depth: usize, seen: &mut std::collections::BTr
     let mut logs: Option<String> = None;
     // Log names may run over several lines before the `{`.
     let mut pending: Vec<&[u8]> = Vec::new();
-    // The script being read: its keyword and its lines so far.
     let mut script: Option<(&str, Vec<&[u8]>)> = None;
     for line in bytes.split(|b| *b == b'\n') {
         let t = line.trim_ascii();

@@ -39,7 +39,6 @@ pub enum Value {
 }
 
 impl Value {
-    /// The value under a string key of a mapping.
     pub fn get(&self, key: &str) -> Option<&Value> {
         match self {
             Value::Map(m) => m.iter().find(|(k, _)| matches!(k, Value::Str(s) if s == key)).map(|(_, v)| v),
@@ -646,7 +645,6 @@ fn is_float(t: &str) -> bool {
 struct Timestamp {
     date: (u32, u32, u32),
     time: Option<(u32, u32, u32)>,
-    /// Zone hours and minutes.
     zone: Option<(u32, u32)>,
 }
 

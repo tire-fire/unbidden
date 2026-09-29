@@ -64,13 +64,6 @@ pub struct Resolution {
     pub failures: Vec<String>,
 }
 
-/// Paths are root-relative throughout, matching every other filesystem
-/// operation in the tool.
-///
-/// The package databases answer first, for every path. A runtime producer is
-/// only ever asked about a path no package claims: the GeneratedBy verdict
-/// takes Unpackaged away, and a file a package ships must be checked against
-/// that package whatever it happens to be called.
 /// Every path some package claims, from whichever databases the host has.
 pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
     let mut out = dpkg::packaged_files(root);
@@ -79,6 +72,13 @@ pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
     out
 }
 
+/// Paths are root-relative throughout, matching every other filesystem
+/// operation in the tool.
+///
+/// The package databases answer first, for every path. A runtime producer is
+/// only ever asked about a path no package claims: the GeneratedBy verdict
+/// takes Unpackaged away, and a file a package ships must be checked against
+/// that package whatever it happens to be called.
 pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Resolution {
     resolve_with(root, wanted, &[("dpkg", dpkg::resolve), ("rpm", rpm::resolve), ("apk", apk::resolve)])
 }

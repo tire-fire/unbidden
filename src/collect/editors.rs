@@ -28,7 +28,8 @@ use crate::scan::{Collector, Ctx};
 pub struct Editors;
 
 const CAP: usize = 1 << 20;
-/// `plugin/**` recursion, as vim's globpath descends.
+/// How far `plugin/**` is followed: this tool's own bound, since vim's `**`
+/// goes deeper.
 const MAX_DEPTH: usize = 4;
 
 impl Collector for Editors {
@@ -163,8 +164,9 @@ fn emacs(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
-/// A config line split into words the way tmux and screen split them:
-/// blanks separate, quotes group, a backslash escapes.
+/// A config line split into words: blanks separate, quotes group, a backslash
+/// escapes. Enough for the directives read here; tmux's own lexer also has
+/// `{}` blocks and `$VAR`, which this does not.
 fn words(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();

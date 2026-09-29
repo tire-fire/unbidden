@@ -3,7 +3,8 @@
 //! package provenance, whether a target exists, which unit shadows which, and
 //! the LD_PRELOAD assignments that turn up in every kind of file that can set
 //! an environment: shell profiles, units, crontabs, init scripts, udev rules,
-//! desktop entries, authorized_keys options, sshd's SetEnv and ~/.ssh/environment.
+//! desktop entries, authorized_keys options, sshd's SetEnv and
+//! ~/.ssh/environment.
 //!
 //! This is also where a rule engine would eventually go. The Entry record
 //! carries the raw facts precisely so that it could.

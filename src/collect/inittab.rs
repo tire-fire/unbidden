@@ -35,8 +35,8 @@ const TEMPLATE: &str = "usr/share/sysvinit/inittab";
 /// The characters that make either init give a process to /bin/sh.
 const SHELL_CHARS: &[u8] = b"~`!$^&*()=|\\{}[];\"'<>?";
 
-/// An init binary is read whole to learn what it reads; systemd's is the
-/// largest at under two megabytes.
+/// An init binary is read whole to learn what it reads. systemd's is never
+/// read, and the cap sits far above the size of BusyBox or sysvinit.
 const INIT_CAP: usize = 16 << 20;
 
 /// sysvinit's action table (init.c) and what each fires on.

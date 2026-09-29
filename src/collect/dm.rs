@@ -227,7 +227,9 @@ fn sddm(cx: &mut Ctx, out: &mut Vec<Entry>, active: Option<&str>) {
     for (section, key, default, trigger, principal) in SDDM_KEYS {
         let (value, rel) = match values.get(&(section.to_string(), key.to_string())) {
             Some((v, rel)) => (v.clone(), rel.clone()),
-            // The built-in default, reported where the file it names is.
+            // The default script for the key, reported where the file it names
+            // is. A default whose file is not there makes no row, so a host
+            // that keeps these scripts elsewhere gets none for them.
             None => {
                 if !cx.root.exists(default) {
                     continue;

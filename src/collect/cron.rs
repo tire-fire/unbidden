@@ -1,11 +1,12 @@
 //! cron and at.
 //!
-//! Six spool layouts feed two kinds. Three parsing decisions here are easy to
-//! get subtly wrong and are commented where they are made: what makes a line
-//! an environment assignment rather than a job, where a command ends, and how
-//! a line is named so that inserting a line above it does not re-identify it.
+//! Every file cron, anacron, BusyBox crond and at read feeds two kinds. Three
+//! parsing decisions here are easy to get subtly wrong and are commented where
+//! they are made: what makes a line an environment assignment rather than a
+//! job, where a command ends, and how a line is named so that inserting a line
+//! above it does not re-identify it.
 
-use crate::text::{unquote};
+use crate::text::unquote;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
