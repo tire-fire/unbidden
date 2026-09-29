@@ -145,8 +145,7 @@ mod tests {
 
     #[test]
     fn scripts_are_read_from_the_files_logrotate_includes() {
-        let d = std::env::temp_dir().join(format!("unbidden-logrotate-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("logrotate");
         put(&d, "etc/logrotate.conf", b"weekly\ninclude /etc/logrotate.d\n");
         put(
             &d,
@@ -171,6 +170,5 @@ mod tests {
         put(&d, "usr/sbin/logrotate", b"");
         let s = scan(&d);
         assert!(s.entries.iter().all(|e| e.enabled == Enablement::Enabled && e.trigger == Trigger::Schedule));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -160,8 +160,7 @@ mod tests {
 
     #[test]
     fn passwd_home_and_spool_are_unioned_with_their_sources() {
-        let dir = std::env::temp_dir().join(format!("unbidden-users-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("users");
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::create_dir_all(dir.join("home/ldapuser")).unwrap();
         std::fs::create_dir_all(dir.join("root")).unwrap();
@@ -179,6 +178,5 @@ mod tests {
         assert_eq!(by["svcacct"].source, "cron-spool", "a spool with no passwd entry still gets scanned");
         assert_eq!(by["root"].home, PathBuf::from("/root"));
         assert!(!by.contains_key("broken-line"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1358,10 +1358,8 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    fn tree(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("unbidden-init-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&p);
-        fs::create_dir_all(&p).unwrap();
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let p = crate::testing::Tree::new(&format!("init-{tag}"));
         p
     }
 
@@ -1934,7 +1932,6 @@ exec /usr/sbin/sshd\n";
         assert_eq!(bak.enabled, Enablement::Disabled, "run-parts skips a dotted name, executable or not");
         assert!(bak.raw["not_run"].contains("run-parts"));
         assert_eq!(hook(&s, "resolved-enter").raw["hook_phase"], "enter");
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1954,7 +1951,6 @@ exec /usr/sbin/sshd\n";
         assert_eq!(hook(&s, "dhclient-up-hooks").raw["hook_phase"], "up");
         assert_eq!(hook(&s, "dhclient.d/ntp.sh").enabled, Enablement::Enabled);
         assert_eq!(hook(&s, "dhclient.d/chrony.sh").enabled, Enablement::Disabled);
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1983,7 +1979,6 @@ exec /usr/sbin/sshd\n";
         assert_eq!(ntp.raw["nohook_for_some_interfaces"], "true");
         assert_eq!(hook(&s, "40-edit~").enabled, Enablement::Disabled);
         assert!(s.entries.iter().all(|e| !e.source.ends_with(".hidden")), "a shell glob skips dotfiles");
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1992,13 +1987,11 @@ exec /usr/sbin/sshd\n";
         put(&d, "etc/dhcp/dhclient-exit-hooks.d/zz", b"/opt/x\n", 0o755);
         put(&d, "etc/dhcpcd.exit-hook", b"/opt/x\n", 0o644);
         assert!(scan(&d).entries.is_empty());
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn a_crypttab_keyscript_is_a_boot_program() {
-        let d = std::env::temp_dir().join(format!("unbidden-crypttab-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("crypttab");
         std::fs::create_dir_all(d.join("etc")).unwrap();
         std::fs::write(
             d.join("etc/crypttab"),
@@ -2022,14 +2015,12 @@ exec /usr/sbin/sshd\n";
                 ("keyscript:root_crypt", Some(Path::new("/lib/cryptsetup/scripts/decrypt_keyctl")), Enablement::Unknown),
             ]
         );
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn network_hooks_follow_each_tools_rules() {
         use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("unbidden-nethooks-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("nethooks");
         let put = |rel: &str, body: &[u8], mode: u32| {
             let p = d.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -2074,14 +2065,12 @@ exec /usr/sbin/sshd\n";
         let wg = cmd("/opt/wg-up %i");
         assert_eq!((wg.enabled, wg.raw["hook_phase"].as_str()), (Enablement::Enabled, "PostUp"));
         assert!(s.entries.iter().all(|e| e.command.as_deref() != Some(&b"/not/interface"[..])));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn openvpn_scripts_run_by_script_security_and_ifplugd_by_run_parts() {
         use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("unbidden-ovpn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("ovpn");
         let put = |rel: &str, body: &[u8], mode: u32| {
             let p = d.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -2112,6 +2101,5 @@ exec /usr/sbin/sshd\n";
         assert_eq!(by("client-connect", "etc/openvpn/server/srv.conf").enabled, Enablement::Enabled);
         assert!(!s.entries.iter().any(|e| e.command.as_deref() == Some(&b"/commented"[..])));
         assert!(s.entries.iter().any(|e| e.name == "mount-nfs" && e.enabled == Enablement::Enabled));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

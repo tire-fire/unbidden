@@ -854,10 +854,8 @@ mod tests {
         assert_eq!(joined("install bar /bin/fal\\\nse\n", Join::Kmod), ["install bar /bin/false"]);
     }
 
-    fn tree(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("unbidden-kernel-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&p);
-        fs::create_dir_all(&p).unwrap();
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let p = crate::testing::Tree::new(&format!("kernel-{tag}"));
         p
     }
 

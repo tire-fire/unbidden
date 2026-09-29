@@ -742,8 +742,7 @@ mod tests {
     fn a_unit_systemd_names_through_merged_usr_takes_its_answer() {
         // systemd on Debian 12, Ubuntu 22.04 and Mint 21 lists vendor units
         // under /lib/systemd/system; the walk reports /usr/lib/systemd/system.
-        let dir = std::env::temp_dir().join(format!("unbidden-dbus-usr-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("dbus-usr");
         std::fs::create_dir_all(dir.join("usr/lib/systemd/system")).unwrap();
         std::fs::write(dir.join("usr/lib/systemd/system/cron.service"), b"[Service]\n").unwrap();
         std::os::unix::fs::symlink("usr/lib", dir.join("lib")).unwrap();
@@ -763,13 +762,11 @@ mod tests {
         assert_eq!(apply(&manager, &mut entries), 1);
         assert_eq!(entries[0].enabled, Enablement::Enabled);
         assert!(!entries[0].has_flag(Flag::DegradedEnablement));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn user_managers_are_discovered_from_the_runtime_directories_that_exist() {
-        let dir = std::env::temp_dir().join(format!("unbidden-dbus-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("dbus");
         for rel in ["run/user/1000", "run/user/1001", "run/user/nobody"] {
             std::fs::create_dir_all(dir.join(rel)).unwrap();
         }
@@ -787,6 +784,5 @@ mod tests {
 
         // Nothing is asked of an offline root, whatever it contains.
         assert!(Manager::query(&root).is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -338,9 +338,8 @@ mod tests {
     use crate::root::Root;
     use crate::scan::{Options, Scan};
 
-    fn tree(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("unbidden-inetd-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let d = crate::testing::Tree::new(&format!("inetd-{tag}"));
         put(&d, "etc/passwd", b"root:x:0:0::/root:/bin/sh\n");
         d
     }
@@ -399,7 +398,6 @@ mod tests {
         let stream = one(&s, "echo (echo-stream)");
         assert_eq!((stream.enabled, stream.target_path.clone()), (Enablement::Disabled, None), "INTERNAL runs no program");
         assert_eq!(one(&s, "echo (echo-dgram)").enabled, Enablement::Enabled);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -411,7 +409,6 @@ mod tests {
         let s = scan(&d);
         assert_eq!(one(&s, "ftp").enabled, Enablement::Enabled);
         assert_eq!(one(&s, "rsh").enabled, Enablement::Disabled);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -434,7 +431,6 @@ mod tests {
         assert_eq!(telnet.command.as_deref(), Some(b"/usr/sbin/tcpd /usr/sbin/in.telnetd".as_slice()));
         assert_eq!(one(&s, "ftp/tcp").principal.as_deref(), Some("nobody"));
         assert_eq!(one(&s, "echo/tcp").target_path, None);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -444,13 +440,11 @@ mod tests {
         put(&d, "etc/xinetd.d/telnet", &service("telnet", "/usr/sbin/in.telnetd", ""));
         put(&d, "etc/inetd.conf", b"telnet stream tcp nowait root /usr/sbin/in.telnetd in.telnetd\n");
         assert!(scan(&d).entries.is_empty());
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn tcp_wrappers_spawn_and_twist_run_only_where_libwrap_is() {
-        let d = std::env::temp_dir().join(format!("unbidden-tcpw-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("tcpw");
         let put = |rel: &str, body: &[u8]| {
             let p = d.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -489,7 +483,6 @@ mod tests {
         assert_eq!(s.entries[0].raw["not_run"], "libwrap is not installed");
         put("usr/lib/x86_64-linux-gnu/libwrap.so.0", b"");
         assert!(run().entries.iter().all(|e| e.enabled == Enablement::Enabled && e.trigger == Trigger::NetworkEvent));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -502,6 +495,5 @@ mod tests {
         let s = scan(&d);
         assert_eq!(one(&s, "listed").enabled, Enablement::Enabled, "-= removed it from the list");
         assert_eq!(one(&s, "other").enabled, Enablement::Disabled);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

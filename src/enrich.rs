@@ -1959,8 +1959,7 @@ mod tests {
         // /proc/modules is nobody's file, but the .ko it names is packaged
         // like any other. Skipping the whole entry in the provenance pass
         // left every loaded module on every live host unknown, and shown.
-        let dir = std::env::temp_dir().join(format!("unbidden-kernel-target-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("kernel-target");
         for d in ["proc/sys/kernel", "lib/modules/6.1/kernel/fs/9p", "sbin", "var/lib/dpkg/info"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -1997,7 +1996,6 @@ mod tests {
         assert!(!module.raw.contains_key("provenance_caveat"));
         let callout = scan.entries.iter().find(|e| e.name == "modprobe").unwrap();
         assert!(callout.provenance.is_packaged_intact(), "{:?}", callout.provenance);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2006,8 +2004,7 @@ mod tests {
         // as an absolute path does. Resolving it after the provenance pass
         // meant the file that actually runs was never looked up, and nothing
         // behind it was followed either.
-        let dir = std::env::temp_dir().join(format!("unbidden-bare-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("bare");
         for d in ["etc/cron.d", "etc/alternatives", "usr/local/bin", "usr/bin", "tmp", "var/lib/dpkg/info"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -2089,7 +2086,6 @@ mod tests {
         let editor = by_command("editor");
         assert_eq!(editor.raw["target_provenance"], "vim (intact)");
         assert_eq!(editor.raw["target_resolves_to"], dir.join("usr/bin/vim.basic").to_string_lossy());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2138,7 +2134,7 @@ mod tests {
 
     #[test]
     fn tcpd_is_looked_through_to_the_server_it_wraps() {
-        let dir = std::env::temp_dir().join(format!("unbidden-tcpd-{}", std::process::id()));
+        let dir = crate::testing::Tree::new("tcpd");
         std::fs::create_dir_all(dir.join("usr/sbin")).unwrap();
         for f in ["usr/sbin/tcpd", "usr/sbin/in.telnetd"] {
             std::fs::write(dir.join(f), b"").unwrap();
@@ -2150,13 +2146,11 @@ mod tests {
         look_through_wrappers(&root, std::slice::from_mut(&mut e));
         assert_eq!(e.target_path, Some(dir.join("usr/sbin/in.telnetd")));
         assert_eq!(e.raw["target_wrapped_by"], "tcpd");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn interpreter_variables_become_entries_about_what_they_load() {
-        let dir = std::env::temp_dir().join(format!("unbidden-interp-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("interp");
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::write(dir.join("etc/passwd"), "root:x:0:0::/root:/bin/sh\n").unwrap();
         std::fs::write(
@@ -2177,7 +2171,6 @@ mod tests {
         assert_eq!(get("NODE_OPTIONS").target_path, Some(dir.join("opt/hook.js")));
         assert!(get("BASH_ENV").raw["read_by"].contains("non-interactive bash"));
         assert!(!scan.entries.iter().any(|e| e.kind == Kind::InterpreterEnv && e.name == "LANG"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2215,8 +2208,7 @@ mod tests {
     #[test]
     fn an_inittab_line_is_vouched_for_by_a_verified_template() {
         // An offline root, whose paths carry the mount prefix.
-        let dir = std::env::temp_dir().join(format!("unbidden-vouch-template-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("vouch-template");
         let root = Root::at(&dir).unwrap();
         let template = root.abs("usr/share/sysvinit/inittab").display().to_string();
         let line = |name: &str, has_template: bool| {
@@ -2243,12 +2235,11 @@ mod tests {
         let mut entries = vec![line("1", true)];
         vouch_for_templates(&root, &mut entries, &answers);
         assert!(!entries[0].raw.contains_key("vouched"), "an edited template vouches for nothing");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_wrapper_is_looked_through_to_what_it_runs() {
-        let dir = std::env::temp_dir().join(format!("unbidden-wrappers-{}", std::process::id()));
+        let dir = crate::testing::Tree::new("wrappers");
         for d in ["usr/bin", "usr/local/bin", "bin", "sbin", "opt"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -2364,13 +2355,11 @@ mod tests {
         assert!(plain.raw.is_empty() && more.is_empty());
         let (elsewhere, _) = run("env evil", Some("usr/lib/security/pam_exec.so"));
         assert_eq!(elsewhere.target_path, Some(dir.join("usr/lib/security/pam_exec.so")));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_program_a_script_tests_for_before_running_is_not_an_orphan() {
-        let dir = std::env::temp_dir().join(format!("unbidden-guarded-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("guarded");
         for d in ["etc/cron.d", "usr/share/u", "usr/sbin", "usr/bin", "opt"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -2423,13 +2412,11 @@ mod tests {
         let other = scan.entries.iter().find(|e| e.name == "/opt/other").unwrap();
         assert!(other.has_flag(Flag::TargetMissing), "the unguarded program in the same line still is");
         assert!(scan.entries.iter().any(|e| e.name == "/opt/tool" && e.raw.get("guarded_by_test").is_some()));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn an_empty_file_is_noted_and_a_vendor_tree_link_is_no_escape() {
-        let dir = std::env::temp_dir().join(format!("unbidden-empty-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("empty");
         for d in ["etc", "usr/lib/systemd/system-generators", "usr/libexec/netplan", "tmp"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -2458,13 +2445,11 @@ mod tests {
         };
         assert!(!generator("netplan", "/usr/libexec/netplan/generate").has_flag(Flag::NonStandardLocation), "a link into a vendor tree");
         assert!(generator("evil", "/tmp/evil").has_flag(Flag::NonStandardLocation), "a link into /tmp");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_packaged_unit_conditioned_on_its_absent_target_is_quiet_end_to_end() {
-        let dir = std::env::temp_dir().join(format!("unbidden-quotaon-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("quotaon");
         for d in ["usr/lib/systemd/system", "var/lib/dpkg/info", "sbin"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -2486,7 +2471,6 @@ mod tests {
         assert!(unit.provenance.is_packaged_intact(), "{:?}", unit.provenance);
         assert!(unit.flags.iter().all(|f| *f == Flag::DegradedEnablement), "{:?}", unit.flags);
         assert!(crate::render::suppressed(unit));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2504,7 +2488,7 @@ mod tests {
 
     #[test]
     fn a_python_module_is_followed_to_the_programs_it_starts() {
-        let dir = std::env::temp_dir().join(format!("unbidden-pylaunch-{}", std::process::id()));
+        let dir = crate::testing::Tree::new("pylaunch");
         for d in ["etc/dnf/plugins", "usr/lib/python3/site-packages/dnf-plugins", "usr/bin", "opt"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -2542,7 +2526,6 @@ mod tests {
             assert_eq!(e.raw["chain"], "python");
             assert_eq!(e.source, dir.join("etc/dnf/plugins/hook.conf"));
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2583,8 +2566,7 @@ mod tests {
 
     #[test]
     fn one_file_lists_a_bounded_number_of_commands() {
-        let dir = std::env::temp_dir().join(format!("unbidden-flood-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("flood");
         let root = Root::at(&dir).unwrap();
         let text: Vec<String> = (0..20_000).map(|i| format!("/tmp/e{i}")).collect();
         let mut e = Entry::new(Kind::SystemdUnit, dir.join("etc/systemd/system/x.service"), "x.service");
@@ -2600,7 +2582,6 @@ mod tests {
         e.target_path = Some(dir.join("bin/sh"));
         assert_eq!(look_through_wrappers(&root, std::slice::from_mut(&mut e)).len(), 2);
         assert!(!e.raw.contains_key("commands_listed"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2625,8 +2606,7 @@ mod tests {
 
     #[test]
     fn an_entry_judged_by_another_file_says_which() {
-        let dir = std::env::temp_dir().join(format!("unbidden-subject-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("subject");
         std::fs::create_dir_all(dir.join("usr/bin")).unwrap();
         std::fs::write(dir.join("usr/bin/tool"), b"x").unwrap();
         let root = Root::at(&dir).unwrap();
@@ -2643,13 +2623,11 @@ mod tests {
         let mut own = Entry::new(Kind::Cron, dir.join("etc/cron.d/x"), "line");
         apply_provenance(&root, &mut own, &answers);
         assert!(!own.raw.contains_key("provenance_of"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_target_too_large_to_hash_says_so_rather_than_reporting_nothing() {
-        let dir = std::env::temp_dir().join(format!("unbidden-bigtarget-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("bigtarget");
         std::fs::create_dir_all(dir.join("opt")).unwrap();
         // Sparse: the length is the whole cost.
         let big = std::fs::File::create(dir.join("opt/big")).unwrap();
@@ -2666,14 +2644,11 @@ mod tests {
         let (b, s) = (entry("opt/big"), entry("opt/small"));
         assert!(b.target_sha256.is_none() && b.raw["digest_skipped"].contains("256 MiB"));
         assert!(s.target_sha256.is_some() && !s.raw.contains_key("digest_skipped"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn the_environment_a_command_line_hands_its_programs_is_read_from_the_grammar() {
-        let dir = std::env::temp_dir().join(format!("unbidden-cmdenv-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("cmdenv");
         let root = Root::at(&dir).unwrap();
         let env_of = |command: &str| {
             let mut e = Entry::new(Kind::Cron, dir.join("etc/cron.d/x"), "job");
@@ -2690,14 +2665,11 @@ mod tests {
         // and neither is a variable the shell sets for itself.
         assert!(env_of("/usr/bin/prog LD_PRELOAD=/tmp/e.so").is_empty());
         assert!(env_of("X=1").is_empty());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_shell_scriptlet_starts_programs_and_keeps_its_interpreter() {
-        let dir = std::env::temp_dir().join(format!("unbidden-scriptlet-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("scriptlet");
         let root = Root::at(&dir).unwrap();
         let mk = |shell: bool| {
             let mut e = Entry::new(Kind::PkgHook, dir.join("lib/apk/db/scripts.tar"), "pkg:post-install");
@@ -2719,13 +2691,11 @@ mod tests {
         // Text the entry does not say is a shell's is left alone, as before.
         let mut e = mk(false);
         assert!(look_through_wrappers(&root, std::slice::from_mut(&mut e)).is_empty());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_cron_command_is_cut_where_the_shell_cuts_it() {
-        let dir = std::env::temp_dir().join(format!("unbidden-cronsemi-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("cronsemi");
         for d in ["etc/cron.d", "opt"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -2747,13 +2717,11 @@ mod tests {
             scan.entries.iter().filter(|e| e.raw.contains_key("runs_commands")).all(|e| e.target_path.as_deref() == Some(dir.join("opt/a.sh").as_path())),
             "the line's own target is the script, without the `;`"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn every_entry_has_its_own_id_and_its_own_trigger() {
-        let dir = std::env::temp_dir().join(format!("unbidden-ids-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("ids");
         for d in ["etc/systemd/system", "etc/cron.d", "usr/bin", "opt"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -2786,13 +2754,11 @@ mod tests {
         }
         let evil: BTreeSet<_> = scan.entries.iter().filter(|e| e.name == "/tmp/evil").map(|e| e.trigger).collect();
         assert_eq!(evil.len(), 2, "each schedule that starts /tmp/evil is its own finding: {evil:?}");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_target_the_lookup_did_not_answer_keeps_its_entry_in_view() {
-        let dir = std::env::temp_dir().join(format!("unbidden-unanswered-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("unanswered");
         let root = Root::at(&dir).unwrap();
         let mut e = Entry::new(Kind::SystemdUnit, dir.join("etc/systemd/system/x.service"), "x.service");
         e.target_path = Some(dir.join("usr/sbin/x"));
@@ -2817,13 +2783,11 @@ mod tests {
         assert_eq!(e.raw["target_provenance"], "x (intact)");
         apply_provenance(&root, &mut e, &provenance::Answers::new());
         assert_eq!(e.raw["target_provenance"], "x (intact)");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn enrichment_resolves_provenance_targets_links_and_preloads() {
-        let dir = std::env::temp_dir().join(format!("unbidden-enrich-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("enrich");
         for d in ["etc/systemd/system", "etc/cron.d", "opt", "tmp/staging", "var/lib/dpkg/info"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -2882,7 +2846,6 @@ mod tests {
         assert!(crate::render::suppressed(profile));
         assert!(!crate::render::suppressed(preload));
 
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Entries whose targets are scripts, so the chain pass has something to
@@ -2921,8 +2884,7 @@ mod tests {
 
     #[test]
     fn the_interpreter_a_referenced_script_names_is_resolved_in_its_own_right() {
-        let dir = std::env::temp_dir().join(format!("unbidden-chain-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("chain");
         let write = |rel: &str, body: &[u8]| {
             let p = dir.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -3043,7 +3005,6 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), total, "every synthesised entry needs its own identity");
 
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// base64 of a 77-byte shell loop — what `echo … | base64 -d | sh`
@@ -3143,8 +3104,7 @@ mod tests {
 
     #[test]
     fn an_encoded_payload_is_reported_and_a_digest_is_not() {
-        let dir = std::env::temp_dir().join(format!("unbidden-encoding-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("encoding");
         std::fs::create_dir_all(dir.join("etc/cron.d")).unwrap();
         std::fs::create_dir_all(dir.join("root/.ssh")).unwrap();
         for job in ["dropper", "hexdropper", "pip", "generator", "wine", "lvm", "mount", "padding", "raw"] {
@@ -3193,7 +3153,6 @@ mod tests {
         let forced = find(&scan, "SHA256:hQ9tVqpJxS1ZrEoKnT3uWgYd8mLbC5fN0aXiR7vPjUw");
         assert!(forced.has_flag(Flag::EncodingAnomaly), "a forced command is where a key line hides one");
 
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -3226,8 +3185,7 @@ mod tests {
 
     #[test]
     fn every_directory_a_collector_walks_is_a_standard_location() {
-        let dir = std::env::temp_dir().join(format!("unbidden-standard-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("standard");
         let root = Root::at(&dir).unwrap();
         for (kind, path) in [
             (Kind::Udev, "usr/local/lib/udev/rules.d/60-x.rules"),
@@ -3244,14 +3202,12 @@ mod tests {
         let mut e = Entry::new(Kind::Udev, dir.join("opt/udev/rules.d/60-x.rules"), "x");
         apply_location(&root, &mut e);
         assert!(e.has_flag(Flag::NonStandardLocation), "the check still fails closed");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_search_path_someone_untrusted_can_write_is_flagged() {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let dir = std::env::temp_dir().join(format!("unbidden-searchpath-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("searchpath");
         for (d, mode) in [("ww", 0o1777), ("mine", 0o755), ("gw", 0o775), ("ok", 0o755)] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
             std::fs::set_permissions(dir.join(d), std::fs::Permissions::from_mode(mode)).unwrap();
@@ -3301,6 +3257,5 @@ mod tests {
         quiet.note("env.PATH", "${PATH:+$PATH:}/usr/sbin:/sbin");
         writable_search_path(&root, &mut quiet);
         assert!(quiet.flags.is_empty());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

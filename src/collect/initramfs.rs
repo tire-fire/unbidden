@@ -328,8 +328,7 @@ mod tests {
 
     #[test]
     fn mkinitramfs_sources_its_configuration_as_root_at_every_build() {
-        let d = std::env::temp_dir().join(format!("unbidden-initramfs-conf-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("initramfs-conf");
         put(&d, "usr/sbin/mkinitramfs", b"", 0o755);
         put(&d, "etc/initramfs-tools/initramfs.conf", b"MODULES=most\n", 0o644);
         put(&d, "etc/initramfs-tools/conf.d/50-local", b"export PATH=/tmp:$PATH\n", 0o644);
@@ -350,13 +349,11 @@ mod tests {
         assert_eq!(get("conf-hooks.d/zz-pkg").enabled, Enablement::Enabled);
         assert_eq!(get("conf.d/50-local.dpkg-old").enabled, Enablement::Disabled);
         assert_eq!(get("conf.d/.hidden").enabled, Enablement::Disabled);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn a_module_directory_named_in_multibyte_text_cannot_fail_the_collector() {
-        let d = std::env::temp_dir().join(format!("unbidden-initramfs-utf8-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("initramfs-utf8");
         put(&d, "usr/bin/dracut", b"", 0o755);
         put(&d, "usr/lib/dracut/modules.d/9\u{20ac}bad/module-setup.sh", b"", 0o755);
         put(&d, "usr/lib/dracut/modules.d/\u{20ac}9x/module-setup.sh", b"", 0o755);
@@ -365,13 +362,11 @@ mod tests {
         let status = &s.header.collectors[0].status;
         assert!(matches!(status, crate::scan::Status::Complete), "a planted directory beside the real ones must not blind the collector: {status:?}");
         assert!(s.entries.iter().any(|e| e.name == "dracut:module:evil"), "the module beside it is still read");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn what_builds_and_fills_the_initramfs_is_read() {
-        let d = std::env::temp_dir().join(format!("unbidden-initramfs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("initramfs");
         put(&d, "usr/sbin/mkinitramfs", b"", 0o755);
         put(&d, "usr/share/initramfs-tools/hooks/resume", b"#!/bin/sh\n", 0o755);
         put(&d, "etc/initramfs-tools/hooks/beacon", b"#!/bin/sh\ncp /opt/b ${DESTDIR}/bin\n", 0o755);
@@ -416,6 +411,5 @@ mod tests {
         let inst = s.entries.iter().find(|e| e.name == "dracut:conf:01-dist.conf" && e.enabled == Enablement::Enabled).unwrap();
         assert_eq!(inst.raw["install_items"], "/opt/x");
         assert_eq!(s.entries.iter().find(|e| e.name == "initramfs-tools:init-top:00run").unwrap().trigger, Trigger::Boot);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -958,8 +958,7 @@ mod pam_env_tests {
 
     #[test]
     fn an_ld_preload_parked_in_a_pam_or_systemd_environment_file_is_found() {
-        let dir = std::env::temp_dir().join(format!("unbidden-pamenv-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("pamenv");
         let put = |rel: &str, body: &[u8]| {
             let p = dir.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -986,7 +985,6 @@ mod pam_env_tests {
         let dropin = s.entries.iter().find(|e| e.name == "99-x.conf").expect("environment.d drop-in");
         assert_eq!(dropin.raw["env.LD_AUDIT"], "/tmp/audit.so");
 
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
@@ -998,11 +996,8 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::symlink;
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("unbidden-shell-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&p);
-        fs::create_dir_all(&p).unwrap();
-        p
+    fn tmpdir(tag: &str) -> crate::testing::Tree {
+        crate::testing::Tree::new(&format!("shell-{tag}"))
     }
 
     fn run(dir: &Path) -> Scan {
@@ -1087,7 +1082,6 @@ mod tests {
 
         // ghost is in passwd with no home on disk: nothing, and no complaint.
         assert!(!scan.entries.iter().any(|e| e.source.starts_with(dir.join("home/ghost"))));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1112,7 +1106,6 @@ mod tests {
         assert!(!e.raw.contains_key("env.FOO"), "pam_env has no export keyword");
         assert!(!e.raw.contains_key("sourced"), "pam_env does not source");
         assert!(!e.raw.contains_key("exec"), "pam_env runs nothing");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1153,7 +1146,6 @@ mod tests {
         assert_eq!(b.raw["line_endings"], "crlf");
         assert_eq!(b.raw["nul_bytes"], "2");
         assert!(b.raw["env.LD_PRELOAD"].starts_with("/tmp/"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1184,7 +1176,6 @@ mod tests {
         let p = by_name(&scan, Kind::ShellProfile, ".profile");
         assert_eq!(p.raw["symlink_target"], "/tmp/gone");
         assert!(p.raw.contains_key("not_regular_file"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1214,7 +1205,6 @@ mod tests {
         assert_eq!(evil.command.as_deref(), Some(&b"/usr/lib/libnss.so\t/tmp/evil.so"[..]));
         assert_eq!(evil.raw["ld_so_conf.nonstandard"], "/opt/weird/lib\n/opt/nested/lib");
         assert!(by_name(&scan, Kind::LdPreload, "/opt/weird/lib.so").command.is_some());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1240,7 +1230,6 @@ mod tests {
             assert!(e.raw["not_followed"].contains("etc/shadow"), "{:?}", e.raw);
             assert!(e.raw.keys().all(|k| !k.starts_with("env.")), "the target was not read");
         }
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1254,7 +1243,6 @@ mod tests {
         let found: Vec<_> = scan.entries.iter().filter(|e| e.name == "99-environment.conf").collect();
         assert_eq!(found.len(), 1, "{:?}", found.iter().map(|e| &e.source).collect::<Vec<_>>());
         assert_eq!(found[0].source, dir.join("usr/lib/environment.d/99-environment.conf"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1272,7 +1260,6 @@ mod tests {
         let mine = by_name(&scan, Kind::ShellProfile, "20-mine.conf");
         assert_eq!(mine.principal.as_deref(), Some("alice"));
         assert_eq!(mine.raw.get("env.LD_PRELOAD").map(String::as_str), Some("/opt/b.so"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1288,7 +1275,6 @@ mod tests {
         assert_eq!(dirs[0].name, "/var/tmp/.lib");
         assert_eq!(dirs[0].source, dir.join("etc/ld.so.conf.d/zz-evil.conf"));
         assert_eq!(dirs[0].trigger, Trigger::Always);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

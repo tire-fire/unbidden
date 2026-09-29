@@ -257,11 +257,13 @@ fn nothing_executes_a_binary_on_the_host_being_examined() {
     assert!(bad.is_empty(), "the threat model forbids these:\n  {}", bad.join("\n  "));
 }
 
-/// The two files allowed to touch the filesystem by path. Root is the
+/// The files allowed to touch the filesystem by path. Root is the
 /// abstraction itself. main.rs reads and writes the operator's own files —
 /// a baseline passed to --against, the file --save writes — which live on
 /// the analyst's machine by design and are never part of the scan root.
-const FILESYSTEM_OWNERS: [&str; 2] = ["src/root.rs", "src/main.rs"];
+/// testing.rs is compiled only for tests and makes and removes the temporary
+/// trees they scan.
+const FILESYSTEM_OWNERS: [&str; 3] = ["src/root.rs", "src/main.rs", "src/testing.rs"];
 
 #[test]
 fn nothing_reaches_the_filesystem_except_through_the_scan_root() {

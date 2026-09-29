@@ -352,9 +352,8 @@ mod tests {
     use crate::scan::{Options, Scan, Status};
     use std::path::PathBuf;
 
-    fn tree(tag: &str, daemon: &[u8]) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("unbidden-polkit-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+    fn tree(tag: &str, daemon: &[u8]) -> crate::testing::Tree {
+        let d = crate::testing::Tree::new(&format!("polkit-{tag}"));
         put(&d, "usr/lib/polkit-1/polkitd", daemon);
         put(&d, "etc/passwd", b"root:x:0:0::/root:/bin/sh\n");
         d
@@ -410,7 +409,6 @@ mod tests {
         let vendor = s.entries.iter().find(|e| e.source.starts_with(d.join("usr"))).unwrap();
         assert_eq!(vendor.enabled, Enablement::Disabled, "/etc replaces the same name in /usr/share");
         assert!(vendor.raw["shadowed_by"].ends_with("etc/polkit-1/rules.d/50-default.rules"));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -435,7 +433,6 @@ mod tests {
         assert_eq!(staff.principal, None, "two identities name no single account");
         assert!(!staff.raw.contains_key("returns_yes"));
         assert_eq!(one(&s, "AdminIdentities").raw["identity"], "unix-group:sudo;unix-user:mallory");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -457,17 +454,14 @@ mod tests {
         assert_eq!(file.kind, Kind::PolkitAction);
         assert_eq!(file.raw["no_auth_actions"], "org.evil.run (allow_active); org.evil.unclosed (allow_any)");
         assert_eq!(file.raw["exec_paths"], "org.evil.run: /opt/evil");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn no_daemon_means_nothing_is_evaluated() {
-        let d = std::env::temp_dir().join(format!("unbidden-polkit-none-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("polkit-none");
         put(&d, "etc/polkit-1/rules.d/49-evil.rules", b"return polkit.Result.YES;");
         let s = scan(&d);
         assert!(s.entries.is_empty());
         assert_eq!(s.header.collectors[0].status, Status::Complete);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

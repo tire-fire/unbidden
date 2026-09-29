@@ -793,8 +793,7 @@ mod tests {
 
     #[test]
     fn event_handlers_are_read_by_each_daemons_rule() {
-        let d = std::env::temp_dir().join(format!("unbidden-events-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("events");
         put(&d, "usr/sbin/acpid", b"", 0o755);
         put(&d, "etc/acpi/events/powerbtn", b"# power\nevent=button/power.*\nAction=/opt/on-power %e\n", 0o644);
         put(&d, "etc/acpi/events/lid.bak", b"event=button/lid\naction=/opt/never\n", 0o644);
@@ -817,13 +816,11 @@ mod tests {
         assert!(!s.entries.iter().any(|e| e.name == "zed:zed.rc"), "zed.rc is configuration");
         assert_eq!(by("update-ca-certificates:jks-keystore").trigger, Trigger::PackageOp);
         assert_eq!(by("apport:evil.py").raw["loaded_for"], "every crash report");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn package_hook_directories_run_as_their_tools_choose() {
-        let d = std::env::temp_dir().join(format!("unbidden-hookdirs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("hookdirs");
         put(&d, "usr/bin/schroot", b"", 0o755);
         for name in ["00check", "15binfmt", "_x.y-z1", "a-", "Upper", "05file.dpkg-old", "x_y"] {
             put(&d, &format!("etc/schroot/setup.d/{name}"), b"#!/bin/sh\n", 0o755);
@@ -867,13 +864,11 @@ mod tests {
                 ("cron-apt:config.d:3-download", "-"),
             ]
         );
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn clamav_runs_its_event_commands() {
-        let d = std::env::temp_dir().join(format!("unbidden-clamav-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("clamav");
         put(&d, "usr/sbin/clamd", b"", 0o755);
         put(&d, "etc/clamav/clamd.conf", b"# VirusEvent /never\nUser clamav\nVirusEvent   \"/opt/alert %v\"  \n", 0o644);
         put(&d, "etc/clamav/freshclam.conf", b"OnUpdateExecute /opt/updated\n", 0o644);
@@ -891,13 +886,11 @@ mod tests {
                 ("freshclam:OnUpdateExecute", "clamav", "/opt/updated", Enablement::Disabled),
             ]
         );
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn spamassassin_and_kea_load_what_their_configurations_name() {
-        let d = std::env::temp_dir().join(format!("unbidden-plugins-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("plugins");
         put(&d, "usr/sbin/spamd", b"", 0o755);
         put(&d, "etc/spamassassin/v310.pre", b"# loadplugin Mail::SpamAssassin::Plugin::Never\nloadplugin Mail::SpamAssassin::Plugin::SPF\n", 0o644);
         put(&d, "etc/spamassassin/local.cf", b"loadplugin Evil evil.pm # here\n", 0o644);
@@ -921,13 +914,11 @@ mod tests {
                 ("spamassassin:Mail::SpamAssassin::Plugin::SPF", None),
             ]
         );
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn rsyslog_programs_and_root_cups_backends_are_found() {
-        let d = std::env::temp_dir().join(format!("unbidden-rsyslog-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("rsyslog");
         put(&d, "usr/sbin/rsyslogd", b"", 0o755);
         put(&d, "etc/rsyslog.conf", b"module(load=\"omprog\")\n$PrivDropToUser syslog\n$IncludeConfig /etc/rsyslog.d/*.conf\n", 0o644);
         put(
@@ -952,6 +943,5 @@ mod tests {
         let by = |n: &str| s.entries.iter().find(|e| e.name == n).unwrap();
         assert_eq!(by("cups:rootly").principal.as_deref(), Some("root"));
         assert_eq!(by("cups:ipp").principal.as_deref(), Some("lp"));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

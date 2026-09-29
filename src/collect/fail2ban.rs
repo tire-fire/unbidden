@@ -374,21 +374,18 @@ mod tests {
             jail.push_str(&format!("k{i} = {}\n", ten(i + 1)));
         }
         jail.push_str("k9 = beacon\naction = %(k0)s\n[sshd]\nport = ssh\n");
-        let d = std::env::temp_dir().join(format!("unbidden-fail2ban-multiply-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("fail2ban-multiply");
         put(&d, "usr/bin/fail2ban-server", b"");
         put(&d, "etc/fail2ban/jail.conf", jail.as_bytes());
         let started = std::time::Instant::now();
         let s = scan(&d);
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
         assert!(matches!(s.header.collectors[0].status, crate::scan::Status::Complete));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn actions_enabled_jails_name_run_and_others_are_off() {
-        let d = std::env::temp_dir().join(format!("unbidden-fail2ban-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("fail2ban");
         put(&d, "usr/bin/fail2ban-server", b"");
         put(
             &d,
@@ -418,6 +415,5 @@ mod tests {
         assert!(unban.source.ends_with("iptables-multiport.local"));
         let ban = s.entries.iter().find(|e| e.name == "fail2ban:iptables-multiport:actionban").unwrap();
         assert_eq!(ban.command.as_deref(), Some(b"iptables -w -I f2b-<name> 1 -s <ip> -j REJECT".as_slice()), "tags from the action and its includes, not the ban's");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

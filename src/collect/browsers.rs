@@ -211,8 +211,7 @@ mod tests {
 
     #[test]
     fn forced_extensions_and_autoconfig_are_code_in_every_browser() {
-        let d = std::env::temp_dir().join(format!("unbidden-browsers-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("browsers");
         put(&d, "usr/bin/chromium", b"");
         put(&d, "etc/chromium/policies/managed/site.json", b"{\"ExtensionInstallForcelist\": [\"abcdefghijklmnopabcdefghijklmnop;https://x.example/u.xml\"], \"ExtensionSettings\": {\"*\": {\"installation_mode\": \"blocked\"}, \"ponmlkjihgfedcbaponmlkjihgfedcba\": {\"installation_mode\": \"normal_installed\", \"update_url\": \"https://y.example/u\"}}}");
         put(&d, "usr/lib/firefox-esr/firefox-esr", b"");
@@ -239,6 +238,5 @@ mod tests {
                 ("google-chrome:extension:chromeidchromeidchromeidchromeid", "force_installed", None, Enablement::Disabled),
             ]
         );
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

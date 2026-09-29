@@ -1153,10 +1153,8 @@ mod tests {
         crate::scan::run(&root, &Options { deep: false }, &collectors)
     }
 
-    fn fixture(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("unbidden-agents-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+    fn fixture(tag: &str) -> crate::testing::Tree {
+        crate::testing::Tree::new(&format!("agents-{tag}"))
     }
 
     /// How many entries name `needle` in their own name or command.

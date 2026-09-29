@@ -763,10 +763,8 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    fn tree(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("unbidden-deep-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&p);
-        fs::create_dir_all(&p).unwrap();
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let p = crate::testing::Tree::new(&format!("deep-{tag}"));
         p
     }
 
@@ -1137,8 +1135,7 @@ http://x/y
     #[test]
     fn template_hooks_land_in_every_new_repository() {
         use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("unbidden-gittpl-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("gittpl");
         let put = |rel: &str, body: &[u8], mode: u32| {
             let p = d.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -1157,6 +1154,5 @@ http://x/y
         let mut got: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
         got.sort();
         assert_eq!(got, ["init.templateDir", "template:post-checkout", "template:pre-push"], "a live hook in either template directory; not a .sample, not a data file");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

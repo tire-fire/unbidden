@@ -296,8 +296,7 @@ mod tests {
     #[test]
     fn a_mask_a_maintainer_script_wrote_at_install_is_dpkgs_doing() {
         use super::*;
-        let dir = std::env::temp_dir().join(format!("unbidden-postinst-mask-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("postinst-mask");
         for d in ["usr/lib/systemd/system", "var/lib/dpkg/info", "etc/systemd/system"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -319,15 +318,12 @@ mod tests {
         assert_eq!(out.get(Path::new("usr/lib/systemd/system/screen-cleanup.service")), Some(&Provenance::GeneratedBy { by: Producer::DpkgPostinst }));
         assert_eq!(out.get(Path::new("usr/lib/systemd/system/auditd.service")), None, "no maintainer script names it");
         assert_eq!(out.get(Path::new("etc/systemd/system/screen-cleanup.service")), None, "the administrator's directory is the administrator's");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn cloud_init_is_credited_with_what_it_writes_and_not_with_what_it_runs_from_the_administrator() {
         use super::*;
-        let dir = std::env::temp_dir().join(format!("unbidden-cloud-claim-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("cloud-claim");
         let root = Root::at(&dir).unwrap();
         let snaps = Snaps(BTreeMap::new());
         for (path, by) in [
@@ -340,14 +336,12 @@ mod tests {
         ] {
             assert_eq!(producer(&root, &snaps, Path::new(path)), by, "{path}");
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_preset_written_instance_link_is_the_vendors_doing() {
         use super::*;
-        let dir = std::env::temp_dir().join(format!("unbidden-preset-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("preset");
         for d in ["etc/systemd/system/getty.target.wants", "etc/systemd/system/multi-user.target.wants", "usr/lib/systemd/system", "usr/lib/systemd/system-preset", "etc/systemd/system-preset", "opt"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -378,7 +372,6 @@ mod tests {
         assert_eq!(by("etc/systemd/system/getty.target.wants/getty@tty9.service"), None, "another instance is somebody's enable");
         assert_eq!(by("etc/systemd/system/getty.target.wants/container-getty@evil.service"), None, "a preset in /etc vouches for nothing");
         assert_eq!(by("etc/systemd/system/multi-user.target.wants/evil@x.service"), None, "a link out of the vendor tree");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     use super::*;
@@ -389,9 +382,8 @@ mod tests {
     const MOUNT: &str = "[Unit]\nDescription=Mount unit for lxd, revision 24322\n\n[Mount]\n\
         What=/var/lib/snapd/snaps/lxd_24322.snap\nWhere=/snap/lxd/24322\nType=squashfs\n";
 
-    fn tree(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("unbidden-generated-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let dir = crate::testing::Tree::new(&format!("generated-{tag}"));
         for d in ["etc/systemd/system", "var/lib/snapd/snaps", "snap/lxd/24322/bin", "tmp"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -419,7 +411,6 @@ mod tests {
         assert_eq!(verdict(&dir, "etc/systemd/system/snap.lxd.daemon.service"), snapd());
         assert_eq!(verdict(&dir, "etc/systemd/system/snap-lxd-24322.mount"), snapd());
         assert_eq!(verdict(&dir, "snap/lxd/24322/bin/lxd"), snapd());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -464,7 +455,6 @@ mod tests {
         ] {
             assert_eq!(verdict(&dir, rel), None, "{rel}");
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -479,6 +469,5 @@ mod tests {
         assert_eq!(v("run/systemd/transient/run-u1.service"), Some(Producer::SystemdTransient));
         assert_eq!(v("run/systemd/system.control/ssh.service.d/50-CPUQuota.conf"), Some(Producer::SystemctlSetProperty));
         assert_eq!(v("etc/systemd/system/evil.service"), None);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

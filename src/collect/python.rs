@@ -183,8 +183,7 @@ mod tests {
 
     #[test]
     fn debian_reads_dist_packages_and_every_user_site() {
-        let d = std::env::temp_dir().join(format!("unbidden-python-deb-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("python-deb");
         put(&d, "etc/passwd", b"root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n");
         std::fs::create_dir_all(d.join("usr/lib/python3.12")).unwrap();
         put(&d, "usr/lib/python3/dist-packages/distutils-precedence.pth", b"import os; os.environ.get('X')\n");
@@ -211,13 +210,11 @@ mod tests {
         let zz = s.entries.iter().find(|e| e.name == "zz.pth").unwrap();
         assert_eq!((zz.command.as_deref(), zz.raw["path_lines"].as_str()), (Some(&b"import\tbeacon"[..]), "1"));
         assert_eq!(zz.trigger, Trigger::Always);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn elsewhere_reads_site_packages_under_lib64_and_lib() {
-        let d = std::env::temp_dir().join(format!("unbidden-python-fed-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("python-fed");
         put(&d, "etc/passwd", b"root:x:0:0::/root:/bin/sh\n");
         put(&d, "usr/lib64/python3.14/site-packages/a.pth", b"import a\n");
         put(&d, "usr/lib/python3.14/site-packages/b.pth", b"import b\n");
@@ -227,6 +224,5 @@ mod tests {
         let mut got: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
         got.sort_unstable();
         assert_eq!(got, ["a.pth", "b.pth", "c.pth"]);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

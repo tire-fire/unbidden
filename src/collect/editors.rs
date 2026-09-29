@@ -345,8 +345,7 @@ mod tests {
 
     #[test]
     fn system_wide_startup_files_are_read_by_each_programs_rule() {
-        let d = std::env::temp_dir().join(format!("unbidden-editors-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("editors");
         put(&d, "usr/bin/vim", b"");
         put(&d, "etc/vim/vimrc", b"runtime! debian.vim\n");
         put(&d, "etc/vim/vimrc.local", b"call system('/opt/x')\n");
@@ -392,6 +391,5 @@ mod tests {
         );
         let nvim = s.entries.iter().find(|e| e.name == "nvim:sysinit.vim").unwrap();
         assert_eq!(nvim.enabled, Enablement::Disabled, "nvim is not installed here");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

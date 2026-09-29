@@ -118,8 +118,7 @@ mod tests {
 
     #[test]
     fn mercurial_hooks_are_commands_hg_runs_on_its_events() {
-        let d = std::env::temp_dir().join(format!("unbidden-hg-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("hg");
         put(&d, "usr/bin/hg", b"");
         put(&d, "etc/passwd", b"root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n");
         put(&d, "etc/mercurial/hgrc", b"[ui]\nusername = x\n[hooks]\n# c\npretxncommit.lint = /opt/lint\n  --strict\nupdate = python:mod.fn\n[paths]\ndefault = x\n");
@@ -143,19 +142,16 @@ mod tests {
         );
         let py = s.entries.iter().find(|e| e.name == "hg:update").unwrap();
         assert_eq!(py.raw["python"], "mod.fn");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn two_accounts_sharing_a_home_report_its_hgrc_once() {
-        let d = std::env::temp_dir().join(format!("unbidden-hg-shared-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("hg-shared");
         put(&d, "usr/bin/hg", b"");
         put(&d, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/sh\nalias:x:1001:1001::/home/alice:/bin/sh\n");
         put(&d, "home/alice/.hgrc", b"[hooks]\npost-pull = /opt/beacon\n");
         let s = scan(&d);
         let names: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["hg:post-pull"], "not also hg:post-pull#2 for the second account");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -598,26 +598,20 @@ pub fn is_hidden_path(p: &Path) -> bool {
 mod tests {
     #[test]
     fn a_directory_is_listed_in_name_order_so_no_collector_has_to_sort_it() {
-        let dir = std::env::temp_dir().join(format!("unbidden-order-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("order");
         for n in ["zeta", "alpha", "Beta", "10-x", "9-y", "_u"] {
             std::fs::write(dir.join(n), b"").unwrap();
         }
         let root = Root::at(&dir).unwrap();
         let names: Vec<String> = root.read_dir(".").unwrap().into_iter().map(|e| e.name.to_string_lossy().into_owned()).collect();
         assert_eq!(names, ["10-x", "9-y", "Beta", "_u", "alpha", "zeta"]);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     use super::*;
     use std::io::Write;
 
-    fn tmpdir(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("unbidden-test-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
-        p
+    fn tmpdir(tag: &str) -> crate::testing::Tree {
+        crate::testing::Tree::new(&format!("test-{tag}"))
     }
 
     #[test]
@@ -632,7 +626,6 @@ mod tests {
         let (bytes, truncated) = root.read_capped("big", 10_000).unwrap();
         assert_eq!(bytes.len(), 5000);
         assert!(!truncated);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -650,7 +643,6 @@ mod tests {
         }
         assert_eq!(root.read_link("passwd").unwrap(), PathBuf::from("/etc/passwd"));
         assert_eq!(root.read("inside").unwrap(), b"image contents");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -668,7 +660,6 @@ mod tests {
             Err(e) => assert_eq!(e.kind(), io::ErrorKind::NotFound),
             Ok(_) => panic!("a no-follow stat resolved out of the scan root"),
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -708,7 +699,6 @@ mod tests {
 
         // And a link outside any home is not this rule's business.
         assert!(root.escaping_link(Path::new("etc/shadow")).is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -741,7 +731,6 @@ mod tests {
         assert_eq!(root.read_link("home/alice/.secret").unwrap(), Path::new("/srv/secret"));
         // And the same paths outside a home are not this rule's business.
         assert_eq!(root.read_dir("srv/secret").unwrap().len(), 2);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -762,7 +751,6 @@ mod tests {
         }
         // Absent stays NotFound, which collectors treat as nothing there.
         assert_eq!(root.read("etc/missing").unwrap_err().kind(), io::ErrorKind::NotFound);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -790,7 +778,6 @@ mod tests {
         }
         assert!(root.escaping_link(Path::new("home/alice/.zshrc")).is_none());
         assert_eq!(root.read("home/alice/.zshrc").unwrap(), b"export EDITOR=vi\n");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -807,7 +794,6 @@ mod tests {
         assert_eq!(root.read("home/alice/.bashrc").unwrap_err().kind(), io::ErrorKind::NotFound);
         assert!(root.read("home/alice/.loop").is_err());
         assert!(root.escaping_link(Path::new("home/alice/.loop")).is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -824,7 +810,6 @@ mod tests {
         let root = Root::at(&dir).unwrap();
         assert!(root.escaping_link(Path::new("home/carol/.bashrc")).is_none());
         assert_eq!(root.read("home/carol/.bashrc").unwrap(), b"mine\n");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -863,7 +848,6 @@ mod tests {
         assert_eq!(root.read_link("escape").unwrap(), PathBuf::from("/etc"));
         // A link loop is refused rather than followed forever.
         assert!(root.read("etc/nested").is_err());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -876,7 +860,6 @@ mod tests {
 
         let root = Root::at(dir.join("image")).unwrap();
         assert!(root.read_link("escape/link").is_err(), "read a link that lives outside the image");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -885,7 +868,6 @@ mod tests {
         let root = Root::at(&dir).unwrap();
         assert!(root.read_dir_optional("etc/systemd/system").unwrap().is_empty());
         assert!(root.read_dir("etc/systemd/system").is_err());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -895,7 +877,6 @@ mod tests {
         std::os::unix::fs::symlink("usr/lib", dir.join("lib")).unwrap();
         let root = Root::at(&dir).unwrap();
         assert_eq!(root.dir_identity("lib").unwrap(), root.dir_identity("usr/lib").unwrap());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

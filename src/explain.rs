@@ -253,8 +253,7 @@ mod tests {
 
     #[test]
     fn explain_reports_a_file_that_changed_since_the_scan() {
-        let dir = std::env::temp_dir().join(format!("unbidden-explain-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("explain");
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::write(dir.join("etc/rc.local"), b"#!/bin/sh\n/usr/local/bin/start\n").unwrap();
 
@@ -275,7 +274,6 @@ mod tests {
         assert!(text.contains("changed since the scan"), "{text}");
         assert!(!text.contains("/tmp/evil"), "--no-source withholds the text");
 
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -284,8 +282,7 @@ mod tests {
         // source through a root that did not yet know its homes: an account
         // that had linked ~/.bashrc at /etc/shadow got it printed by the
         // operator's own command.
-        let dir = std::env::temp_dir().join(format!("unbidden-explain-link-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("explain-link");
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::create_dir_all(dir.join("home/alice")).unwrap();
         std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
@@ -299,13 +296,11 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(!text.contains("MARKER-SHADOW-HASH"), "{text}");
         assert!(text.contains("(unreadable)"), "{text}");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn explain_shows_control_bytes_in_the_source_as_escapes() {
-        let dir = std::env::temp_dir().join(format!("unbidden-explain-esc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("explain-esc");
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::write(dir.join("etc/rc.local"), b"#!/bin/sh\n\tindent\n/tmp/x \x1b[2K\x1b[1Aclean\n").unwrap();
 
@@ -321,6 +316,5 @@ mod tests {
         assert!(text.contains("/tmp/x \\x1b[2K\\x1b[1Aclean"));
         assert!(text.contains("name        rc.\\x1b[31mlocal"));
         assert!(text.contains("\tindent"), "a tab in a source line is layout, not an attack");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

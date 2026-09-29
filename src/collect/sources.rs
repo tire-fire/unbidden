@@ -430,9 +430,7 @@ mod tests {
 
     #[test]
     fn apk_repositories_trust_every_key_in_the_keys_directory() {
-        let dir = std::env::temp_dir().join(format!("unbidden-apk-sources-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("apk-sources");
         put(&dir, "sbin/apk", b"\x7fELF apk");
         put(&dir, "etc/apk/repositories", b"# main\nhttps://dl-cdn.alpinelinux.org/alpine/v3.24/main\n\n@edge\thttps://dl-cdn.alpinelinux.org/alpine/edge/testing\n@tagged:https://x/y\nhttps://dl-cdn.alpinelinux.org/alpine/v3.24/main\n");
         put(&dir, "etc/apk/repositories.d/site.list", b"https://mirror.example/site\n");
@@ -470,13 +468,11 @@ mod tests {
         let repo = s.entries.iter().find(|e| e.name == "apk:https://x/y").unwrap();
         assert!(repo.raw["signature_checking"].starts_with("no key in /etc/apk/keys"));
         assert_eq!((repo.enabled, repo.raw["not_run"].as_str()), (Enablement::Disabled, "its package manager is not installed"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn apt_and_dnf_sources_and_their_keys_are_read_as_each_tool_reads_them() {
-        let d = std::env::temp_dir().join(format!("unbidden-sources-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("sources");
         put(&d, "usr/bin/apt-get", b"");
         put(&d, "etc/apt/sources.list", b"# old style\ndeb http://deb.debian.org/debian bookworm main\n");
         put(
@@ -509,13 +505,11 @@ mod tests {
         let x = s.entries.iter().find(|e| e.name == "dnf:x").unwrap();
         assert_eq!((x.raw["signature_checking"].as_str(), x.trigger), ("off (gpgcheck=0)", Trigger::PackageOp));
         assert_eq!(s.entries.iter().find(|e| e.name == "dnf:y").unwrap().enabled, Enablement::Disabled);
-        std::fs::remove_dir_all(&d).unwrap();
     }
     #[test]
     fn an_imported_key_is_vouched_for_by_the_packaged_file_it_came_from() {
         use crate::provenance::rpm::tests::{HeaderBuilder, write_rpmdb};
-        let d = std::env::temp_dir().join(format!("unbidden-rpmkeys-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("rpmkeys");
         let put = |rel: &str, body: &[u8]| {
             let p = d.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -540,6 +534,5 @@ mod tests {
         let file = d.join("etc/pki/rpm-gpg/RPM-GPG-KEY-fedora");
         assert_eq!(keys, [("key:rpmdb:deadbeef", None), ("key:rpmdb:e99d6ad1", Some(file.to_str().unwrap()))]);
         assert!(s.entries.iter().any(|e| e.name == "key:RPM-GPG-KEY-fedora"), "the matched file is reported as a key in its own right");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

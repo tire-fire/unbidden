@@ -877,10 +877,8 @@ mod tests {
     use crate::scan::{Options, Scan, Status};
     use std::os::unix::fs::PermissionsExt;
 
-    fn tree(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("unbidden-cron-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let dir = crate::testing::Tree::new(&format!("cron-{tag}"));
         dir
     }
 

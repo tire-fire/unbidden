@@ -460,8 +460,7 @@ mod tests {
 
     #[test]
     fn a_merge_that_may_add_does_not_turn_a_module_that_never_runs_into_a_maybe() {
-        let d = std::env::temp_dir().join(format!("unbidden-cloudinit-merge-off-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("cloudinit-merge-off");
         put(&d, "usr/bin/cloud-init", "#!/usr/bin/python3\n", 0o755);
         // runcmd is in no module list, so nothing runs it whatever merges.
         put(&d, "etc/cloud/cloud.cfg", "cloud_init_modules: [bootcmd]\nruncmd: [echo base]\n", 0o644);
@@ -472,13 +471,11 @@ mod tests {
         assert_eq!(appended.enabled, Enablement::Disabled);
         assert_eq!(appended.raw["not_run"], "runcmd is in no module list");
         assert!(appended.raw["merge"].starts_with("sets merge_how"), "the merge is still said");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn commands_and_scripts_are_read_as_cloud_init_merges_and_runs_them() {
-        let d = std::env::temp_dir().join(format!("unbidden-cloudinit-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("cloudinit");
         put(&d, "usr/bin/cloud-init", "#!/usr/bin/python3\n", 0o755);
         put(
             &d,
@@ -533,7 +530,6 @@ mod tests {
         put(&d, "etc/cloud/cloud-init.disabled", "", 0o644);
         let s = scan(&d);
         assert!(s.entries.iter().all(|e| e.enabled == Enablement::Disabled && e.raw.contains_key("cloud_init_off")));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -545,8 +541,7 @@ mod tests {
 
     #[test]
     fn handlers_boothooks_and_seed_user_data_run_every_boot() {
-        let d = std::env::temp_dir().join(format!("unbidden-cloudinit-hooks-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("cloudinit-hooks");
         put(&d, "usr/bin/cloud-init", "#!/usr/bin/python3\n", 0o755);
         put(&d, "var/lib/cloud/handlers/evil.py", "import os\n", 0o644);
         put(&d, "var/lib/cloud/handlers/not.a.module.py", "", 0o644);
@@ -566,6 +561,5 @@ mod tests {
         let evil = s.entries.iter().find(|e| e.name == "handler:evil.py").unwrap();
         assert_eq!((evil.trigger, evil.enabled, evil.raw["python_module"].as_str()), (Trigger::Boot, Enablement::Unknown, "evil"));
         assert_eq!(s.entries.iter().find(|e| e.name.starts_with("seed")).unwrap().raw["format"], "#cloud-config");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

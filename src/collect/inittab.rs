@@ -464,10 +464,8 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
 
-    fn tree(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("unbidden-inittab-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&p);
-        fs::create_dir_all(&p).unwrap();
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let p = crate::testing::Tree::new(&format!("inittab-{tag}"));
         p
     }
     fn put(root: &Path, rel: &str, bytes: &[u8]) {

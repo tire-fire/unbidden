@@ -293,8 +293,7 @@ mod tests {
 
     #[test]
     fn each_display_managers_hooks_are_read_its_way_and_gated_on_being_active() {
-        let d = std::env::temp_dir().join(format!("unbidden-dm-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("dm");
         put(&d, "etc/gdm3/PostLogin/Default.sample", b"#!/bin/sh\n", 0o644);
         put(&d, "etc/gdm3/PreSession/Default", b"#!/bin/sh\n", 0o755);
         put(&d, "etc/gdm3/PostSession/:0", b"#!/bin/sh\n", 0o755);
@@ -328,6 +327,5 @@ mod tests {
 
         std::fs::remove_file(d.join("etc/systemd/system/display-manager.service")).unwrap();
         assert_eq!(by(&scan(&d), "gdm:PreSession/Default").enabled, Enablement::Unknown);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

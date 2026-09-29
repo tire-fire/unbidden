@@ -9,6 +9,8 @@ mod pyyaml;
 pub mod render;
 pub mod root;
 pub mod scan;
+#[cfg(test)]
+pub mod testing;
 pub mod text;
 pub mod users;
 pub mod yaml;

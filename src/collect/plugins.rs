@@ -325,8 +325,7 @@ mod tests {
 
     #[test]
     fn registries_name_the_library_each_framework_loads() {
-        let d = std::env::temp_dir().join(format!("unbidden-plugins-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("plugins");
         put(&d, "usr/bin/iconv", b"");
         // gconv, on Fedora's path.
         put(&d, "usr/lib64/gconv/gconv-modules", b"# c\nmodule\tINTERNAL\t\tEVIL//\t\tevil\t1\nalias X Y\n");
@@ -369,6 +368,5 @@ mod tests {
         assert!(egl.raw.contains_key("target_unverifiable"), "an soname EGL resolves via glvnd is left to the loader");
         let layer = s.entries.iter().find(|e| e.name == "vulkan:beacon.json").unwrap();
         assert!(layer.raw["kind"].contains("implicit layer"));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

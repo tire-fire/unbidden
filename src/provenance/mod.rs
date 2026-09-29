@@ -244,8 +244,7 @@ mod tests {
 
     #[test]
     fn a_directory_link_the_alias_list_does_not_know_is_still_followed() {
-        let dir = std::env::temp_dir().join(format!("unbidden-spell-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("spell");
         std::fs::create_dir_all(dir.join("usr/bin")).unwrap();
         std::os::unix::fs::symlink("bin", dir.join("usr/sbin")).unwrap();
         let root = Root::at(&dir).unwrap();
@@ -253,20 +252,17 @@ mod tests {
         assert!(s.contains(&PathBuf::from("usr/sbin/nl")));
         assert!(s.contains(&PathBuf::from("usr/bin/nl")), "{s:?}");
         assert!(s.contains(&PathBuf::from("bin/nl")));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn no_package_database_means_unknown_not_unpackaged() {
-        let dir = std::env::temp_dir().join(format!("unbidden-prov-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("prov");
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::write(dir.join("etc/crontab"), b"x").unwrap();
         let root = Root::at(&dir).unwrap();
 
         let wanted: BTreeSet<PathBuf> = [PathBuf::from("etc/crontab")].into_iter().collect();
         assert_eq!(resolve(&root, &wanted).answers[Path::new("etc/crontab")], Provenance::Unknown);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -274,8 +270,7 @@ mod tests {
         // snap-confine is setuid root and shipped by the snapd package. A
         // name rule that ran first used to call it snapd's and skip the
         // integrity check, so a trojaned copy read as nothing at all.
-        let dir = std::env::temp_dir().join(format!("unbidden-prov-order-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("prov-order");
         for d in ["usr/lib/snapd", "var/lib/dpkg/info", "etc/systemd/system"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -302,7 +297,6 @@ mod tests {
             Provenance::Packaged { integrity: crate::entry::Integrity::Modified, .. }
         ));
         assert_eq!(answers[Path::new("etc/systemd/system/snap.evil.x.service")], Provenance::Unpackaged);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -316,8 +310,7 @@ mod tests {
             }
             Outcome::Complete(a)
         }
-        let dir = std::env::temp_dir().join(format!("unbidden-prov-template-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("prov-template");
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::create_dir_all(dir.join("usr/share/libc-bin")).unwrap();
         std::fs::write(dir.join("usr/share/libc-bin/nsswitch.conf"), b"passwd: files\n").unwrap();
@@ -335,7 +328,6 @@ mod tests {
         std::fs::write(dir.join("etc/nsswitch.conf"), b"passwd: files evil\n").unwrap();
         let r = resolve_with(&root, &wanted, &[("dpkg", ships_template)]);
         assert_eq!(r.answers[Path::new("etc/nsswitch.conf")], Provenance::Unpackaged, "one byte off is not the template");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -370,8 +362,7 @@ mod tests {
             a.remove(Path::new("usr/share/pam-configs/capability"));
             Outcome::Complete(a)
         }
-        let dir = std::env::temp_dir().join(format!("unbidden-prov-pam-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("prov-pam");
         for (rel, body) in [
             ("usr/share/pam/common-auth", TEMPLATE),
             ("usr/share/pam-configs/unix", UNIX),
@@ -391,7 +382,6 @@ mod tests {
         assert_eq!(verdict(ships_template_only), Provenance::Unpackaged, "a profile no package vouches for");
         std::fs::write(dir.join("etc/pam.d/common-auth"), GENERATED.replace("auth\trequisite", "auth\tsufficient\tpam_permit.so\nauth\trequisite")).unwrap();
         assert_eq!(verdict(ships_everything), Provenance::Unpackaged, "one added line");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -407,9 +397,7 @@ mod tests {
         fn explodes(_: &Root, _: &BTreeSet<PathBuf>) -> Outcome {
             panic!("header index 4294967295 out of range")
         }
-        let dir = std::env::temp_dir().join(format!("unbidden-prov-panic-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("prov-panic");
         let root = Root::at(&dir).unwrap();
         let wanted: BTreeSet<PathBuf> = ["usr/bin/ok", "etc/other"].iter().map(PathBuf::from).collect();
 
@@ -418,7 +406,6 @@ mod tests {
         assert!(r.failures[0].starts_with("rpm database: header index"), "{:?}", r.failures);
         assert_eq!(r.answers[Path::new("usr/bin/ok")], Provenance::Unpackaged, "what dpkg said stands");
         assert_eq!(r.answers[Path::new("etc/other")], Provenance::Unknown);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -428,28 +415,22 @@ mod tests {
             a.insert(PathBuf::from("usr/bin/ok"), Provenance::Unpackaged);
             Outcome::Incomplete(a, "status is larger than the read cap".into())
         }
-        let dir = std::env::temp_dir().join(format!("unbidden-prov-incomplete-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("prov-incomplete");
         let root = Root::at(&dir).unwrap();
         let wanted: BTreeSet<PathBuf> = ["usr/bin/ok", "etc/other"].iter().map(PathBuf::from).collect();
         let r = resolve_with(&root, &wanted, &[("dpkg", half_read)]);
         assert_eq!(r.failures, ["dpkg database not read to the end: status is larger than the read cap"]);
         assert_eq!(r.answers[Path::new("usr/bin/ok")], Provenance::Unpackaged, "what it did answer stands");
         assert_eq!(r.answers[Path::new("etc/other")], Provenance::Unknown, "the rest might have been in the part not read");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn one_read_yields_both_digests() {
-        let dir = std::env::temp_dir().join(format!("unbidden-dig-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("dig");
         std::fs::write(dir.join("f"), b"abc").unwrap();
         let root = Root::at(&dir).unwrap();
         let d = digests(&root, Path::new("f")).unwrap();
         assert_eq!(d.sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert_eq!(d.md5, "900150983cd24fb0d6963f7d28e17f72");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

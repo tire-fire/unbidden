@@ -1045,10 +1045,8 @@ mod tests {
     use crate::scan::{Options, Status};
     use gvdb::write::{FileWriter, HashTableBuilder};
 
-    fn tree(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("unbidden-desktop-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let dir = crate::testing::Tree::new(&format!("desktop-{tag}"));
         put(&dir, "etc/passwd", b"root:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/sh\n");
         std::fs::create_dir_all(dir.join("home/alice")).unwrap();
         dir
@@ -1169,7 +1167,6 @@ mod tests {
         let (entries, status) = run(&d);
         assert!(matches!(status, Status::Complete), "{status:?}");
         assert!(entries.iter().any(|e| e.name.contains("x@y.z")), "the extension is still reported");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     fn extension(dir: &Path, base: &str, uuid: &str, file: &str) {
@@ -1601,8 +1598,7 @@ mod tests {
     }
     #[test]
     fn file_manager_python_extensions_are_read_by_suffix() {
-        let d = std::env::temp_dir().join(format!("unbidden-fmext-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("fmext");
         let put = |rel: &str, body: &[u8]| {
             let p = d.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -1635,6 +1631,5 @@ mod tests {
             ],
             "every .py is imported, a dotfile included; nautilus-python is not installed here"
         );
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

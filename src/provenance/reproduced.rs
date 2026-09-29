@@ -702,7 +702,7 @@ mod tests {
     }
 
     /// Every case of one generator, each laid out as a scan root.
-    fn vectors(kind: &str) -> Vec<(String, PathBuf, BTreeMap<String, Vec<u8>>)> {
+    fn vectors(kind: &str) -> Vec<(String, crate::testing::Tree, BTreeMap<String, Vec<u8>>)> {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors").join(kind);
         let mut names: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
         names.sort();
@@ -711,12 +711,7 @@ mod tests {
             .into_iter()
             .map(|p| {
                 let files = case(&std::fs::read(&p).unwrap());
-                let root = std::env::temp_dir().join(format!(
-                    "unbidden-vector-{kind}-{}-{}",
-                    p.file_stem().unwrap().to_string_lossy(),
-                    std::process::id()
-                ));
-                let _ = std::fs::remove_dir_all(&root);
+                let root = crate::testing::Tree::new(&format!("vector-{kind}-{}", p.file_stem().unwrap().to_string_lossy()));
                 for (rel, body) in &files {
                     let f = root.join(rel);
                     std::fs::create_dir_all(f.parent().unwrap()).unwrap();
@@ -729,8 +724,7 @@ mod tests {
 
     #[test]
     fn a_file_identical_to_the_packaged_template_it_was_copied_from_is_reproduced() {
-        let dir = std::env::temp_dir().join(format!("unbidden-copies-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("copies");
         for d in ["etc/skel", "usr/share/base-files", "root", "home/alice", "var/lib/dpkg/info"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -781,7 +775,6 @@ mod tests {
         std::fs::write(dir.join("etc/profile"), "# tampered\n").unwrap();
         let answers = super::super::resolve(&root, &wanted).answers;
         assert_eq!(answers[Path::new("etc/profile")], Provenance::Unpackaged);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -800,7 +793,6 @@ mod tests {
                 );
                 checked += 1;
             }
-            std::fs::remove_dir_all(&dir).unwrap();
         }
         assert!(checked > 500);
     }
@@ -825,7 +817,6 @@ mod tests {
                 );
                 checked += 1;
             }
-            std::fs::remove_dir_all(&dir).unwrap();
         }
         assert!(checked > 500);
     }

@@ -1399,10 +1399,8 @@ mod tests {
     use crate::root::Root;
     use crate::scan::{Options, Scan, Status};
 
-    fn tree(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("unbidden-systemd-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let p = crate::testing::Tree::new(&format!("systemd-{tag}"));
         p
     }
 

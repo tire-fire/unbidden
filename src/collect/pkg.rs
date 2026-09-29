@@ -1580,10 +1580,8 @@ mod tests {
     use crate::scan::{Options, Scan, Status, run};
     use std::fs;
 
-    fn tree(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("unbidden-pkg-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&p);
-        fs::create_dir_all(&p).unwrap();
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let p = crate::testing::Tree::new(&format!("pkg-{tag}"));
         p
     }
 
@@ -2424,7 +2422,6 @@ mod tests {
         put(&d, "usr/bin/run-parts", b"#!/bin/bash\n");
         let s = scan(&d);
         assert_eq!(state(&s, "etc/kernel/postinst.d/update.sh").0, Enablement::Enabled);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2455,7 +2452,6 @@ mod tests {
         assert_eq!(state("needrestart:notify.d/200-mail.dpkg-old"), Enablement::Disabled);
         assert_eq!(state("etckeeper:pre-install.d/50-hook"), Enablement::Enabled);
         assert_eq!(state("etckeeper:pre-install.d/60_under"), Enablement::Disabled, "etckeeper runs no underscore");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2478,7 +2474,6 @@ mod tests {
         let div: Vec<&Entry> = s.entries.iter().filter(|e| e.kind == Kind::DpkgDiversion).collect();
         assert_eq!(div.len(), 1, "a package's own diversion is not reported");
         assert_eq!(div[0].raw["diverted_to"], "/usr/sbin/sshd.real");
-        std::fs::remove_dir_all(&d).unwrap();
     }
     #[test]
     fn a_dnf_plugin_module_with_no_conf_is_still_imported_and_so_reported() {
@@ -2505,8 +2500,7 @@ mod tests {
 
     #[test]
     fn libdnf5_plugins_and_actions_are_package_hooks() {
-        let d = std::env::temp_dir().join(format!("unbidden-libdnf5-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("libdnf5");
         let put = |rel: &str, body: &[u8]| {
             let p = d.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -2533,6 +2527,5 @@ mod tests {
         );
         let plugin = s.entries.iter().find(|e| e.name == "libdnf5-plugin:actions").unwrap();
         assert_eq!(plugin.target_path.as_deref(), Some(d.join("usr/lib64/libdnf5/plugins/actions.so").as_path()));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

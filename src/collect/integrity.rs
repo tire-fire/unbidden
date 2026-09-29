@@ -88,10 +88,9 @@ mod tests {
 
     /// A host with a trojaned `ls`, a patched libc, an intact `cat`, an edited
     /// conffile and a changed data file, all of one package.
-    fn host(tag: &str) -> std::path::PathBuf {
+    fn host(tag: &str) -> crate::testing::Tree {
         use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("unbidden-integrity-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new(&format!("integrity-{tag}"));
         let put = |rel: &str, body: &[u8], mode: u32| {
             let p = d.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();

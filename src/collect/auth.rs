@@ -2436,10 +2436,8 @@ mod tests {
     use crate::root::Root;
     use crate::scan::{Options, Scan, Status};
 
-    fn tree(tag: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("unbidden-auth-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).unwrap();
+    fn tree(tag: &str) -> crate::testing::Tree {
+        let p = crate::testing::Tree::new(&format!("auth-{tag}"));
         std::fs::create_dir_all(p.join("etc")).unwrap();
         std::fs::write(p.join("etc/passwd"), "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
         std::fs::create_dir_all(p.join("home/alice")).unwrap();
@@ -2509,7 +2507,6 @@ mod tests {
         assert_eq!(evil.target_path, Some(PathBuf::from("/tmp/evil.so")));
         assert!(evil.command.is_none(), "a plain module has no command");
 
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2526,7 +2523,6 @@ mod tests {
         let s = scan(&d);
         let unix = named(&s, "sshd:auth:pam_unix.so").pop().unwrap();
         assert_eq!(unix.target_path, Some(d.join("usr/lib64/security/pam_unix.so")));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2548,7 +2544,6 @@ mod tests {
         assert_eq!(named(&s, "sshd:@include:common-auth").len(), 1);
         let path = named(&s, "sshd:session substack:/tmp/stack").pop().unwrap();
         assert_eq!(path.target_path, Some(PathBuf::from("/tmp/stack")));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2570,7 +2565,6 @@ mod tests {
         assert_eq!(backdoor.raw["service"], "other");
         assert_eq!(backdoor.raw["module"], "/opt/x/pam_backdoor.so");
         assert_eq!(named(&s, "login:auth:pam_unix.so").pop().unwrap().raw["service"], "login");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2615,7 +2609,6 @@ mod tests {
         for id in before {
             assert!(s2.entries.iter().any(|e| e.id == id), "an entry id moved when a line was inserted");
         }
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2642,7 +2635,6 @@ mod tests {
             "a 10 MB file must be recorded as read to its cap: {:?}",
             status.truncated
         );
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2662,7 +2654,6 @@ mod tests {
         let anomalous = s.entries.iter().find(|e| e.has_flag(Flag::EncodingAnomaly));
         assert!(anomalous.is_some(), "the non-UTF-8 comment is evidence");
         assert!(s.entries.iter().any(|e| e.raw.contains_key("key_blob_unparsed")));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2709,7 +2700,6 @@ mod tests {
         // glob did not match it; either way it is reported exactly once.
         let ignored = s.entries.iter().filter(|e| e.command.as_deref() == Some(&b"/bin/ignored-by-glob"[..])).count();
         assert_eq!(ignored, 1);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2730,7 +2720,6 @@ mod tests {
         assert_eq!(key.enabled, Enablement::Enabled, "the default key file is still the one sshd reads");
         let inert_include = named(&s, "Include").into_iter().find(|e| e.target_path == Some(PathBuf::from("/etc/ssh/other"))).unwrap();
         assert_eq!(inert_include.enabled, Enablement::Disabled, "and what it names is not followed");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2755,7 +2744,6 @@ mod tests {
         let env = named(&s, "ssh-environment");
         assert_eq!(env[0].raw["env.LD_PRELOAD"], "/home/alice/.evil.so");
         assert_eq!(env[0].enabled, Enablement::Unknown);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2826,7 +2814,6 @@ mod tests {
         assert_eq!(mallory.enabled, Enablement::Disabled);
         assert!(mallory.raw.contains_key("ignored_by_sudo"));
 
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2850,7 +2837,6 @@ mod tests {
         assert_eq!(inc.len(), 1);
         assert_eq!(inc[0].target_path, Some(PathBuf::from("/etc/sudoers.does-not-exist")));
         assert!(s.entries.iter().any(|e| e.has_flag(Flag::EncodingAnomaly)));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2859,7 +2845,6 @@ mod tests {
         let s = scan(&d);
         assert!(s.entries.is_empty());
         assert!(matches!(s.header.collectors[0].status, Status::Complete));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2901,7 +2886,6 @@ mod tests {
         assert_eq!(only.enabled, Enablement::Enabled, "a vendor stack with no /etc copy is the one used");
         assert_eq!(only.raw["service"], "polkit-1");
         assert!(!only.raw.contains_key("shadowed_by"));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2955,7 +2939,6 @@ mod tests {
         assert_eq!(sss.raw["databases"], "group", "the action list is not a source");
         assert_eq!(sss.target_path, Some(d.join("opt/sss/lib/libnss_sss.so.2")));
         assert_eq!(named(&s, "nis").pop().unwrap().enabled, Enablement::Disabled);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -2997,7 +2980,6 @@ mod tests {
         // sudo concatenates: no slash is added.
         let rel = named(&s, "Plugin sudoers_io rel.so").pop().unwrap();
         assert_eq!(rel.target_path, Some(PathBuf::from("/opt/prel.so")));
-        std::fs::remove_dir_all(&d).unwrap();
 
         // A moved plugin_dir alone changes where the default policy loads.
         let d = tree("sudoconf-dir");
@@ -3005,7 +2987,6 @@ mod tests {
         let s = scan(&d);
         let default = named(&s, "default policy sudoers.so").pop().unwrap();
         assert_eq!(default.target_path, Some(PathBuf::from("/opt/plugins/sudoers.so")));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -3051,7 +3032,6 @@ mod tests {
         assert_eq!(ca.target_path, Some(PathBuf::from("/etc/ssh/user_ca.pub")));
         let apc = named(&s, "AuthorizedPrincipalsCommand").pop().unwrap();
         assert_eq!(apc.command.as_deref(), Some(b"/usr/local/bin/principals %u".as_slice()));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -3127,7 +3107,6 @@ mod tests {
         std::fs::set_permissions(d.join("etc/doas.conf"), PermissionsExt::from_mode(0o666)).unwrap();
         let s = scan(&d);
         assert_eq!(named(&s, "permit:alice").pop().unwrap().raw["doas_refuses"], "writable by group or other");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -3210,7 +3189,6 @@ mod tests {
             assert_eq!(e.enabled, Enablement::Disabled, "{}", e.name);
             assert!(e.raw["ssh_refuses"].contains("bad permissions"));
         }
-        std::fs::remove_dir_all(&d).unwrap();
 
         // An earlier value under the same condition wins wherever the later
         // one would apply; `ProxyJump none` holds ProxyJump but lets a later
@@ -3236,7 +3214,6 @@ PKCS11Provider /opt/a.so extra
         assert!(named_value("/opt/db").raw["superseded"].ends_with("ssh_config:2 sets it first wherever this applies"));
         assert!(!superseded("/opt/web"), "none held the slot, and the jump after it was ignored");
         assert!(named_value("/opt/pc %h").raw["ssh_refuses"].contains("bad configuration line"), "one word, and nothing after it");
-        std::fs::remove_dir_all(&d).unwrap();
 
         // No PermitLocalCommand anywhere: a LocalCommand never runs. A bad
         // system line stops every ssh once the file is read, and a Match
@@ -3250,7 +3227,6 @@ PKCS11Provider /opt/a.so extra
         assert_eq!(lc.enabled, Enablement::Disabled);
         assert!(lc.raw["ssh_refuses"].contains("bad configuration line"));
         assert_eq!(named_value("/opt/late").enabled, Enablement::Enabled, "ssh reads the whole file before it gives up");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -3288,7 +3264,6 @@ PKCS11Provider /opt/a.so extra
         let s = scan(&d);
         let init = named(&s, "namespace.init").into_iter().find(|e| e.name == "namespace.init").unwrap();
         assert_eq!((init.enabled, init.raw["not_run"].as_str()), (Enablement::Disabled, "not executable, which fails the session"));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -3314,7 +3289,6 @@ PKCS11Provider /opt/a.so extra
         let u2f = rows.iter().find(|r| r.entry.name == "sshd:auth:pam_u2f.so").unwrap();
         assert!(matches!(&u2f.delta, Delta::Changed { .. }), "{:?}", u2f.delta);
         assert_eq!(u2f.entry.raw["control"], "optional");
-        std::fs::remove_dir_all(&d).unwrap();
     }
     #[test]
     fn nested_aliases_that_multiply_are_cut_off_not_expanded() {
@@ -3326,8 +3300,7 @@ PKCS11Provider /opt/a.so extra
             sudoers.push_str(&format!("Cmnd_Alias C{i} = {next}\n"));
         }
         sudoers.push_str("alice ALL = (root) NOPASSWD: C0\n");
-        let d = std::env::temp_dir().join(format!("unbidden-sudo-multiply-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("sudo-multiply");
         std::fs::create_dir_all(d.join("etc")).unwrap();
         std::fs::write(d.join("etc/sudoers"), sudoers).unwrap();
         let started = std::time::Instant::now();
@@ -3337,13 +3310,11 @@ PKCS11Provider /opt/a.so extra
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
         let spec = s.entries.iter().find(|e| e.raw.contains_key("alias_expansion_truncated")).expect("the cut is on the entry");
         assert!(spec.raw["alias_expansion_truncated"].contains("2048"));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
     fn sudoers_aliases_resolve_and_includes_nest() {
-        let d = std::env::temp_dir().join(format!("unbidden-sudoers-alias-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("sudoers-alias");
         let put = |rel: &str, body: &[u8]| {
             let p = d.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -3365,12 +3336,10 @@ PKCS11Provider /opt/a.so extra
         let carol = s.entries.iter().find(|e| e.name.starts_with("carol:")).expect("a file two includes deep is read");
         assert!(carol.raw["commands_resolved"].contains("/bin/true"), "a self-referential alias ends: {}", carol.raw["commands_resolved"]);
         assert_eq!(s.entries.iter().filter(|e| e.source.ends_with("etc/sudoers")).count(), 7, "a file including itself is read once");
-        std::fs::remove_dir_all(&d).unwrap();
     }
     #[test]
     fn members_of_root_granting_groups_are_reported() {
-        let d = std::env::temp_dir().join(format!("unbidden-groups-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
+        let d = crate::testing::Tree::new("groups");
         let put = |rel: &str, body: &[u8]| {
             let p = d.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -3387,6 +3356,5 @@ PKCS11Provider /opt/a.so extra
         assert_eq!(got, ["docker:carol", "staff:dave", "sudo:alice", "sudo:bob"], "gshadow members and a primary group count; audio does not; halt and a nologin service account cannot use the right; bob, with no local account, may be a directory's");
         let bob = s.entries.iter().find(|e| e.name == "sudo:bob").unwrap();
         assert!(bob.raw.contains_key("account"));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

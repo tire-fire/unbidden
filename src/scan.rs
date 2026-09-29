@@ -588,15 +588,13 @@ mod tests {
 
     #[test]
     fn identical_entries_from_a_collector_get_distinct_ids_without_its_help() {
-        let dir = std::env::temp_dir().join(format!("unbidden-twice-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testing::Tree::new("twice");
         let root = Root::at(&dir).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Twice)];
         let s = run(&root, &Options { deep: false }, &collectors);
         let ids: std::collections::BTreeSet<&str> = s.entries.iter().map(|e| e.id.as_str()).collect();
         let names: Vec<&str> = s.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!((ids.len(), names), (2, vec!["job", "job#2"]));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     struct Fine;
@@ -613,8 +611,7 @@ mod tests {
 
     #[test]
     fn a_panicking_collector_does_not_take_the_scan_with_it() {
-        let dir = std::env::temp_dir().join(format!("unbidden-scan-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("scan");
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::write(dir.join("etc/rc.local"), "#!/bin/sh\n/tmp/x\n").unwrap();
         std::fs::write(dir.join("etc/os-release"), "ID=linuxmint\nID_LIKE=debian\nVERSION_ID=\"6\"\n").unwrap();
@@ -631,13 +628,11 @@ mod tests {
             Status::Failed { error } => assert!(error.contains("hostile input")),
             other => panic!("expected a recorded failure, got {other:?}"),
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn an_entry_under_a_home_says_how_that_account_was_found() {
-        let dir = std::env::temp_dir().join(format!("unbidden-usersrc-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("usersrc");
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::create_dir_all(dir.join("home/ghost/.config/autostart")).unwrap();
         std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
@@ -664,7 +659,6 @@ mod tests {
         assert_eq!(ghost.raw["user"], "ghost");
         assert_eq!(ghost.raw["user_discovered_via"], "home-dir");
 
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -672,8 +666,7 @@ mod tests {
         // Opening a FIFO for reading blocks until a writer appears. A
         // collector that hangs cannot be rescued by catching a panic, so this
         // test would not fail — it would never finish.
-        let dir = std::env::temp_dir().join(format!("unbidden-fifo-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("fifo");
         std::fs::create_dir_all(dir.join("etc/cron.d")).unwrap();
         std::fs::create_dir_all(dir.join("etc/cron.daily")).unwrap();
 
@@ -698,13 +691,11 @@ mod tests {
         assert!(cx.read("etc/cron.daily").is_none());
         assert!(cx.unreadable.is_empty());
 
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn what_a_user_builds_in_their_home_cannot_make_a_collector_partial() {
-        let dir = std::env::temp_dir().join(format!("unbidden-homeloops-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("homeloops");
         for d in ["etc", "home/alice/.ssh", "home/alice/.config/autostart", "home/bob"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();
         }
@@ -746,12 +737,11 @@ mod tests {
         for planted in ["authorized_keys", "loop.desktop", "bob/.config/autostart"] {
             assert!(limited.iter().any(|t| t.contains(planted)), "{planted} not recorded: {limited:#?}");
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn only_what_a_home_owner_can_build_is_excused() {
-        let dir = std::env::temp_dir().join(format!("unbidden-excused-{}", std::process::id()));
+        let dir = crate::testing::Tree::new("excused");
         std::fs::create_dir_all(dir.join("etc")).unwrap();
         std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
         let root = Root::at(&dir).unwrap();
@@ -782,13 +772,11 @@ mod tests {
         // A loop outside any home needed privilege to plant.
         cx.note_failed("etc/cron.d/job", &err(rustix::io::Errno::LOOP));
         assert_eq!((cx.truncated.len(), cx.unreadable.len()), (2, 2));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn world_writable_parent_flags_the_entry() {
-        let dir = std::env::temp_dir().join(format!("unbidden-ww-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("ww");
         std::fs::create_dir_all(dir.join("etc/cron.d")).unwrap();
         std::fs::write(dir.join("etc/cron.d/job"), "* * * * * root /tmp/x\n").unwrap();
         std::fs::set_permissions(dir.join("etc/cron.d"), std::os::unix::fs::PermissionsExt::from_mode(0o777)).unwrap();
@@ -803,15 +791,13 @@ mod tests {
         };
         let e = cx.entry(Kind::Cron, "etc/cron.d/job", "job");
         assert!(e.has_flag(Flag::WorldWritable));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn a_symlinked_entry_is_not_world_writable_just_for_being_a_symlink() {
         // A symlink's own mode is always 0777 and the kernel ignores it.
         // Reading it would flag every /etc/rc2.d/S01foo on every host.
-        let dir = std::env::temp_dir().join(format!("unbidden-symperm-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::testing::Tree::new("symperm");
         std::fs::create_dir_all(dir.join("etc/init.d")).unwrap();
         std::fs::create_dir_all(dir.join("etc/rc2.d")).unwrap();
         std::fs::write(dir.join("etc/init.d/ssh"), "#!/bin/sh\n").unwrap();
@@ -841,6 +827,5 @@ mod tests {
         assert!(!e.has_flag(Flag::WorldWritable), "a dangling link is not world-writable either");
         assert_eq!(e.raw["dangling_symlink"], "true");
 
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
