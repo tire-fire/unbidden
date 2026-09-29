@@ -1874,17 +1874,6 @@ fn guarded_by_test(text: &[u8], path: &[u8]) -> Option<String> {
     None
 }
 
-/// Counts for the run summary, kept here so the renderer stays a renderer.
-pub fn flag_counts(scan: &Scan) -> BTreeMap<Flag, usize> {
-    let mut out = BTreeMap::new();
-    for e in &scan.entries {
-        for f in &e.flags {
-            *out.entry(*f).or_insert(0) += 1;
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

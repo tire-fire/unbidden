@@ -5,7 +5,7 @@ pub mod enrich;
 pub mod entry;
 pub mod explain;
 pub mod provenance;
-pub mod pyyaml;
+mod pyyaml;
 pub mod render;
 pub mod root;
 pub mod scan;

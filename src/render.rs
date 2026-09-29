@@ -17,10 +17,6 @@ pub struct Filters {
 }
 
 impl Filters {
-    pub fn is_empty(&self) -> bool {
-        self.kinds.is_empty() && self.triggers.is_empty() && self.flags.is_empty()
-    }
-
     /// Explicit filters are a deliberate act by the operator and apply to
     /// every output form. Suppression is separate and applies only to the
     /// human table.

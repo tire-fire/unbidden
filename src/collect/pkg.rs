@@ -632,7 +632,7 @@ fn note_changed_after_install(cx: &Ctx, e: &mut Entry, rel: &Path, stem: &[u8]) 
     }
 }
 
-pub(crate) use crate::provenance::dpkg::changed_after_install;
+use crate::provenance::dpkg::changed_after_install;
 
 fn dpkg_scripts(cx: &mut Ctx) -> Vec<Entry> {
     let listing = cx.dir(DPKG_INFO);

@@ -802,7 +802,7 @@ impl Scanner {
         self.forward(1);
         self.scan_flow_scalar_non_spaces(double, start, &mut chunks)?;
         while self.peek(0) != quote {
-            self.scan_flow_scalar_spaces(double, start, &mut chunks)?;
+            self.scan_flow_scalar_spaces(start, &mut chunks)?;
             self.scan_flow_scalar_non_spaces(double, start, &mut chunks)?;
         }
         self.forward(1);
@@ -888,7 +888,7 @@ impl Scanner {
         }
     }
 
-    fn scan_flow_scalar_spaces(&mut self, _double: bool, start: Mark, chunks: &mut String) -> Result<(), String> {
+    fn scan_flow_scalar_spaces(&mut self, start: Mark, chunks: &mut String) -> Result<(), String> {
         let mut length = 0;
         while " \t".contains(self.peek(length)) {
             length += 1;
@@ -1155,7 +1155,6 @@ pub struct Parser {
     scanner: Scanner,
     state: Option<State>,
     states: Vec<State>,
-    marks: Vec<Mark>,
     tag_handles: HashMap<String, String>,
 }
 
@@ -1163,7 +1162,7 @@ const DEFAULT_TAGS: [(&str, &str); 2] = [("!", "!"), ("!!", "tag:yaml.org,2002:"
 
 impl Parser {
     pub fn new(text: &str) -> Result<Parser, String> {
-        Ok(Parser { scanner: Scanner::new(text)?, state: Some(State::StreamStart), states: Vec::new(), marks: Vec::new(), tag_handles: HashMap::new() })
+        Ok(Parser { scanner: Scanner::new(text)?, state: Some(State::StreamStart), states: Vec::new(), tag_handles: HashMap::new() })
     }
 
     fn check(&mut self, kinds: &str) -> Result<bool, String> {
@@ -1236,8 +1235,7 @@ impl Parser {
             }
             State::BlockNode => self.parse_node(true, false),
             State::BlockSequenceFirstEntry => {
-                let t = self.scanner.get_token()?;
-                self.marks.push(t.mark);
+                self.scanner.get_token()?;
                 self.step(State::BlockSequenceEntry)
             }
             State::BlockSequenceEntry => {
@@ -1256,7 +1254,6 @@ impl Parser {
                 }
                 self.scanner.get_token()?;
                 self.state = Some(self.pop_state()?);
-                self.marks.pop();
                 Ok(Event::SequenceEnd)
             }
             State::IndentlessSequenceEntry => {
@@ -1273,8 +1270,7 @@ impl Parser {
                 Ok(Event::SequenceEnd)
             }
             State::BlockMappingFirstKey => {
-                let t = self.scanner.get_token()?;
-                self.marks.push(t.mark);
+                self.scanner.get_token()?;
                 self.step(State::BlockMappingKey)
             }
             State::BlockMappingKey => {
@@ -1293,7 +1289,6 @@ impl Parser {
                 }
                 self.scanner.get_token()?;
                 self.state = Some(self.pop_state()?);
-                self.marks.pop();
                 Ok(Event::MappingEnd)
             }
             State::BlockMappingValue => {
@@ -1308,8 +1303,7 @@ impl Parser {
                 Ok(empty_scalar())
             }
             State::FlowSequenceFirstEntry => {
-                let t = self.scanner.get_token()?;
-                self.marks.push(t.mark);
+                self.scanner.get_token()?;
                 self.flow_sequence_entry(true)
             }
             State::FlowSequenceEntry => self.flow_sequence_entry(false),
@@ -1338,8 +1332,7 @@ impl Parser {
                 Ok(Event::MappingEnd)
             }
             State::FlowMappingFirstKey => {
-                let t = self.scanner.get_token()?;
-                self.marks.push(t.mark);
+                self.scanner.get_token()?;
                 self.flow_mapping_key(true)
             }
             State::FlowMappingKey => self.flow_mapping_key(false),
@@ -1488,7 +1481,6 @@ impl Parser {
         }
         self.scanner.get_token()?;
         self.state = Some(self.pop_state()?);
-        self.marks.pop();
         Ok(Event::SequenceEnd)
     }
 
@@ -1517,7 +1509,6 @@ impl Parser {
         }
         self.scanner.get_token()?;
         self.state = Some(self.pop_state()?);
-        self.marks.pop();
         Ok(Event::MappingEnd)
     }
 }

@@ -20,12 +20,6 @@ use crate::users::{self, User};
 pub trait Collector: Sync {
     fn name(&self) -> &'static str;
 
-    /// Collectors reading /proc, /sys or a running daemon declare it, so an
-    /// offline root knows to skip them rather than report nothing.
-    fn requires_live(&self) -> bool {
-        false
-    }
-
     /// True for the three collectors that need a whole-filesystem traversal.
     fn deep_only(&self) -> bool {
         false
@@ -37,7 +31,6 @@ pub trait Collector: Sync {
 pub struct Ctx<'a> {
     pub root: &'a Root,
     pub users: &'a [User],
-    pub deep: bool,
     unreadable: Vec<String>,
     truncated: Vec<String>,
 }
@@ -412,15 +405,11 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
                     let mut cx = Ctx {
                         root,
                         users,
-                        deep: opts.deep,
                         unreadable: Vec::new(),
                         truncated: Vec::new(),
                     };
                     if c.deep_only() && !opts.deep {
                         return (skipped(c.name(), "needs --deep"), Vec::new());
-                    }
-                    if c.requires_live() && !root.is_live() {
-                        return (skipped(c.name(), "needs a live host"), Vec::new());
                     }
                     let collected = catch_unwind(AssertUnwindSafe(|| c.collect(&mut cx)));
                     let unreadable = cx.unreadable;
@@ -661,7 +650,6 @@ mod tests {
         let mut cx = Ctx {
             root: &root,
             users: &users,
-            deep: false,
             unreadable: Vec::new(),
             truncated: Vec::new(),
         };
@@ -697,7 +685,6 @@ mod tests {
         let mut cx = Ctx {
             root: &root,
             users: &users,
-            deep: false,
             unreadable: Vec::new(),
             truncated: Vec::new(),
         };
@@ -769,7 +756,7 @@ mod tests {
         std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
         let root = Root::at(&dir).unwrap();
         let users: Vec<User> = Vec::new();
-        let mut cx = Ctx { root: &root, users: &users, deep: false, unreadable: Vec::new(), truncated: Vec::new() };
+        let mut cx = Ctx { root: &root, users: &users, unreadable: Vec::new(), truncated: Vec::new() };
         let err = |e: rustix::io::Errno| std::io::Error::from_raw_os_error(e.raw_os_error());
 
         cx.note_failed("home/alice/.ssh/authorized_keys", &err(rustix::io::Errno::LOOP));
@@ -781,7 +768,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("dev")).unwrap();
         std::fs::write(dir.join("dev/null"), b"").unwrap();
         let sshd = vec![User { name: "sshd".into(), uid: Some(22), home: PathBuf::from("/dev/null"), shell: None, source: "passwd" }];
-        let mut homed = Ctx { root: &root, users: &sshd, deep: false, unreadable: Vec::new(), truncated: Vec::new() };
+        let mut homed = Ctx { root: &root, users: &sshd, unreadable: Vec::new(), truncated: Vec::new() };
         homed.note_failed("dev/null/.ssh/authorized_keys", &err(rustix::io::Errno::NOTDIR));
         homed.note_failed("/dev/null/.config/autostart", &err(rustix::io::Errno::NOTDIR));
         assert_eq!((homed.truncated.len(), homed.unreadable.len()), (0, 0));
@@ -811,7 +798,6 @@ mod tests {
         let mut cx = Ctx {
             root: &root,
             users: &users,
-            deep: false,
             unreadable: Vec::new(),
             truncated: Vec::new(),
         };
@@ -842,7 +828,6 @@ mod tests {
         let mut cx = Ctx {
             root: &root,
             users: &users,
-            deep: false,
             unreadable: Vec::new(),
             truncated: Vec::new(),
         };

@@ -270,14 +270,6 @@ impl Manager {
         }
         self.active.extend(other.active);
     }
-
-    pub fn len(&self) -> usize {
-        self.by_path.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_path.is_empty()
-    }
 }
 
 /// The system bus, and only the system bus.

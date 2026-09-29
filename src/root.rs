@@ -374,6 +374,7 @@ impl Root {
         read_capped_from(file, cap)
     }
 
+    #[cfg(test)]
     pub fn read(&self, rel: impl AsRef<Path>) -> io::Result<Vec<u8>> {
         Ok(self.read_capped(rel, READ_CAP)?.0)
     }
@@ -928,10 +929,6 @@ impl Root {
     pub fn rel(&self, abs: &Path) -> PathBuf {
         let stripped = abs.strip_prefix(&self.base).unwrap_or(abs);
         strip_leading_slash(stripped).to_path_buf()
-    }
-
-    pub fn base(&self) -> &Path {
-        &self.base
     }
 
     /// Reads an extended attribute without following a final symlink.

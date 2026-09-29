@@ -185,7 +185,6 @@ pub struct FileDigests {
     pub sha256: String,
     pub md5: String,
     pub sha1: String,
-    pub size: u64,
 }
 
 /// A file large enough that hashing it is not worth an incident responder's
@@ -207,7 +206,6 @@ pub fn digests(root: &Root, rel: &Path) -> Option<FileDigests> {
     let mut md5 = md5::Md5::new();
     let mut sha1 = <sha1::Sha1 as sha1::Digest>::new();
     let mut buf = vec![0u8; 64 * 1024];
-    let mut size = 0u64;
     loop {
         match file.read(&mut buf) {
             Ok(0) => break,
@@ -215,7 +213,6 @@ pub fn digests(root: &Root, rel: &Path) -> Option<FileDigests> {
                 sha2::Digest::update(&mut sha, &buf[..n]);
                 md5.update(&buf[..n]);
                 sha1::Digest::update(&mut sha1, &buf[..n]);
-                size += n as u64;
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => return None,
@@ -225,7 +222,6 @@ pub fn digests(root: &Root, rel: &Path) -> Option<FileDigests> {
         sha256: crate::entry::hex(&sha2::Digest::finalize(sha)),
         md5: crate::entry::hex(&md5.finalize()),
         sha1: crate::entry::hex(&sha1::Digest::finalize(sha1)),
-        size,
     })
 }
 
@@ -454,7 +450,6 @@ mod tests {
         let d = digests(&root, Path::new("f")).unwrap();
         assert_eq!(d.sha256, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         assert_eq!(d.md5, "900150983cd24fb0d6963f7d28e17f72");
-        assert_eq!(d.size, 3);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

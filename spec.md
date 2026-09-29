@@ -482,7 +482,7 @@ What offline costs
 Two capabilities do not survive:
 D-Bus enablement (§6). There is no running systemd in a mounted image. This is why the symlink-resolution fallback is a v1 deliverable rather than a contingency — it is the offline implementation, tested continuously on live hosts where its answers can be checked against D-Bus. That validation loop is only available while both paths exist.
 Live-only facts. Loaded kernel modules, running processes, and current mounts are absent. The affected collectors must degrade to their on-disk sources and mark the entry rather than omitting it.
-As built, the kernel collector checks for a live root itself, reports every on-disk module with its loaded state unknown, and marks itself partial with the reason. The Collector trait has a requires_live declaration, but no collector uses it, because the kernel collector's on-disk half still runs offline; see §15.
+As built, the kernel collector checks for a live root itself, reports every on-disk module with its loaded state unknown, and marks itself partial with the reason. The kernel collector's on-disk half runs offline, so no collector needs to declare that it requires a live host; see §15.
 Rules for v1
 1. Every path goes through Root.
 2. The symlink-resolution enablement path ships in v1 and is tested against D-Bus for agreement.
@@ -712,7 +712,7 @@ Open. Each is a known departure from this spec or a gap in it, with what is true
 • snapd's state.json, option 1 of §7, is not read; the snap verdict rests on the installed images and the unit's shape.
 • BerkeleyDB and ndb rpm databases are not read, so RHEL 7 and 8 report provenance Unknown (§7).
 • HiddenPath is not applied to the command's target, so ExecStart=/tmp/x is flagged Unpackaged and TargetMissing or not on its merits, but not HiddenPath (§8).
-• A live scan and an offline scan of the same host cannot be diffed against each other, because enablement is inferred offline (§9, §11). The kernel collector's partial coverage offline no longer blocks it; it only makes the loaded-module differences uncertain. The Collector trait's requires_live declaration is unused.
+• A live scan and an offline scan of the same host cannot be diffed against each other, because enablement is inferred offline (§9, §11). The kernel collector's partial coverage offline no longer blocks it; it only makes the loaded-module differences uncertain.
 • Extended attributes on an offline root are read by path, relying on the deep walk never following a link to reach one (§11).
 • The security.capability parser has no fuzz target, since an unprivileged fuzzer cannot set the attribute (§13).
 • Web servers' module directories — httpd's conf.modules.d, nginx's modules-enabled, lighttpd's conf-enabled — are not read. A LoadModule line names a library the server loads into itself, a plug-in registry in §5's sense, and would fit the plugin kind (§5).
