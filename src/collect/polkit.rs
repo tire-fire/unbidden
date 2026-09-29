@@ -10,6 +10,7 @@
 //! the engine is taken from the daemon itself: only the JavaScript one holds
 //! `polkit._runRules`, and only 0.105 holds the local-authority backend.
 
+use crate::text::{lossy};
 use std::path::Path;
 
 use super::replaceable;
@@ -78,9 +79,6 @@ fn engine(cx: &mut Ctx) -> Option<Engine> {
     })
 }
 
-fn lossy(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
-}
 
 fn entry(cx: &mut Ctx, kind: Kind, rel: &Path, name: String) -> Entry {
     let mut e = cx.entry(kind, rel, name);

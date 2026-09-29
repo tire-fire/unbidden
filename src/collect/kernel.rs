@@ -4,6 +4,7 @@
 //! and both are read from a search path whose merged-usr aliases must collapse to a single directory
 //! before anything is emitted (§5).
 
+use crate::text::{lossy, short_hash, take_word};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -831,23 +832,12 @@ fn distinct_dirs(cx: &mut Ctx, candidates: &[&'static str]) -> Vec<(usize, &'sta
     out
 }
 
-fn take_word(s: &[u8]) -> Option<(&[u8], &[u8])> {
-    let s = s.trim_ascii_start();
-    if s.is_empty() {
-        return None;
-    }
-    let end = s.iter().position(|b| b.is_ascii_whitespace()).unwrap_or(s.len());
-    Some((&s[..end], s[end..].trim_ascii_start()))
-}
 
 fn first_absolute(command: &[u8]) -> Option<PathBuf> {
     let word = super::shell_word(take_word(command)?.0);
     (word.first() == Some(&b'/')).then(|| PathBuf::from(OsStr::from_bytes(word).to_os_string()))
 }
 
-fn lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
 
 fn name_bytes(e: &mut Entry, name: &[u8]) {
     if std::str::from_utf8(name).is_err() {
@@ -856,9 +846,6 @@ fn name_bytes(e: &mut Entry, name: &[u8]) {
     }
 }
 
-fn short_hash(bytes: &[u8]) -> String {
-    blake3::hash(bytes).to_hex()[..12].to_string()
-}
 
 /// Names are hashed into the entry id, so two identical lines in one file
 /// would otherwise collide into one id for two entries.

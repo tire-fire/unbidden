@@ -6,6 +6,7 @@
 //! Both are read only where their daemon is installed. A configuration left
 //! behind by a removed package starts nothing.
 
+use crate::text::{lossy};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -41,9 +42,6 @@ impl Collector for Inetd {
     }
 }
 
-fn lossy(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
-}
 
 /// Names are hashed into the entry id, so a second service of the same name
 /// in one file needs a name of its own.

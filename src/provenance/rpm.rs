@@ -16,6 +16,7 @@
 //! index and silently misattributes thousands of paths. Wrong provenance is
 //! worse than none, and the format is small enough to own.
 
+use crate::text::{lossy};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -549,9 +550,6 @@ fn when_label(flags: i64) -> &'static str {
     }
 }
 
-fn lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
 
 /// A directory can be co-owned by several packages, so a path may carry more
 /// than one claim. Prefer the one that actually matches the bytes on disk.

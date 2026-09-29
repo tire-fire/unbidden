@@ -12,6 +12,7 @@
 //! been in, and gives up at a ceiling rather than following a tree that
 //! generates itself.
 
+use crate::text::{lossy};
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -780,9 +781,6 @@ fn uniq(used: &mut BTreeMap<String, usize>, base: String) -> String {
     if *seen == 1 { base } else { format!("{base}#{seen}") }
 }
 
-fn lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
 
 fn lower(bytes: &[u8]) -> String {
     lossy(bytes).to_ascii_lowercase()

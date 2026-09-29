@@ -9,6 +9,7 @@
 //! from the user database entirely, and its value comes from the compiled
 //! schema defaults instead.
 
+use crate::text::{lossy};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -1050,9 +1051,6 @@ fn colon_fields_contain(value: &str, uuid: &str) -> bool {
 
 // -------------------------------------------------------------------- bytes
 
-fn lossy(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
-}
 
 fn trim(mut line: &[u8]) -> &[u8] {
     while let [first, rest @ ..] = line {

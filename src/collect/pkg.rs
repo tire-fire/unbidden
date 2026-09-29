@@ -14,6 +14,7 @@
 //! them. Both run as root on a package operation, so both are read — the
 //! second through the header parser §7's provenance backend already owns.
 
+use crate::text::{lossy, short_hash, take_word};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -1598,14 +1599,6 @@ fn first_absolute(command: &[u8]) -> Option<PathBuf> {
     }
 }
 
-fn take_word(s: &[u8]) -> Option<(&[u8], &[u8])> {
-    let s = s.trim_ascii_start();
-    if s.is_empty() {
-        return None;
-    }
-    let end = s.iter().position(|b| b.is_ascii_whitespace()).unwrap_or(s.len());
-    Some((&s[..end], s[end..].trim_ascii_start()))
-}
 
 fn ini_lookup(bytes: &[u8], section: &str, key: &str) -> Option<String> {
     let mut current = String::new();
@@ -1641,13 +1634,7 @@ fn as_bool(v: &str) -> Option<bool> {
     }
 }
 
-fn lossy(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
-}
 
-fn short_hash(bytes: &[u8]) -> String {
-    blake3::hash(bytes).to_hex()[..12].to_string()
-}
 
 /// Names are hashed into the entry id, so two identical hook lines in one file
 /// would otherwise collide into one id for two entries.

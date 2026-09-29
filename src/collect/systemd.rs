@@ -18,6 +18,7 @@
 //! /usr/lib is two entries plus the rank and the path of its neighbour, so
 //! enrichment can decide which shadows which; the collector does not.
 
+use crate::text::{lossy};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -832,9 +833,6 @@ fn fields(line: &[u8], n: usize) -> (Vec<&[u8]>, &[u8]) {
     (out, rest.trim_ascii())
 }
 
-fn lossy(b: &[u8]) -> String {
-    String::from_utf8_lossy(b).into_owned()
-}
 
 fn tmpfiles(cx: &mut Ctx) -> Vec<Entry> {
     let mut out = Vec::new();

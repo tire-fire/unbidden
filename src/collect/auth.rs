@@ -6,6 +6,7 @@
 //! a rule carrying invalid UTF-8 survives as evidence rather than becoming
 //! replacement characters.
 
+use crate::text::{lossy, short_hash};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -66,9 +67,6 @@ fn words(s: &[u8]) -> Vec<&[u8]> {
     s.split(|b| is_ws(*b)).filter(|w| !w.is_empty()).collect()
 }
 
-fn lossy(s: &[u8]) -> String {
-    String::from_utf8_lossy(s).into_owned()
-}
 
 fn eqi(a: &[u8], b: &str) -> bool {
     a.eq_ignore_ascii_case(b.as_bytes())
@@ -120,9 +118,6 @@ fn logical_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-fn hash12(s: &[u8]) -> String {
-    blake3::hash(s).to_hex()[..12].to_string()
-}
 
 /// A stable, whitespace-insensitive rendering of a rule, so that reindenting a
 /// file does not re-identify every entry in it.
@@ -884,7 +879,7 @@ fn fingerprint(blob: &[u8]) -> (String, bool) {
             use sha2::{Digest, Sha256};
             (format!("SHA256:{}", b64_encode(&Sha256::digest(&raw))), true)
         }
-        _ => (format!("key:{}", hash12(blob)), false),
+        _ => (format!("key:{}", short_hash(blob)), false),
     }
 }
 
@@ -1526,7 +1521,7 @@ fn sudoers_file(
             let mut e = cx.entry(
                 Kind::Sudoers,
                 rel,
-                format!("defaults:{}", hash12(&normalized(t))),
+                format!("defaults:{}", short_hash(&normalized(t))),
             );
             e.note("defaults", lossy(t));
             if t.windows(13).any(|w| w == b"!authenticate") {
@@ -1579,7 +1574,7 @@ fn sudoers_file(
             let mut e = cx.entry(
                 Kind::Sudoers,
                 rel,
-                format!("{}:{}", lossy(users[0]), hash12(&normalized(t))),
+                format!("{}:{}", lossy(users[0]), short_hash(&normalized(t))),
             );
             e.note("user_list", lossy(&join_ws(users)));
             e.note("host_list", lossy(&join_ws(hosts)));
@@ -1997,7 +1992,7 @@ fn doas(cx: &mut Ctx, out: &mut Vec<Entry>) {
     for r in &rules {
         let action = if r.permit { "permit" } else { "deny" };
         let joined: Vec<u8> = r.words.join(&0u8);
-        let mut e = cx.entry(Kind::Doas, rel, format!("{action}:{}:{}", lossy(&r.ident), hash12(&joined)));
+        let mut e = cx.entry(Kind::Doas, rel, format!("{action}:{}:{}", lossy(&r.ident), short_hash(&joined)));
         e.trigger = Trigger::Always;
         e.enabled = Enablement::Enabled;
         e.principal = Some(r.target.as_deref().map_or_else(|| "root".to_string(), lossy));
@@ -2445,8 +2440,8 @@ fn ssh_client_entries(
             continue;
         }
         let name = match user {
-            Some(u) => format!("{}:{}:{}", o.directive, u.name, hash12(&o.value)),
-            None => format!("{}:{}", o.directive, hash12(&o.value)),
+            Some(u) => format!("{}:{}:{}", o.directive, u.name, short_hash(&o.value)),
+            None => format!("{}:{}", o.directive, short_hash(&o.value)),
         };
         let mut e = cx.entry(Kind::SshClient, &o.rel, name);
         e.trigger = Trigger::Always;

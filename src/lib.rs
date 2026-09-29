@@ -9,6 +9,7 @@ pub mod pyyaml;
 pub mod render;
 pub mod root;
 pub mod scan;
+pub mod text;
 pub mod users;
 pub mod yaml;
 
