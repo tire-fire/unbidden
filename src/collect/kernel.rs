@@ -116,7 +116,6 @@ fn sysctl_callouts(cx: &mut Ctx) -> Vec<Entry> {
     files.push((PathBuf::from(SYSCTL_CONF), None));
     for (rel, shadowed_by) in files {
         let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
-        let mut used: BTreeMap<String, usize> = BTreeMap::new();
         for line in logical_lines(&bytes, Join::Never) {
             let line = String::from_utf8_lossy(&line).into_owned();
             let line = line.trim();
@@ -129,8 +128,6 @@ fn sysctl_callouts(cx: &mut Ctx) -> Vec<Entry> {
             let Some((_, which, trigger)) = CALLOUT_KEYS.iter().find(|(k, _, _)| *k == key) else { continue };
             let Some(command) = callout_command(which, value) else { continue };
             let mut e = callout_entry(cx, &rel, which, *trigger, command);
-            e.name = uniq(&mut used, e.name.clone());
-            e.rekey(&rel);
             if let Some(by) = &shadowed_by {
                 e.enabled = Enablement::Disabled;
                 e.note("shadowed_by", path_note(cx, by));
@@ -165,7 +162,6 @@ fn binfmt_handlers(cx: &mut Ctx) -> Vec<Entry> {
     let mut out = Vec::new();
     for (rel, shadowed_by) in super::replaceable(cx, &BINFMT_DIRS, ".conf") {
         let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
-        let mut used: BTreeMap<String, usize> = BTreeMap::new();
         for line in logical_lines(&bytes, Join::Never) {
             let line = line.trim_ascii();
             let Some(&delim) = line.first() else { continue };
@@ -174,7 +170,7 @@ fn binfmt_handlers(cx: &mut Ctx) -> Vec<Entry> {
             }
             let fields: Vec<&[u8]> = line[1..].split(|b| *b == delim).collect();
             let [name, kind, _offset, _magic, _mask, interpreter, rest @ ..] = fields.as_slice() else { continue };
-            let mut e = binfmt_entry(cx, &rel, uniq(&mut used, lossy(name)), interpreter, rest.first().copied().unwrap_or_default());
+            let mut e = binfmt_entry(cx, &rel, lossy(name), interpreter, rest.first().copied().unwrap_or_default());
             e.note("match", if *kind == b"E" { "extension" } else { "magic" });
             if let Some(by) = &shadowed_by {
                 e.enabled = Enablement::Disabled;
@@ -239,14 +235,13 @@ fn request_key(cx: &mut Ctx) -> Vec<Entry> {
     let mut out = Vec::new();
     for rel in files {
         let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
-        let mut used: BTreeMap<String, usize> = BTreeMap::new();
         for line in logical_lines(&bytes, Join::Never) {
             if line.trim_ascii().first().is_none_or(|b| *b == b'#') {
                 continue;
             }
             let words: Vec<&[u8]> = line.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty()).collect();
             let [op, key_type, description, _info, program, ..] = words.as_slice() else { continue };
-            let name = uniq(&mut used, format!("{} {} {}", lossy(op), lossy(key_type), lossy(description)));
+            let name = format!("{} {} {}", lossy(op), lossy(key_type), lossy(description));
             let mut e = cx.entry(Kind::KernelCallout, &rel, name);
             e.trigger = Trigger::Always;
             e.enabled = Enablement::Enabled;
@@ -307,7 +302,6 @@ fn udev_rules(cx: &mut Ctx) -> Vec<Entry> {
         };
 
         let Some(bytes) = cx.read(rel) else { continue };
-        let mut used: BTreeMap<String, usize> = BTreeMap::new();
         for line in logical_lines(&bytes, Join::Udev) {
             let tokens = udev_tokens(&line);
             let facts = udev_facts(&tokens);
@@ -317,7 +311,7 @@ fn udev_rules(cx: &mut Ctx) -> Vec<Entry> {
                     continue;
                 }
                 let key = String::from_utf8_lossy(t.key).into_owned();
-                let name = uniq(&mut used, format!("{key}:{digest}"));
+                let name = format!("{key}:{digest}");
                 let mut e = cx.entry(Kind::Udev, rel, name);
                 e.trigger = Trigger::DeviceEvent;
                 // udevd runs as root, so everything it spawns does too.
@@ -634,11 +628,10 @@ fn module_load_lists(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
     for (rel, shadowed_by) in files {
         let Some(bytes) = cx.read(&rel) else { continue };
         let first = out.len();
-        let mut used: BTreeMap<String, usize> = BTreeMap::new();
         for line in logical_lines(&bytes, Join::Never) {
             // /etc/modules permits module parameters after the name.
             let Some((module, params)) = take_word(&line) else { continue };
-            let name = uniq(&mut used, lossy(module));
+            let name = lossy(module);
             let mut e = cx.entry(Kind::KernelModule, &rel, name);
             e.trigger = Trigger::Boot;
             e.note("directive", "load");
@@ -675,7 +668,6 @@ fn modprobe_configs(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
     for (rel, shadowed_by) in files {
         let Some(bytes) = cx.read(&rel) else { continue };
         let first = out.len();
-        let mut used: BTreeMap<String, usize> = BTreeMap::new();
         for line in logical_lines(&bytes, Join::Kmod) {
             // A `#` inside a directive is kept rather than stripped: an install
             // command may legitimately contain one, and truncating there would
@@ -692,7 +684,7 @@ fn modprobe_configs(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
             let Some((first, rest)) = take_word(rest) else { continue };
 
             let directive = lossy(directive);
-            let name = uniq(&mut used, format!("{directive}:{}", lossy(first)));
+            let name = format!("{directive}:{}", lossy(first));
             let mut e = cx.entry(Kind::KernelModule, &rel, name);
             e.trigger = Trigger::Boot;
             e.note("directive", directive.clone());
@@ -847,13 +839,6 @@ fn name_bytes(e: &mut Entry, name: &[u8]) {
 }
 
 
-/// Names are hashed into the entry id, so two identical lines in one file
-/// would otherwise collide into one id for two entries.
-fn uniq(used: &mut BTreeMap<String, usize>, base: String) -> String {
-    let seen = used.entry(base.clone()).or_insert(0);
-    *seen += 1;
-    if *seen == 1 { base } else { format!("{base}#{seen}") }
-}
 
 fn append_note(e: &mut Entry, key: &str, value: &str) {
     match e.raw.get_mut(key) {

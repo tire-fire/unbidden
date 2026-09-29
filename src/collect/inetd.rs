@@ -43,13 +43,6 @@ impl Collector for Inetd {
 }
 
 
-/// Names are hashed into the entry id, so a second service of the same name
-/// in one file needs a name of its own.
-fn uniq(used: &mut BTreeMap<(PathBuf, String), usize>, rel: &Path, base: String) -> String {
-    let seen = used.entry((rel.to_path_buf(), base.clone())).or_insert(0);
-    *seen += 1;
-    if *seen == 1 { base } else { format!("{base}#{seen}") }
-}
 
 // --------------------------------------------------------------- xinetd ----
 
@@ -80,11 +73,10 @@ fn xinetd(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let mut conf = Xinetd::default();
     xinetd_file(cx, Path::new(XINETD_CONF), 0, &mut conf);
 
-    let mut used = BTreeMap::new();
     for s in conf.services {
         let id = s.attrs.get("id").cloned().unwrap_or_else(|| s.name.clone());
         let base = if id == s.name { s.name.clone() } else { format!("{} ({id})", s.name) };
-        let name = uniq(&mut used, &s.rel, base);
+        let name = base;
         let mut e = cx.entry(Kind::InetdService, &s.rel, name);
         e.trigger = Trigger::NetworkEvent;
         e.note("daemon", "xinetd");
@@ -204,7 +196,6 @@ fn include_path(p: &[u8]) -> PathBuf {
 fn inetd(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let rel = Path::new(INETD_CONF);
     let Some(bytes) = cx.read_capped(rel, FILE_CAP) else { return };
-    let mut used = BTreeMap::new();
     for raw in bytes.split(|b| *b == b'\n') {
         let line = raw.trim_ascii();
         if line.is_empty() || line[0] == b'#' {
@@ -212,7 +203,7 @@ fn inetd(cx: &mut Ctx, out: &mut Vec<Entry>) {
         }
         let words: Vec<&[u8]> = line.split(u8::is_ascii_whitespace).filter(|w| !w.is_empty()).collect();
         let [service, socket_type, protocol, wait, user, server, argv @ ..] = words.as_slice() else { continue };
-        let name = uniq(&mut used, rel, format!("{}/{}", lossy(service), lossy(protocol)));
+        let name = format!("{}/{}", lossy(service), lossy(protocol));
         let mut e = cx.entry(Kind::InetdService, rel, name);
         e.trigger = Trigger::NetworkEvent;
         e.enabled = Enablement::Enabled;
@@ -289,7 +280,6 @@ fn wrapper_fields(line: &[u8]) -> Vec<Vec<u8>> {
 /// entries. Everything is off where libwrap is not installed.
 fn tcp_wrappers(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let installed = libwrap(cx);
-    let mut used = BTreeMap::new();
     for file in ["etc/hosts.allow", "etc/hosts.deny"] {
         let rel = Path::new(file);
         let Some(bytes) = cx.read_capped(rel, FILE_CAP) else { continue };
@@ -322,7 +312,7 @@ fn tcp_wrappers(cx: &mut Ctx, out: &mut Vec<Entry>) {
                 if !matches!(keyword.as_str(), "spawn" | "twist") || value.is_empty() {
                     continue;
                 }
-                let name = uniq(&mut used, rel, format!("{daemons}:{keyword}"));
+                let name = format!("{daemons}:{keyword}");
                 let mut e = cx.entry(Kind::TcpWrapper, rel, name);
                 e.trigger = Trigger::NetworkEvent;
                 e.enabled = if installed { Enablement::Enabled } else { Enablement::Disabled };

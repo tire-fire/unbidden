@@ -13,7 +13,7 @@
 //! generates itself.
 
 use crate::text::{lossy};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -537,10 +537,9 @@ fn config_at(cx: &mut Ctx, rel: &Path, repo: &str, gitdir_abs: &str) -> Vec<Entr
     let rel = rel.to_path_buf();
     let Some(bytes) = cx.read(&rel) else { return Vec::new() };
 
-    let mut used: BTreeMap<String, usize> = BTreeMap::new();
     let mut out = Vec::new();
     for (key, value) in executing_keys(&bytes) {
-        let mut e = cx.entry(Kind::GitHook, &rel, uniq(&mut used, key));
+        let mut e = cx.entry(Kind::GitHook, &rel, key);
         e.trigger = Trigger::Always;
         e.enabled = Enablement::Enabled;
         e.target_path = first_absolute(&value);
@@ -773,13 +772,6 @@ fn first_absolute(command: &[u8]) -> Option<PathBuf> {
     (word.first() == Some(&b'/')).then(|| PathBuf::from(OsStr::from_bytes(word).to_os_string()))
 }
 
-/// Names are hashed into the entry id, so two `core.pager` lines in one config
-/// would otherwise be one id for two entries.
-fn uniq(used: &mut BTreeMap<String, usize>, base: String) -> String {
-    let seen = used.entry(base.clone()).or_insert(0);
-    *seen += 1;
-    if *seen == 1 { base } else { format!("{base}#{seen}") }
-}
 
 
 fn lower(bytes: &[u8]) -> String {

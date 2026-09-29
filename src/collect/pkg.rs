@@ -381,9 +381,8 @@ fn apt(cx: &mut Ctx) -> Vec<Entry> {
         let (rel, skipped) = files[at].clone();
         at += 1;
         let Some(bytes) = cx.read(&rel) else { continue };
-        let mut used: BTreeMap<String, usize> = BTreeMap::new();
         for target in apt_includes(&bytes) {
-            let mut e = cx.entry(Kind::PkgHook, &rel, uniq(&mut used, format!("#include:{}", lossy(&target))));
+            let mut e = cx.entry(Kind::PkgHook, &rel, format!("#include:{}", lossy(&target)));
             e.trigger = Trigger::PackageOp;
             e.principal = Some("root".to_string());
             e.enabled = if skipped.is_some() { Enablement::Disabled } else { Enablement::Enabled };
@@ -405,7 +404,7 @@ fn apt(cx: &mut Ctx) -> Vec<Entry> {
         }
         for (key, value) in apt_conf_pairs(&bytes) {
             let Some((binary, canon)) = hook_of(&key) else { continue };
-            let name = uniq(&mut used, format!("{canon}:{}", short_hash(&value)));
+            let name = format!("{canon}:{}", short_hash(&value));
             let mut e = cx.entry(Kind::PkgHook, &rel, name);
             e.trigger = Trigger::PackageOp;
             // apt and dpkg run as root, and so does everything they invoke.
@@ -964,7 +963,6 @@ fn rpm(cx: &mut Ctx) -> Vec<Entry> {
     let mut referenced: BTreeSet<String> = BTreeSet::new();
     for rel in files {
         let Some(bytes) = cx.read(&rel) else { continue };
-        let mut used: BTreeMap<String, usize> = BTreeMap::new();
         for line in macro_lines(&bytes) {
             let Some(rest) = line.strip_prefix(b"%") else { continue };
             let split = rest
@@ -981,8 +979,7 @@ fn rpm(cx: &mut Ctx) -> Vec<Entry> {
             }
 
             let macro_name = lossy(macro_name);
-            let name = uniq(&mut used, macro_name.clone());
-            let mut e = cx.entry(Kind::PkgHook, &rel, name);
+            let mut e = cx.entry(Kind::PkgHook, &rel, macro_name.clone());
             e.trigger = Trigger::PackageOp;
             e.principal = Some("root".to_string());
             e.note("manager", "rpm");
@@ -1102,7 +1099,6 @@ fn rpm_scriptlets(cx: &mut Ctx) -> (Vec<Entry>, &'static str) {
         *installed.entry(base_name(s)).or_default() += 1;
     }
 
-    let mut used: BTreeMap<String, usize> = BTreeMap::new();
     let mut out = Vec::new();
     for s in scriptlets {
         let mut name = base_name(&s);
@@ -1110,7 +1106,7 @@ fn rpm_scriptlets(cx: &mut Ctx) -> (Vec<Entry>, &'static str) {
             name = format!("{name}@{}", s.version);
         }
 
-        let mut e = cx.entry(Kind::PkgHook, db, uniq(&mut used, name));
+        let mut e = cx.entry(Kind::PkgHook, db, name);
         e.trigger = Trigger::PackageOp;
         e.principal = Some("root".to_string());
         e.enabled = Enablement::Enabled;
@@ -1178,10 +1174,9 @@ fn apk_hooks(cx: &mut Ctx) -> Vec<Entry> {
         Some((f, t)) => (Some(*f), t.as_slice()),
         None => (None, &[][..]),
     };
-    let mut used: BTreeMap<String, usize> = BTreeMap::new();
     let mut with_script: BTreeSet<String> = BTreeSet::new();
     for s in &scripts {
-        let mut e = cx.entry(Kind::PkgHook, archive, uniq(&mut used, format!("{}:{}", s.package, s.phase)));
+        let mut e = cx.entry(Kind::PkgHook, archive, format!("{}:{}", s.package, s.phase));
         e.trigger = Trigger::PackageOp;
         e.principal = Some("root".to_string());
         e.enabled = Enablement::Enabled;
@@ -1215,7 +1210,7 @@ fn apk_hooks(cx: &mut Ctx) -> Vec<Entry> {
     if let Some(file) = triggers_file {
         for t in triggers.iter().filter(|t| !with_script.contains(&t.digest)) {
             let who = t.package.as_ref().map(|(n, _)| n.clone()).unwrap_or_else(|| format!("checksum {}", &t.digest[..12.min(t.digest.len())]));
-            let mut e = cx.entry(Kind::PkgHook, file, uniq(&mut used, format!("{who}:trigger")));
+            let mut e = cx.entry(Kind::PkgHook, file, format!("{who}:trigger"));
             e.trigger = Trigger::PackageOp;
             e.principal = Some("root".to_string());
             e.enabled = Enablement::Disabled;
@@ -1636,13 +1631,6 @@ fn as_bool(v: &str) -> Option<bool> {
 
 
 
-/// Names are hashed into the entry id, so two identical hook lines in one file
-/// would otherwise collide into one id for two entries.
-fn uniq(used: &mut BTreeMap<String, usize>, base: String) -> String {
-    let seen = used.entry(base.clone()).or_insert(0);
-    *seen += 1;
-    if *seen == 1 { base } else { format!("{base}#{seen}") }
-}
 
 #[cfg(test)]
 mod tests {
