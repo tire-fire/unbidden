@@ -279,6 +279,30 @@ mod tests {
     }
 
     #[test]
+    fn explain_never_prints_what_a_link_out_of_a_home_points_at() {
+        // `explain --from baseline` never runs a scan, and read the entry's
+        // source through a root that did not yet know its homes: an account
+        // that had linked ~/.bashrc at /etc/shadow got it printed by the
+        // operator's own command.
+        let dir = std::env::temp_dir().join(format!("unbidden-explain-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::create_dir_all(dir.join("home/alice")).unwrap();
+        std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
+        std::fs::write(dir.join("etc/shadow"), b"root:MARKER-SHADOW-HASH:19000:0:99999:7:::\n").unwrap();
+        std::os::unix::fs::symlink("/etc/shadow", dir.join("home/alice/.bashrc")).unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let e = Entry::new(Kind::ShellProfile, root.abs("home/alice/.bashrc"), ".bashrc");
+        let mut out = Vec::new();
+        write(&mut out, &root, &e, true).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("MARKER-SHADOW-HASH"), "{text}");
+        assert!(text.contains("(unreadable)"), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn explain_shows_control_bytes_in_the_source_as_escapes() {
         let dir = std::env::temp_dir().join(format!("unbidden-explain-esc-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

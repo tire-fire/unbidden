@@ -58,9 +58,59 @@ pub struct Root {
     base: PathBuf,
     live: bool,
     confined: bool,
-    /// Home directories, once discovered. A symlink inside one of these whose
-    /// target leaves it is not followed — see `escaping_link`.
-    homes: std::sync::OnceLock<Vec<PathBuf>>,
+    /// Home directories, discovered when the root is opened so that no `Root`
+    /// exists without them: a symlink inside one of these whose target leaves
+    /// it is not followed — see `escaping_link`. A root that is built first
+    /// and told its homes later is unrestricted in between, and `explain`
+    /// once read through exactly that gap.
+    homes: Vec<PathBuf>,
+}
+
+/// Why `open` refused a path that exists. A scan records these as limits of
+/// what it read, never as failures: content an unprivileged account controls
+/// must not be able to make a collector Partial (§3).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// A FIFO, a device, a directory, or a link to one. Opening a FIFO blocks
+    /// until a writer appears, which on a hostile host is a free hang.
+    NotRegular(PathBuf),
+    /// A link inside a home whose chain leaves it: `~/.bashrc -> /etc/shadow`
+    /// would otherwise put root-only data in a report.
+    LeavesHome { link: PathBuf, target: PathBuf },
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::NotRegular(path) => write!(f, "{} is not a regular file; not read", path.display()),
+            Refusal::LeavesHome { link, target } => write!(
+                f,
+                "{} leads out of its owner's home to {}; recorded as a link, not followed",
+                link.display(),
+                target.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// The refusal an `open` error carries, if it is one.
+pub fn refusal(e: &io::Error) -> Option<&Refusal> {
+    e.get_ref()?.downcast_ref()
+}
+
+/// Where a path stands against the home rule.
+enum Confinement {
+    /// Not under any home: this rule has nothing to say.
+    NoHome,
+    /// Under a home and staying inside it, as resolved.
+    Inside(PathBuf),
+    /// Under a home and leading out of it, to here.
+    Escapes(PathBuf),
+    /// Under a home and not resolvable at all; the caller refuses it rather
+    /// than falling back to an open that follows links.
+    Unresolvable(io::Error),
 }
 
 impl Root {
@@ -79,13 +129,11 @@ impl Root {
         let path = path.as_ref();
         let fd = rustix::fs::open(path, OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC, Mode::empty())?;
         let confined = probe_openat2(&fd);
-        Ok(Root {
-            fd,
-            base: path.to_path_buf(),
-            live,
-            confined,
-            homes: std::sync::OnceLock::new(),
-        })
+        let mut root = Root { fd, base: path.to_path_buf(), live, confined, homes: Vec::new() };
+        // /etc/passwd and the home directories are read before any home is
+        // known, which is the one time no home can be involved.
+        root.homes = crate::users::discover(&root).iter().filter(|u| u.has_real_home()).map(|u| u.home.clone()).collect();
+        Ok(root)
     }
 
     /// True on a running system. Collectors reading /proc, /sys or D-Bus must
@@ -199,14 +247,8 @@ impl Root {
         Ok(fd)
     }
 
-    /// Declares the home directories found on this root. Set once, before
-    /// any collector runs, so the symlink rule below applies to every read.
-    pub fn set_homes(&self, homes: Vec<PathBuf>) {
-        let _ = self.homes.set(homes);
-    }
-
     pub fn homes(&self) -> &[PathBuf] {
-        self.homes.get().map(|v| v.as_slice()).unwrap_or(&[])
+        &self.homes
     }
 
     /// Whether a path sits inside one of the declared homes.
@@ -232,49 +274,77 @@ impl Root {
     /// The check lives here rather than in a collector because a collector
     /// that reaches past its own helper would otherwise silently opt out.
     pub fn escaping_link(&self, rel: &Path) -> Option<PathBuf> {
-        self.home_confinement(rel)?.ok()?.err()
+        match self.confinement(rel) {
+            Confinement::Escapes(target) => Some(target),
+            _ => None,
+        }
     }
 
-    /// For a path under a home: either the path it resolves to inside that
-    /// home or, as the inner error, where it leads instead. A path that cannot
-    /// be resolved at all carries the resolution's error, so the caller refuses
-    /// it rather than falling back to an open that follows links.
-    fn home_confinement(&self, rel: &Path) -> Option<io::Result<Result<PathBuf, PathBuf>>> {
-        let homes = self.homes.get()?;
+    fn confinement(&self, rel: &Path) -> Confinement {
         // Homes are recorded as they sit inside the root; every path here is
         // compared in the same coordinates so an offline root lines up.
         let here = self.rel(&self.abs(rel));
-        let home = homes
+        let Some(home) = self
+            .homes
             .iter()
             .map(|h| self.rel(h))
             .filter(|h| here.starts_with(h))
-            .max_by_key(|h| h.as_os_str().len())?;
+            .max_by_key(|h| h.as_os_str().len())
+        else {
+            return Confinement::NoHome;
+        };
         // The home itself may be a link (/home/carol -> /srv/carol); what the
         // path must stay inside is where the home really is.
-        let confined = self.resolve(&home).and_then(|real_home| {
+        let resolved = self.resolve(&home).and_then(|real_home| {
             let resolved = self.resolve(&here)?;
-            Ok(if resolved.starts_with(&real_home) { Ok(resolved) } else { Err(Path::new("/").join(resolved)) })
+            Ok((real_home, resolved))
         });
-        Some(confined)
+        match resolved {
+            Err(e) => Confinement::Unresolvable(e),
+            Ok((home, resolved)) if resolved.starts_with(&home) => Confinement::Inside(resolved),
+            Ok((_, resolved)) => Confinement::Escapes(Path::new("/").join(resolved)),
+        }
     }
 
+    /// Opens a regular file for reading, or says why not with a `Refusal`.
+    ///
+    /// The kind of file is settled here rather than by each caller before its
+    /// own read, so no caller can forget it and no window opens between the
+    /// check and the open: the descriptor is opened non-blocking, which makes
+    /// a FIFO swapped in at the last moment return at once, and its type is
+    /// read back from the descriptor itself.
     pub fn open(&self, rel: impl AsRef<Path>) -> io::Result<File> {
         let rel = rel.as_ref();
-        match self.home_confinement(rel) {
-            Some(Err(e)) => Err(e),
-            Some(Ok(Err(target))) => Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!(
-                    "{} leads out of its owner's home to {}; recorded as a link, not followed",
-                    rel.display(),
-                    target.display()
-                ),
-            )),
+        const READ: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK).union(OFlags::NOCTTY);
+        let fd = match self.confinement(rel) {
+            Confinement::Unresolvable(e) => return Err(e),
+            Confinement::Escapes(target) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    Refusal::LeavesHome { link: rel.to_path_buf(), target },
+                ));
+            }
             // Opened as resolved, refusing every link, so a link swapped in
             // between the check and the open fails instead of escaping.
-            Some(Ok(Ok(resolved))) => Ok(File::from(self.open_resolved(&resolved, OFlags::RDONLY)?)),
-            None => Ok(File::from(self.open_raw(rel, OFlags::RDONLY)?)),
+            Confinement::Inside(resolved) => {
+                self.require_regular(rel)?;
+                self.open_resolved(&resolved, READ)?
+            }
+            Confinement::NoHome => {
+                self.require_regular(rel)?;
+                self.open_raw(rel, READ)?
+            }
+        };
+        if !meta_of(&rustix::fs::fstat(&fd)?).is_file {
+            return Err(not_regular(rel));
         }
+        Ok(File::from(fd))
+    }
+
+    /// A first look, so a device or FIFO is not opened at all in the ordinary
+    /// case; the descriptor's own type is what `open` finally trusts.
+    fn require_regular(&self, rel: &Path) -> io::Result<()> {
+        if self.stat_follow(rel)?.is_file { Ok(()) } else { Err(not_regular(rel)) }
     }
 
     /// Reads at most `cap` bytes. The returned flag says the file was longer,
@@ -356,16 +426,17 @@ impl Root {
                 continue;
             }
             let name = OsStr::from_bytes(name).to_os_string();
-            let (mut is_dir, is_symlink) = match ent.file_type() {
+            let (mut is_dir, mut is_symlink) = match ent.file_type() {
                 FileType::Directory => (true, false),
                 FileType::Symlink => (false, true),
-                FileType::Unknown => (false, false),
                 _ => (false, false),
             };
             if ent.file_type() == FileType::Unknown {
                 // Some filesystems do not fill d_type; ask the kernel.
                 if let Ok(st) = rustix::fs::statat(&fd, ent.file_name(), AtFlags::SYMLINK_NOFOLLOW) {
-                    is_dir = meta_of(&st).is_dir;
+                    let meta = meta_of(&st);
+                    is_dir = meta.is_dir;
+                    is_symlink = meta.is_symlink;
                 }
             }
             out.push(DirEnt { name, is_dir, is_symlink });
@@ -392,6 +463,10 @@ impl Root {
         let st = rustix::fs::statat(&fd, "", AtFlags::EMPTY_PATH)?;
         Ok((st.st_dev as u64, st.st_ino as u64))
     }
+}
+
+fn not_regular(rel: &Path) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, Refusal::NotRegular(rel.to_path_buf()))
 }
 
 fn meta_of(st: &rustix::fs::Stat) -> Meta {
@@ -564,13 +639,12 @@ mod tests {
         std::os::unix::fs::symlink("/etc/shadow", dir.join("home/alice/.bashrc")).unwrap();
         std::os::unix::fs::symlink("/home/alice/dotfiles/bashrc", dir.join("home/alice/.profile")).unwrap();
 
+        std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
+
+        // No scan has run and none is needed: the root knows its homes from
+        // the moment it exists. `explain --from` never scans, and once read
+        // through a root that had not been told.
         let root = Root::at(&dir).unwrap();
-
-        // Before the homes are known nothing is restricted, which is why the
-        // scan declares them before any collector runs.
-        assert!(root.escaping_link(Path::new("home/alice/.bashrc")).is_none());
-
-        root.set_homes(vec![PathBuf::from("/home/alice")]);
         assert_eq!(
             root.escaping_link(Path::new("home/alice/.bashrc")),
             Some(PathBuf::from("/etc/shadow"))
@@ -593,6 +667,27 @@ mod tests {
     }
 
     #[test]
+    fn a_fifo_or_directory_is_refused_by_the_open_itself() {
+        // Every caller used to stat before opening, and the ones that did not
+        // (`explain`, provenance) hung on a FIFO. The root now decides.
+        let dir = tmpdir("not-regular");
+        std::fs::create_dir_all(dir.join("etc/dir")).unwrap();
+        std::fs::write(dir.join("etc/file"), b"ok").unwrap();
+        rustix::fs::mknodat(rustix::fs::CWD, dir.join("etc/fifo"), rustix::fs::FileType::Fifo, Mode::from_bits_truncate(0o600), 0).unwrap();
+        std::os::unix::fs::symlink("fifo", dir.join("etc/link-to-fifo")).unwrap();
+        let root = Root::at(&dir).unwrap();
+
+        assert_eq!(root.read("etc/file").unwrap(), b"ok");
+        for planted in ["etc/fifo", "etc/dir", "etc/link-to-fifo"] {
+            let err = root.read(planted).unwrap_err();
+            assert!(matches!(refusal(&err), Some(Refusal::NotRegular(_))), "{planted}: {err:?}");
+        }
+        // Absent stays NotFound, which collectors treat as nothing there.
+        assert_eq!(root.read("etc/missing").unwrap_err().kind(), io::ErrorKind::NotFound);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn a_home_escape_is_caught_however_the_link_is_spelled() {
         // The first version compared the link's text against the home, so a
         // relative `..` target, a second hop, or a linked directory partway
@@ -609,8 +704,8 @@ mod tests {
         link("/etc", "home/alice/.config");
         link("dotfiles/../dotfiles/zshrc", "home/alice/.zshrc");
 
+        std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
         let root = Root::at(&dir).unwrap();
-        root.set_homes(vec![PathBuf::from("/home/alice")]);
         for escape in ["home/alice/.bashrc", "home/alice/.profile", "home/alice/.config/shadow"] {
             assert_eq!(root.escaping_link(Path::new(escape)), Some(PathBuf::from("/etc/shadow")), "{escape}");
             assert_eq!(root.read(escape).unwrap_err().kind(), io::ErrorKind::PermissionDenied, "{escape}");
@@ -625,8 +720,9 @@ mod tests {
         let dir = tmpdir("unresolvable");
         std::fs::create_dir_all(dir.join("home/alice")).unwrap();
         std::os::unix::fs::symlink(".loop", dir.join("home/alice/.loop")).unwrap();
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
         let root = Root::at(&dir).unwrap();
-        root.set_homes(vec![PathBuf::from("/home/alice")]);
 
         // A missing dotfile is the common case and must stay NotFound, which
         // collectors treat as absent rather than as a failure.
@@ -645,8 +741,9 @@ mod tests {
         std::os::unix::fs::symlink("../srv/carol", dir.join("home/carol")).unwrap();
         std::os::unix::fs::symlink("real", dir.join("srv/carol/.bashrc")).unwrap();
 
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc/passwd"), "carol:x:1001:1001::/home/carol:/bin/sh\n").unwrap();
         let root = Root::at(&dir).unwrap();
-        root.set_homes(vec![PathBuf::from("/home/carol")]);
         assert!(root.escaping_link(Path::new("home/carol/.bashrc")).is_none());
         assert_eq!(root.read("home/carol/.bashrc").unwrap(), b"mine\n");
         std::fs::remove_dir_all(&dir).unwrap();

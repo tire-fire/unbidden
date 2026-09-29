@@ -755,7 +755,7 @@ fn manager_environment(cx: &mut Ctx) -> Vec<Entry> {
             }
         }
         for (rel, why_not, account) in files {
-            let Some(bytes) = read_regular(cx, &rel, crate::root::READ_CAP) else { continue };
+            let Some(bytes) = cx.read_capped(&rel, crate::root::READ_CAP) else { continue };
             for d in parse_unit(&bytes) {
                 if d.section != "Manager" || !matches!(d.key.as_str(), "DefaultEnvironment" | "ManagerEnvironment") {
                     continue;
@@ -1064,7 +1064,7 @@ const PATH_CONDITIONS: [&str; 5] =
     ["PathExists", "PathIsDirectory", "PathIsSymbolicLink", "FileNotEmpty", "FileIsExecutable"];
 
 fn parse_into_facts(cx: &mut Ctx, rel: &Path) -> Facts {
-    match read_regular(cx, rel, crate::root::READ_CAP) {
+    match cx.read_capped(rel, crate::root::READ_CAP) {
         Some(bytes) => facts(&parse_unit(&bytes)),
         None => Facts::default(),
     }
@@ -1207,7 +1207,7 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
         // A leading `-` means tolerate absence; the path is what follows.
         let path = spec.strip_prefix(b"-").unwrap_or(spec);
         let path = PathBuf::from(OsString::from_vec(path.to_vec()));
-        let Some(bytes) = read_regular(cx, &path, 256 * 1024) else { continue };
+        let Some(bytes) = cx.read_capped(&path, 256 * 1024) else { continue };
         for (k, v) in parse_env_file(&bytes) {
             e.note(&format!("env.{k}"), v);
         }
@@ -1311,15 +1311,6 @@ fn exec_target(v: &[u8]) -> Option<PathBuf> {
         Some(PathBuf::from(OsString::from_vec(token.to_vec())))
     } else {
         None
-    }
-}
-
-/// Opening a FIFO blocks, and a unit path can be one. Only regular files, and
-/// only through the root's confined resolution, are read.
-fn read_regular(cx: &mut Ctx, rel: &Path, cap: usize) -> Option<Vec<u8>> {
-    match cx.root.stat_follow(rel) {
-        Ok(m) if m.is_file => cx.read_capped(rel, cap),
-        _ => None,
     }
 }
 

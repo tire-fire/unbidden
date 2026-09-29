@@ -41,6 +41,21 @@ pub struct Ctx<'a> {
     truncated: Vec<String>,
 }
 
+/// What a bounded read found. The reasons a path was not read are different
+/// facts to a collector that reports the file itself: an entry for `~/.bashrc`
+/// that leads out of its home says so, one for a FIFO says that.
+pub enum Read {
+    Bytes { bytes: Vec<u8>, truncated: bool },
+    /// There, but not a regular file: a FIFO, a device, a directory, or a
+    /// link to one. Never opened, so it cannot block the scan.
+    NotRegular,
+    /// A link out of its owner's home, to here. Refused by the root (§3); the
+    /// policy working, not a path the scan could not reach.
+    NotFollowed(PathBuf),
+    Absent,
+    Failed(std::io::Error),
+}
+
 impl<'a> Ctx<'a> {
     /// A bounded read that records what it could not open. Absent paths are
     /// normal — most search paths do not exist on most hosts — but an
@@ -52,55 +67,53 @@ impl<'a> Ctx<'a> {
 
     pub fn read_capped(&mut self, rel: impl AsRef<Path>, cap: usize) -> Option<Vec<u8>> {
         let rel = rel.as_ref();
-
-        // Opening a FIFO for reading blocks until someone writes to it, and a
-        // collector that hangs cannot be rescued by catching a panic. An
-        // attacker plants one by creating a named pipe where a config file is
-        // expected. A directory in the same place is the cheaper version of
-        // the same trick: it fails with EISDIR, which would otherwise demote
-        // the collector to Partial and declare the whole baseline
-        // incomparable over one planted symlink.
-        match self.root.stat_follow(rel) {
-            Ok(meta) if !meta.is_file => {
-                self.truncated.push(format!("{}: not a regular file, not read", rel.display()));
-                return None;
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-            Err(_) => {}
+        let outcome = self.read_outcome(rel, cap);
+        self.record(rel, cap, &outcome);
+        match outcome {
+            Read::Bytes { bytes, .. } => Some(bytes),
+            _ => None,
         }
+    }
 
-        // A symlink out of its owner's home is refused by the root (§3), and
-        // the refusal is the policy working, not a path the scan could not
-        // reach. Any user can plant one in their own home, so recording it as
-        // unreadable would let every account on the host declare every later
-        // baseline incomparable.
-        if let Some(target) = self.root.escaping_link(rel) {
-            self.note_limited(format!(
+    /// The read, with nothing recorded, for a collector that reports the
+    /// file's own state on its entry. Pair it with `record` for the notes
+    /// every read carries.
+    pub fn read_outcome(&self, rel: &Path, cap: usize) -> Read {
+        match self.root.read_capped(rel, cap) {
+            Ok((bytes, truncated)) => Read::Bytes { bytes, truncated },
+            Err(e) => match crate::root::refusal(&e) {
+                Some(crate::root::Refusal::NotRegular(_)) => Read::NotRegular,
+                Some(crate::root::Refusal::LeavesHome { target, .. }) => Read::NotFollowed(target.clone()),
+                None if e.kind() == std::io::ErrorKind::NotFound => Read::Absent,
+                None => Read::Failed(e),
+            },
+        }
+    }
+
+    /// The standard account of one read: limits are recorded as limits, which
+    /// any account can cause and none may use to make a collector Partial,
+    /// and only a read the scan itself could not do counts as a failure.
+    pub fn record(&mut self, rel: &Path, cap: usize, outcome: &Read) {
+        match outcome {
+            // A read that hit its cap is not a read that failed. Folding the
+            // two together would demote a collector to Partial — and so
+            // declare the whole baseline incomparable — because one file was
+            // larger than the ceiling, which is the ceiling doing its job.
+            Read::Bytes { truncated: true, .. } => {
+                self.truncated.push(format!("{} (read to {cap} bytes)", rel.display()));
+            }
+            Read::Bytes { .. } | Read::Absent => {}
+            // A FIFO planted where a config belongs is a hang waiting for a
+            // reader, and a directory in the same place fails with EISDIR,
+            // which would demote the collector to Partial over one planted
+            // symlink.
+            Read::NotRegular => self.truncated.push(format!("{}: not a regular file, not read", rel.display())),
+            Read::NotFollowed(target) => self.note_limited(format!(
                 "{}: leads out of its owner's home to {}, not followed",
                 rel.display(),
                 target.display()
-            ));
-            return None;
-        }
-
-        match self.root.read_capped(rel, cap) {
-            Ok((bytes, truncated)) => {
-                // A read that hit its cap is not a read that failed. Folding
-                // the two together would demote a collector to Partial — and
-                // so declare the whole baseline incomparable — because one
-                // file was larger than the ceiling, which is the ceiling
-                // doing its job.
-                if truncated {
-                    self.truncated.push(format!("{} (read to {cap} bytes)", rel.display()));
-                }
-                Some(bytes)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                self.note_failed(rel, &e);
-                None
-            }
+            )),
+            Read::Failed(e) => self.note_failed(rel, e),
         }
     }
 
@@ -341,8 +354,6 @@ pub struct Options {
 
 pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Scan {
     let users = users::discover(root);
-    // Every read from here on is subject to the escaping-symlink rule.
-    root.set_homes(users.iter().filter(|u| u.has_real_home()).map(|u| u.home.clone()).collect());
     let mut results: Vec<(CollectorStatus, Vec<Entry>)> = Vec::new();
 
     std::thread::scope(|scope| {
@@ -678,9 +689,9 @@ mod tests {
     #[test]
     fn only_what_a_home_owner_can_build_is_excused() {
         let dir = std::env::temp_dir().join(format!("unbidden-excused-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
         let root = Root::at(&dir).unwrap();
-        root.set_homes(vec![PathBuf::from("/home/alice")]);
         let users: Vec<User> = Vec::new();
         let mut cx = Ctx { root: &root, users: &users, deep: false, unreadable: Vec::new(), truncated: Vec::new() };
         let err = |e: rustix::io::Errno| std::io::Error::from_raw_os_error(e.raw_os_error());

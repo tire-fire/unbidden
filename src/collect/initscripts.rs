@@ -15,7 +15,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, hex, name_from_os};
-use crate::scan::{Collector, Ctx};
+use crate::scan::{Collector, Ctx, Read};
 
 pub struct InitScripts;
 
@@ -1039,21 +1039,22 @@ fn script_entry(
     if cx.root.stat(rel).is_ok_and(|m| m.is_symlink) {
         e.note("is_symlink", "true");
     }
-    // Only a regular file is opened. A link pointing at a directory answers
-    // EISDIR, which would demote the whole collector to Partial and so make
-    // the baseline incomparable (§7); one pointing at a FIFO would block the
-    // scan inside open() until somebody wrote to it.
-    match cx.root.stat_follow(rel) {
-        Ok(m) if m.is_file => script_facts(cx, &mut e, rel),
-        Ok(_) => e.note("not_a_regular_file", "true"),
-        // Dangling: cx.entry has already recorded it.
-        Err(_) => {}
-    }
+    script_facts(cx, &mut e, rel);
     e
 }
 
 fn script_facts(cx: &mut Ctx, e: &mut Entry, rel: &Path) {
-    let Some(bytes) = cx.read(rel) else { return };
+    // Only a regular file is read; the root refuses the rest, and the scan
+    // records a directory or FIFO as a limit rather than a failure (§7).
+    let outcome = cx.read_outcome(rel, crate::root::READ_CAP);
+    cx.record(rel, crate::root::READ_CAP, &outcome);
+    let bytes = match outcome {
+        Read::Bytes { bytes, .. } => bytes,
+        Read::NotRegular => return e.note("not_a_regular_file", "true"),
+        // Dangling, absent, refused or unreadable: cx.entry and the record
+        // above have said so.
+        _ => return,
+    };
     e.note("head_scan", format!("first {SCAN_LINES} lines"));
     lsb_header(e, &bytes);
 

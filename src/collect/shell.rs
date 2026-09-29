@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, name_from_os};
 use crate::root::READ_CAP;
-use crate::scan::{Collector, Ctx};
+use crate::scan::{Collector, Ctx, Read};
 use crate::users::User;
 
 pub struct Shell;
@@ -431,52 +431,36 @@ fn profile(
         }
     }
 
-    // Opening a fifo blocks until a writer appears, which on a hostile host is
-    // a free hang. A dangling symlink is evidence in its own right. Either
-    // way the file's presence is reported without reading it.
-    let regular = if meta.is_symlink {
-        cx.root.stat_follow(rel).map(|m| m.is_file).unwrap_or(false)
-    } else {
-        meta.is_file
-    };
-    if !regular {
-        e.note("not_regular_file", if meta.is_symlink { "link resolves to nothing readable" } else { "not a regular file" });
-        out.push(e);
-        return;
-    }
-
-    // A profile linked out of its owner's home is reported as the link it
-    // is and not read: following it is how `~/.bashrc -> /etc/shadow` would
-    // put another account's secrets in the report. That is the policy
-    // working, so it is noted rather than counted as a failed read, which any
-    // user could otherwise use to make every later baseline incomparable.
-    if let Some(target) = cx.root.escaping_link(rel) {
-        e.note("not_followed", format!("leads out of its owner's home to {}", target.display()));
-        cx.note_limited(format!(
-            "{}: leads out of its owner's home to {}, not followed",
-            cx.root.abs(rel).display(),
-            target.display()
-        ));
-        out.push(e);
-        return;
-    }
-
-    let (bytes, truncated) = match cx.root.read_capped(rel, READ_CAP) {
-        Ok(v) => v,
-        Err(err) => {
-            cx.note_failed(cx.root.abs(rel), &err);
+    // A profile that is not a regular file, a dangling link, or a link out
+    // of its owner's home (`~/.bashrc -> /etc/shadow`) is reported as what it
+    // is and not read. Which of them it is, is the root's answer to the one
+    // read; the scan records each as a limit, never a failure, since any
+    // user could otherwise use them to make every baseline incomparable.
+    let outcome = cx.read_outcome(rel, READ_CAP);
+    cx.record(rel, READ_CAP, &outcome);
+    let bytes = match outcome {
+        Read::Bytes { bytes, truncated } => {
+            if truncated {
+                e.note("truncated", format!("read capped at {READ_CAP} bytes"));
+            }
+            bytes
+        }
+        Read::NotRegular | Read::Absent => {
+            e.note("not_regular_file", if meta.is_symlink { "link resolves to nothing readable" } else { "not a regular file" });
+            out.push(e);
+            return;
+        }
+        Read::NotFollowed(target) => {
+            e.note("not_followed", format!("leads out of its owner's home to {}", target.display()));
+            out.push(e);
+            return;
+        }
+        Read::Failed(err) => {
             e.note("unreadable", err.to_string());
             out.push(e);
             return;
         }
     };
-    if truncated {
-        cx.note_limited(format!(
-            "{} (truncated at {READ_CAP} bytes)",
-            cx.root.abs(rel).display()
-        ));
-        e.note("truncated", format!("read capped at {READ_CAP} bytes"));
-    }
     if std::str::from_utf8(&bytes).is_err() {
         e.flag(Flag::EncodingAnomaly);
     }
@@ -1176,7 +1160,7 @@ mod tests {
         // growing their own .bashrc.
         let st = &scan.header.collectors[0];
         assert!(matches!(st.status, Status::Complete), "a capped read is not a failed one: {st:?}");
-        assert!(st.truncated.iter().any(|u| u.contains(".bashrc") && u.contains("truncated")));
+        assert!(st.truncated.iter().any(|u| u.contains(".bashrc") && u.contains("read to")));
 
         let a = by_name(&scan, Kind::ShellProfile, ".bashrc");
         assert!(a.raw.contains_key("truncated"));
