@@ -64,7 +64,6 @@ fn run(root: &Root, collector: Box<dyn Collector>, enrich: bool) {
     let mut scan = scan::run(root, &Options { deep: false }, std::slice::from_ref(&collector));
     if enrich {
         unbidden::enrich::enrich(root, &mut scan);
-        unbidden::enrich::enrich_late(root, &mut scan);
     }
 
     // libfuzzer-sys aborts from its panic hook before unwinding, so a panic

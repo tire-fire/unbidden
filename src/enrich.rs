@@ -35,6 +35,16 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
         scan.entries.extend(chained);
     }
 
+    // Before the paths are gathered too: a preloaded library or a file an
+    // interpreter variable names is judged like any other target, in this
+    // pass, not one of its own afterwards.
+    if let Some(preloads) = stage(&mut failed, "preloads", || preload_entries(root, &scan.entries)) {
+        scan.entries.extend(preloads);
+    }
+    if let Some(hooks) = stage(&mut failed, "interpreter variables", || interpreter_entries(root, &scan.entries)) {
+        scan.entries.extend(hooks);
+    }
+
     let wanted = paths_to_resolve(root, &scan.entries);
     let resolution = stage(&mut failed, "provenance", || provenance::resolve(root, &wanted));
     let answers = match resolution {
@@ -76,13 +86,6 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
         vouch_for_sources(&mut scan.entries);
         vouch_for_templates(root, &mut scan.entries, &answers);
     });
-
-    if let Some(preloads) = stage(&mut failed, "preloads", || preload_entries(root, &scan.entries)) {
-        scan.entries.extend(preloads);
-    }
-    if let Some(hooks) = stage(&mut failed, "interpreter variables", || interpreter_entries(root, &scan.entries)) {
-        scan.entries.extend(hooks);
-    }
 
     per_entry(&mut failed, "search paths", &mut scan.entries, |e| writable_search_path(root, e));
     per_entry(&mut failed, "setuid bits", &mut scan.entries, |e| setuid_changed_after_install(root, e));
@@ -1403,18 +1406,10 @@ fn interpreter_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
                 }
                 _ => None,
             };
-            match file.filter(|f| f.starts_with('/')) {
-                // Judged by the file it names, in the late pass.
-                Some(f) => e.target_path = Some(root.abs(root.rel(Path::new(f)))),
-                // Otherwise the setting's own file is what vouches for it.
-                None => {
-                    e.provenance = carrier.provenance.clone();
-                    for f in &carrier.flags {
-                        if matches!(f, Flag::Unpackaged | Flag::PackagedModified | Flag::ConffileModified) {
-                            e.flag(*f);
-                        }
-                    }
-                }
+            // Judged by the file it names; with none, by the file that sets it,
+            // which is its own source.
+            if let Some(f) = file.filter(|f| f.starts_with('/')) {
+                e.target_path = Some(root.abs(root.rel(Path::new(f))));
             }
             // What the variable holds is code or options, not a command line.
             e.note("target_unverifiable", "a variable an interpreter reads");
@@ -1819,42 +1814,6 @@ fn guarded_by_test(text: &[u8], path: &[u8]) -> Option<String> {
     None
 }
 
-/// A synthesised preload entry is built after provenance has run, so it needs
-/// its own pass over the same machinery.
-/// Entries synthesised after the main provenance pass whose target still
-/// needs a verdict: preloaded libraries, and files interpreter variables
-/// name.
-fn late(e: &Entry) -> bool {
-    matches!(e.kind, Kind::LdPreload | Kind::InterpreterEnv) && e.target_path.is_some() && e.target_sha256.is_none()
-}
-
-pub fn enrich_late(root: &Root, scan: &mut Scan) {
-    let wanted: BTreeSet<PathBuf> = scan
-        .entries
-        .iter()
-        .filter(|e| late(e))
-        .filter_map(|e| e.target_path.as_ref().map(|t| root.rel(t)))
-        .collect();
-    if wanted.is_empty() {
-        return;
-    }
-    let mut failed = Vec::new();
-    let answers = match stage(&mut failed, "preload provenance", || provenance::resolve(root, &wanted)) {
-        Some(r) => {
-            failed.extend(r.failures.into_iter().map(|f| format!("preload provenance: {f}")));
-            r.answers
-        }
-        None => provenance::Answers::new(),
-    };
-    per_entry(&mut failed, "preload provenance", &mut scan.entries, |e| {
-        if late(e) {
-            apply_provenance(root, e, &answers);
-            apply_target(root, e);
-        }
-    });
-    scan.header.enrichment_failures.extend(failed);
-}
-
 /// Counts for the run summary, kept here so the renderer stays a renderer.
 pub fn flag_counts(scan: &Scan) -> BTreeMap<Flag, usize> {
     let mut out = BTreeMap::new();
@@ -1914,7 +1873,6 @@ mod tests {
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Planted)];
         let mut scan = scan::run(&root, &Options { deep: false }, &collectors);
         enrich(&root, &mut scan);
-        enrich_late(&root, &mut scan);
         (Root::at(dir).unwrap(), scan)
     }
 
@@ -2161,7 +2119,6 @@ mod tests {
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(crate::collect::shell::Shell)];
         let mut scan = scan::run(&root, &Options { deep: false }, &collectors);
         enrich(&root, &mut scan);
-        enrich_late(&root, &mut scan);
         let get = |v: &str| scan.entries.iter().find(|e| e.kind == Kind::InterpreterEnv && e.name == v).unwrap_or_else(|| panic!("no {v}"));
         let perl = get("PERL5OPT");
         assert_eq!((perl.command.as_deref(), perl.target_path.as_deref()), (Some(&b"PERL5OPT=-Mevil"[..]), None));

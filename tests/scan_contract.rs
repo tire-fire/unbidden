@@ -203,7 +203,6 @@ fn scan_tree(dir: &Path) -> Scan {
     let collectors = collect::all();
     let mut s = scan::run(&root, &Options { deep: false }, &collectors);
     enrich::enrich(&root, &mut s);
-    enrich::enrich_late(&root, &mut s);
     s
 }
 

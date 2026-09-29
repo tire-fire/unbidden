@@ -130,7 +130,6 @@ fn collect_scan(root: &Root, deep: bool) -> Scan {
     let collectors = collect::all();
     let mut s = scan::run(root, &Options { deep }, &collectors);
     enrich::enrich(root, &mut s);
-    enrich::enrich_late(root, &mut s);
     s
 }
 

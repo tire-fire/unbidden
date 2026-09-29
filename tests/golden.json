@@ -985,8 +985,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "9d3b649ef9e57766c443a3f132d42e71b089f836b7c1d7b9118570ddd12a69e8",
       "kind": "ld_preload",
@@ -1046,8 +1046,8 @@
       "command_utf8": true,
       "enabled": "enabled",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "3436742b5314fd8d5c3cfd89417b016c32ccdfbef49a5982c601c89e45d004f8",
       "kind": "ld_preload",
@@ -1078,8 +1078,8 @@
       "command_utf8": true,
       "enabled": "not-applicable",
       "flags": [
-        "unpackaged",
-        "target-missing"
+        "target-missing",
+        "unpackaged"
       ],
       "id": "43490c5eed79d5e3521db8be14596a04ba04be098fb2c9edf9a5446f9c86ac6c",
       "kind": "ld_preload",
