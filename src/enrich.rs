@@ -454,7 +454,6 @@ fn unwrap_switch_user(name: &str, args: &[String]) -> Unwrapped {
             }
             "-c" | "--command" => return args.get(i + 1).map_or(Unwrapped::Nothing, |t| Unwrapped::Text(t.clone())),
             "-u" | "--user" if name == "runuser" => {
-                user_seen = true;
                 i += 2;
                 // Everything after the user is the command, `--` or not.
                 if args.get(i).map(String::as_str) == Some("--") {
