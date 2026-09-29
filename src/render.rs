@@ -60,10 +60,7 @@ pub fn suppressed(e: &Entry) -> bool {
     if e.raw.contains_key("empty_file") && e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged)) {
         return true;
     }
-    let target_verified = e
-        .raw
-        .get("target_provenance")
-        .is_none_or(|v| v.ends_with("(intact)") || v.ends_with("(directory)") || v.starts_with("absent, guarded"));
+    let target_verified = e.target_verdict().is_none_or(|v| v.is_verified());
     // nsswitch.conf is written at install time on every supported
     // distribution, by libc-bin's postinst from a template and edited by
     // libnss-systemd's, or rendered by authselect, and no package database
