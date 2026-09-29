@@ -10,6 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::scan::{Collector, Ctx};
+use crate::text::glob_match;
 
 pub mod agents;
 pub mod auth;
@@ -45,33 +46,6 @@ pub mod vcs;
 pub(crate) fn shell_word(word: &[u8]) -> &[u8] {
     let end = word.iter().position(|b| b";|&<>()".contains(b)).unwrap_or(word.len());
     &word[..end]
-}
-
-/// A shell-style glob with `*` and `?`, as sudoers includes and systemd
-/// preset patterns use it.
-pub(crate) fn glob_match(pat: &[u8], s: &[u8]) -> bool {
-    let (mut p, mut i) = (0, 0);
-    let (mut star, mut mark) = (usize::MAX, 0);
-    while i < s.len() {
-        if p < pat.len() && (pat[p] == b'?' || pat[p] == s[i]) {
-            p += 1;
-            i += 1;
-        } else if p < pat.len() && pat[p] == b'*' {
-            star = p;
-            p += 1;
-            mark = i;
-        } else if star != usize::MAX {
-            p = star + 1;
-            mark += 1;
-            i = mark;
-        } else {
-            return false;
-        }
-    }
-    while p < pat.len() && pat[p] == b'*' {
-        p += 1;
-    }
-    p == pat.len()
 }
 
 /// An include path resolved root-relative: absolute means relative to the scan
@@ -353,13 +327,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn glob_matching_is_not_a_prefix_check() {
-        assert!(glob_match(b"*.conf", b"10-evil.conf"));
-        assert!(!glob_match(b"*.conf", b"notes.txt"));
-        assert!(glob_match(b"sshd_config_?", b"sshd_config_1"));
-        assert!(glob_match(b"*", b"anything"));
-        assert!(!glob_match(b"a*b", b"ab_"));
-        assert!(glob_match(b"a*b*c", b"axxbxxc"));
-    }
 }

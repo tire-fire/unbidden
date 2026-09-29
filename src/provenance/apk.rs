@@ -348,12 +348,12 @@ fn protect_mode(patterns: &[(Vec<u8>, Protect)], rel: &Path) -> Protect {
         for (pat, m) in &level {
             match pat.iter().position(|b| *b == b'/') {
                 Some(i) => {
-                    if crate::collect::glob_match(&pat[..i], c) {
+                    if crate::text::glob_match(&pat[..i], c) {
                         next.push((&pat[i + 1..], *m));
                     }
                 }
                 None => {
-                    if crate::collect::glob_match(pat, c) {
+                    if crate::text::glob_match(pat, c) {
                         mode = *m;
                     }
                 }
@@ -362,7 +362,7 @@ fn protect_mode(patterns: &[(Vec<u8>, Protect)], rel: &Path) -> Protect {
         level = next;
     }
     for (pat, m) in &level {
-        if !pat.contains(&b'/') && crate::collect::glob_match(pat, name) {
+        if !pat.contains(&b'/') && crate::text::glob_match(pat, name) {
             mode = *m;
         }
     }

@@ -226,10 +226,10 @@ fn preset_verdict(root: &Root, unit: &str, template: &str) -> Option<PresetMatch
                 continue;
             }
             for pattern in rest.split_whitespace() {
-                if crate::collect::glob_match(pattern.as_bytes(), unit.as_bytes()) {
+                if crate::text::glob_match(pattern.as_bytes(), unit.as_bytes()) {
                     return (verb == "enable").then_some(PresetMatch::Instance);
                 }
-                if crate::collect::glob_match(pattern.as_bytes(), template.as_bytes()) {
+                if crate::text::glob_match(pattern.as_bytes(), template.as_bytes()) {
                     return (verb == "enable").then_some(PresetMatch::Template);
                 }
             }
