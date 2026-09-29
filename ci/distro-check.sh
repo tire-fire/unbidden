@@ -188,7 +188,8 @@ case "$FAMILY" in
 esac
 if [ -n "$referee" ] && command -v "$referee" >/dev/null 2>&1; then
     : > "$out.checked"
-    echo "$files" | grep -v -e '"declared_by_entry"' -e '"read_from"' -e '"digest_unavailable"' -e '"kind":"ld_preload"' |
+    # An entry whose verdict is about another file says so, in provenance_of.
+    echo "$files" | grep -v -e '"provenance_of"' -e '"read_from"' -e '"digest_unavailable"' -e '"kind":"ld_preload"' |
     while IFS= read -r line; do
         src=$(echo "$line" | field source)
         [ -f "$src" ] && [ ! -L "$src" ] || continue
@@ -338,39 +339,6 @@ UNIT
     esac
 done
 
-# A service xinetd starts. PANIX has no inetd module, so this is the plant
-# that proves the collector against the real xinetd package: found in
-# /etc/xinetd.d, unpackaged, gone again once removed. Fedora packages no
-# xinetd, and an image that cannot install it says so.
-if [ "$FAMILY" = dpkg ]; then
-    apt-get -qq update >/dev/null 2>&1; apt-get -qq install -y xinetd >/dev/null 2>&1 || true
-    if [ -x /usr/sbin/xinetd ]; then
-        cat > /etc/xinetd.d/unbidden-check <<'SVC'
-service unbidden-check
-{
-    disable     = no
-    type        = UNLISTED
-    port        = 65001
-    socket_type = stream
-    wait        = no
-    user        = root
-    server      = /tmp/not-a-real-payload
-}
-SVC
-        planted=$("$BIN" --json --all | tail -n +2 | grep '"source":"/etc/xinetd.d/unbidden-check"' || true)
-        rm -f /etc/xinetd.d/unbidden-check
-        [ -n "$planted" ] || fail "a service planted in /etc/xinetd.d was not reported"
-        case "$planted" in
-            *'"kind":"inetd_service"'*'"unpackaged"'*|*'"unpackaged"'*'"kind":"inetd_service"'*) note "an xinetd service planted in /etc/xinetd.d reports unpackaged" ;;
-            *) fail "the planted xinetd service was not an unpackaged inetd_service: $planted" ;;
-        esac
-        "$BIN" --json --all | grep -q '"source":"/etc/xinetd.d/unbidden-check"' && fail "the removed xinetd service is still reported"
-        note "and is gone once removed"
-    else
-        note "xinetd could not be installed here; the inetd plant was not run"
-    fi
-fi
-
 # Each mechanism added since, planted as an attacker would plant it, with no
 # package to install: found under its kind, unpackaged, gone once removed.
 # plant_check <file> <kind> <name fragment>  (the file's content is on stdin)
@@ -391,6 +359,30 @@ plant_check() {
     fi
     return 0
 }
+# A service xinetd starts. PANIX has no inetd module, so this is the plant
+# that proves the collector against the real xinetd package: found in
+# /etc/xinetd.d, unpackaged, gone again once removed. Fedora packages no
+# xinetd, and an image that cannot install it says so.
+if [ "$FAMILY" = dpkg ]; then
+    apt-get -qq update >/dev/null 2>&1; apt-get -qq install -y xinetd >/dev/null 2>&1 || true
+    if [ -x /usr/sbin/xinetd ]; then
+        plant_check /etc/xinetd.d/unbidden-check inetd_service unbidden-check <<'SVC'
+service unbidden-check
+{
+    disable     = no
+    type        = UNLISTED
+    port        = 65001
+    socket_type = stream
+    wait        = no
+    user        = root
+    server      = /tmp/not-a-real-payload
+}
+SVC
+    else
+        note "xinetd could not be installed here; the inetd plant was not run"
+    fi
+fi
+
 gconvdir=$(ls -d /usr/lib/*/gconv /usr/lib64/gconv 2>/dev/null | head -1)
 if [ -n "$gconvdir" ]; then
     cp /bin/true "$gconvdir/unbidden-check.so"

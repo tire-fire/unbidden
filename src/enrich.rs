@@ -743,6 +743,11 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
     let guarded = entry.raw.get("target_provenance").is_some_and(|v| v.starts_with("absent, guarded"));
     let subject = (about_target && !guarded).then(|| entry.target_path.clone().map(|t| root.rel(&t))).flatten();
 
+    // Said on the entry, so that nothing downstream has to work out from what
+    // else it carries whether its verdict is about its source or another file.
+    if let Some(s) = &subject {
+        entry.note("provenance_of", root.abs(s).to_string_lossy());
+    }
     let source_rel = subject.unwrap_or_else(|| root.rel(&entry.source));
     if is_kernel_interface(&source_rel) {
         entry.note("provenance_caveat", "read from a kernel interface, not a file a package can own");
@@ -2588,6 +2593,29 @@ mod tests {
         e.target_path = Some(dir.join("bin/sh"));
         assert_eq!(look_through_wrappers(&root, std::slice::from_mut(&mut e)).len(), 2);
         assert!(!e.raw.contains_key("commands_listed"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_entry_judged_by_another_file_says_which() {
+        let dir = std::env::temp_dir().join(format!("unbidden-subject-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("usr/bin")).unwrap();
+        std::fs::write(dir.join("usr/bin/tool"), b"x").unwrap();
+        let root = Root::at(&dir).unwrap();
+        let mut answers = provenance::Answers::new();
+        answers.insert(PathBuf::from("usr/bin/tool"), Provenance::Unpackaged);
+        answers.insert(PathBuf::from("etc/cron.d/x"), Provenance::Unknown);
+        let mut declared = Entry::new(Kind::Cron, dir.join("etc/cron.d/x"), "tool");
+        declared.note("declared_by_entry", "abc");
+        declared.target_path = Some(dir.join("usr/bin/tool"));
+        apply_provenance(&root, &mut declared, &answers);
+        assert_eq!(declared.raw["provenance_of"], dir.join("usr/bin/tool").display().to_string());
+        assert_eq!(declared.provenance, Provenance::Unpackaged, "the target's verdict, not the carrier's");
+        // An entry about its own source names no other file.
+        let mut own = Entry::new(Kind::Cron, dir.join("etc/cron.d/x"), "line");
+        apply_provenance(&root, &mut own, &answers);
+        assert!(!own.raw.contains_key("provenance_of"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

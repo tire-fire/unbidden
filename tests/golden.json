@@ -126,7 +126,8 @@
         "chain": "shebang",
         "chain_from": "<ROOT>/usr/sbin/sshd",
         "chain_from_provenance": "unverified",
-        "declared_by_entry": "e2444ea235d818967426239368142bc3d5aa66617598334fc2bd7f2e703318ea"
+        "declared_by_entry": "e2444ea235d818967426239368142bc3d5aa66617598334fc2bd7f2e703318ea",
+        "provenance_of": "<ROOT>/bin/sh"
       },
       "source": "<ROOT>/usr/lib/systemd/system/ssh.service",
       "source_utf8": true,
@@ -227,7 +228,8 @@
         "chain": "shebang",
         "chain_from": "<ROOT>/usr/local/bin/agent",
         "chain_from_provenance": "unverified",
-        "declared_by_entry": "c5191ce3ff436ee3e673abd33a58e035d00e6d7957266ff86702ba02318b3b0e"
+        "declared_by_entry": "c5191ce3ff436ee3e673abd33a58e035d00e6d7957266ff86702ba02318b3b0e",
+        "provenance_of": "<ROOT>/bin/sh"
       },
       "source": "<ROOT>/etc/cron.d/agent",
       "source_utf8": true,
@@ -289,7 +291,8 @@
         "chain": "shebang",
         "chain_from": "<ROOT>/etc/cron.daily/logrotate",
         "chain_from_provenance": "unverified",
-        "declared_by_entry": "8813dafbf1bdd2b25d05fe382ac851e8e9886ff0577dc0f0955e576183ca31ac"
+        "declared_by_entry": "8813dafbf1bdd2b25d05fe382ac851e8e9886ff0577dc0f0955e576183ca31ac",
+        "provenance_of": "<ROOT>/bin/sh"
       },
       "source": "<ROOT>/etc/cron.daily/logrotate",
       "source_utf8": true,
@@ -379,7 +382,8 @@
         "chain": "shebang",
         "chain_from": "<ROOT>/usr/bin/nm-applet",
         "chain_from_provenance": "unverified",
-        "declared_by_entry": "5b7b87fb9c7a4e3814d1d6a2a1615d4ae6318e7fe63ae2f37c795daa79ef25d4"
+        "declared_by_entry": "5b7b87fb9c7a4e3814d1d6a2a1615d4ae6318e7fe63ae2f37c795daa79ef25d4",
+        "provenance_of": "<ROOT>/bin/sh"
       },
       "source": "<ROOT>/etc/xdg/autostart/nm-applet.desktop",
       "source_utf8": true,
@@ -694,7 +698,8 @@
         "chain": "shebang",
         "chain_from": "<ROOT>/etc/rc.local",
         "chain_from_provenance": "unverified",
-        "declared_by_entry": "4a26ed564fb2b3a8cbc5667f455680f449f6fba970d129a134b7ef4ecd9f4d13"
+        "declared_by_entry": "4a26ed564fb2b3a8cbc5667f455680f449f6fba970d129a134b7ef4ecd9f4d13",
+        "provenance_of": "<ROOT>/bin/sh"
       },
       "source": "<ROOT>/etc/rc.local",
       "source_utf8": true,
@@ -756,7 +761,8 @@
         "chain": "shebang",
         "chain_from": "<ROOT>/etc/init.d/legacy",
         "chain_from_provenance": "unverified",
-        "declared_by_entry": "e650d94785ef89d40980ea99c87e4c9b850369423f15d89438059099eeb41a9c"
+        "declared_by_entry": "e650d94785ef89d40980ea99c87e4c9b850369423f15d89438059099eeb41a9c",
+        "provenance_of": "<ROOT>/bin/sh"
       },
       "source": "<ROOT>/etc/init.d/legacy",
       "source_utf8": true,
@@ -788,7 +794,8 @@
         "chain": "exec",
         "chain_from": "<ROOT>/etc/init.d/legacy",
         "chain_from_provenance": "unverified",
-        "declared_by_entry": "e650d94785ef89d40980ea99c87e4c9b850369423f15d89438059099eeb41a9c"
+        "declared_by_entry": "e650d94785ef89d40980ea99c87e4c9b850369423f15d89438059099eeb41a9c",
+        "provenance_of": "<ROOT>/usr/sbin/legacyd"
       },
       "source": "<ROOT>/etc/init.d/legacy",
       "source_utf8": true,
@@ -994,6 +1001,7 @@
       "raw": {
         "declared_by_entry": "c5191ce3ff436ee3e673abd33a58e035d00e6d7957266ff86702ba02318b3b0e",
         "declared_in": "<ROOT>/etc/cron.d/agent",
+        "provenance_of": "<ROOT>/tmp/hook.so",
         "variable": "LD_PRELOAD"
       },
       "source": "<ROOT>/etc/cron.d/agent",
@@ -1054,6 +1062,7 @@
       "raw": {
         "declared_by_entry": "b0f8e004396441717f2e1f9266b3c1a16f1618bd4e4192ba6a8e106ac14f23c2",
         "declared_in": "<ROOT>/etc/systemd/system/telemetry.service",
+        "provenance_of": "<ROOT>/tmp/hook.so",
         "variable": "LD_PRELOAD"
       },
       "source": "<ROOT>/etc/systemd/system/telemetry.service",
@@ -1085,6 +1094,7 @@
       "raw": {
         "declared_by_entry": "a407d49e8194fd3dc603771af1f02980c11660449a8c519c2359394da3395c1f",
         "declared_in": "<ROOT>/home/alice/.bashrc",
+        "provenance_of": "<ROOT>/home/alice/.cache/x.so",
         "variable": "LD_PRELOAD"
       },
       "source": "<ROOT>/home/alice/.bashrc",
@@ -1116,6 +1126,7 @@
       "raw": {
         "chain": "command line",
         "declared_by_entry": "e8a378fd85ee3301ebdf6a62eed8fe5f338b42edf1fb23dedf69e42b0266ddfa",
+        "provenance_of": "<ROOT>/sbin/modprobe",
         "target_wrapped_by": "sh"
       },
       "source": "<ROOT>/etc/modprobe.d/evil.conf",
@@ -1147,6 +1158,7 @@
       "raw": {
         "chain": "command line",
         "declared_by_entry": "e8a378fd85ee3301ebdf6a62eed8fe5f338b42edf1fb23dedf69e42b0266ddfa",
+        "provenance_of": "<ROOT>/tmp/stage.sh",
         "target_wrapped_by": "sh"
       },
       "source": "<ROOT>/etc/modprobe.d/evil.conf",
