@@ -718,10 +718,11 @@ fn openrc_state(cx: &mut Ctx) -> Option<Openrc> {
             // ls_dir stats through the link: a dangling one is not there.
             let Ok(meta) = cx.root.stat_follow(dir.join(&ent.name)) else { continue };
             let name = ent.name.to_string_lossy().into_owned();
-            if meta.is_dir {
-                if names.contains(&name) && name != *level {
-                    stacked.push(name);
-                }
+            // A subdirectory naming another runlevel stacks it. Any other is
+            // a name like the rest: OpenRC's ls_dir has no directory filter and
+            // rc_service_in_runlevel is only an access(2).
+            if meta.is_dir && names.contains(&name) && name != *level {
+                stacked.push(name);
                 continue;
             }
             if raw.ends_with(b".sh") {
@@ -1510,6 +1511,8 @@ exec /usr/sbin/sshd\n";
         put(&dir, "opt/evil", b"#!/bin/sh\n", 0o755);
         link(&dir, "/opt/evil", "etc/runlevels/default/evil");
         put(&dir, "etc/runlevels/default/ghost", b"", 0o644);
+        // A directory that names no runlevel is a name in it all the same.
+        fs::create_dir_all(dir.join("etc/runlevels/default/adir")).unwrap();
         // nonetwork stacks default; later is only in nonetwork.
         link(&dir, "../default", "etc/runlevels/nonetwork/default");
         link(&dir, "/etc/init.d/later", "etc/runlevels/nonetwork/later");
@@ -1571,6 +1574,7 @@ exec /usr/sbin/sshd\n";
         assert_eq!((evil.enabled, evil.raw["link_target"].as_str()), (Enablement::Disabled, "/opt/evil"));
         assert!(evil.raw["not_run"].starts_with("no init.d holds a script named evil"));
         assert!(names.contains(&"default/ghost"));
+        assert!(names.contains(&"default/adir"), "OpenRC lists a directory in a runlevel: {names:?}");
 
         assert_eq!(one(&s, Kind::OpenrcService, "rc.conf").raw["sourced_by"], "every service, before its conf.d");
         assert!(names.contains(&"rc.conf.d/site.conf"));
