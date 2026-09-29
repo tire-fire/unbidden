@@ -270,7 +270,7 @@
       "collector": "cron",
       "command": "/bin/sh",
       "command_utf8": true,
-      "enabled": "enabled",
+      "enabled": "disabled",
       "flags": [],
       "id": "b2022ab9f68decb8befcf267ba2be8620cb5a72dc5165d0ae987d95ed85f540a",
       "kind": "cron",
@@ -301,7 +301,7 @@
     {
       "collector": "cron",
       "command": null,
-      "enabled": "enabled",
+      "enabled": "disabled",
       "flags": [
         "unpackaged"
       ],
@@ -316,6 +316,7 @@
         "verdict": "unpackaged"
       },
       "raw": {
+        "not_run": "no loaded crontab line runs run-parts on this directory",
         "schedule": "@daily"
       },
       "source": "<ROOT>/etc/cron.daily/logrotate",

@@ -594,15 +594,10 @@ fn zed(cx: &mut Ctx, out: &mut Vec<Entry>) {
 }
 
 fn run_parts(cx: &mut Ctx, out: &mut Vec<Entry>, dir: &Path, tool: &str, trigger: Trigger, flavour: super::RunParts) {
-    for rel in sorted(cx, dir) {
-        let name = file_name(&rel);
-        let mut e = entry(cx, &rel, format!("{tool}:{name}"), tool, trigger);
-        e.target_path = Some(cx.root.abs(&rel));
-        if e.mode & 0o111 == 0 {
-            e.enabled = Enablement::Disabled;
-            e.note("not_run", "not executable");
-        }
-        if let Some(why) = super::run_parts_skips(cx, flavour, dir, name.as_bytes()) {
+    for f in super::run_parts_dir(cx, flavour, dir) {
+        let mut e = entry(cx, &f.rel, format!("{tool}:{}", f.name.to_string_lossy()), tool, trigger);
+        e.target_path = Some(cx.root.abs(&f.rel));
+        if let Some(why) = f.not_run {
             e.enabled = Enablement::Disabled;
             e.note("not_run", why);
         }

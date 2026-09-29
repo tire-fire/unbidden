@@ -135,18 +135,12 @@ fn ifupdown(cx: &mut Ctx) -> Vec<Entry> {
     let flavour = super::run_parts_flavour(cx);
     for phase in ["pre-up", "up", "down", "post-down"] {
         let dir = PathBuf::from(format!("etc/network/if-{phase}.d"));
-        let mut ents = cx.dir(&dir);
-        ents.sort_by(|a, b| a.name.cmp(&b.name));
-        for ent in ents {
-            let rel = dir.join(&ent.name);
-            if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
-                continue;
-            }
-            let mut e = script_entry(cx, Kind::NetworkDispatcher, &rel, &ent.name, Trigger::NetworkEvent);
+        for f in super::run_parts_dir(cx, flavour, &dir) {
+            let mut e = script_entry(cx, Kind::NetworkDispatcher, &f.rel, &f.name, Trigger::NetworkEvent);
             e.note("dispatcher", "ifupdown");
             e.note("hook_phase", phase);
-            e.enabled = if exec_mode(cx, &rel) != 0 { Enablement::Enabled } else { Enablement::Disabled };
-            if let Some(why) = super::run_parts_skips(cx, flavour, &dir, ent.name.as_encoded_bytes()) {
+            e.enabled = Enablement::Enabled;
+            if let Some(why) = f.not_run {
                 e.enabled = Enablement::Disabled;
                 e.note("not_run", why);
             }
@@ -236,18 +230,12 @@ fn ppp(cx: &mut Ctx) -> Vec<Entry> {
             out.push(e);
         }
         let dir = PathBuf::from(format!("etc/ppp/{phase}.d"));
-        let mut ents = cx.dir(&dir);
-        ents.sort_by(|a, b| a.name.cmp(&b.name));
-        for ent in ents {
-            let rel = dir.join(&ent.name);
-            if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
-                continue;
-            }
-            let mut e = script_entry(cx, Kind::NetworkDispatcher, &rel, &ent.name, Trigger::NetworkEvent);
+        for f in super::run_parts_dir(cx, flavour, &dir) {
+            let mut e = script_entry(cx, Kind::NetworkDispatcher, &f.rel, &f.name, Trigger::NetworkEvent);
             e.note("dispatcher", "pppd");
             e.note("hook_phase", phase);
-            e.enabled = if exec_mode(cx, &rel) != 0 { Enablement::Enabled } else { Enablement::Disabled };
-            if let Some(why) = super::run_parts_skips(cx, flavour, &dir, ent.name.as_encoded_bytes()) {
+            e.enabled = Enablement::Enabled;
+            if let Some(why) = f.not_run {
                 e.enabled = Enablement::Disabled;
                 e.note("not_run", why);
             } else if local_runs {
@@ -430,18 +418,11 @@ fn ifplugd(cx: &mut Ctx) -> Vec<Entry> {
         return out;
     }
     let flavour = super::run_parts_flavour(cx);
-    let dir = Path::new("etc/ifplugd/action.d");
-    let mut ents = cx.dir(dir);
-    ents.sort_by(|a, b| a.name.cmp(&b.name));
-    for ent in ents {
-        let rel = dir.join(&ent.name);
-        if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
-            continue;
-        }
-        let mut e = script_entry(cx, Kind::NetworkDispatcher, &rel, &ent.name, Trigger::NetworkEvent);
+    for f in super::run_parts_dir(cx, flavour, Path::new("etc/ifplugd/action.d")) {
+        let mut e = script_entry(cx, Kind::NetworkDispatcher, &f.rel, &f.name, Trigger::NetworkEvent);
         e.note("dispatcher", "ifplugd");
-        e.enabled = if exec_mode(cx, &rel) != 0 { Enablement::Enabled } else { Enablement::Disabled };
-        if let Some(why) = super::run_parts_skips(cx, flavour, dir, ent.name.as_encoded_bytes()) {
+        e.enabled = Enablement::Enabled;
+        if let Some(why) = f.not_run {
             e.enabled = Enablement::Disabled;
             e.note("not_run", why);
         }

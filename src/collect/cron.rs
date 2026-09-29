@@ -51,10 +51,6 @@ impl Collector for Cron {
             }
         }
 
-        for period in ["hourly", "daily", "weekly", "monthly"] {
-            run_parts(cx, period, &mut out);
-        }
-
         match flavour {
             Flavour::Debian | Flavour::Cronie | Flavour::Unknown => {
                 for dir in ["var/spool/cron", "var/spool/cron/crontabs"] {
@@ -88,8 +84,12 @@ impl Collector for Cron {
             }
         }
 
-        periodic(cx, &mut out);
         anacrontab(cx, &mut out);
+        // After every job that could name a directory has been read.
+        for period in ["hourly", "daily", "weekly", "monthly"] {
+            run_parts(cx, period, &mut out);
+        }
+        periodic(cx, &mut out);
 
         for dir in ["var/spool/cron/atjobs", "var/spool/at"] {
             if !first_visit(cx, dir, &mut seen) {
@@ -325,53 +325,64 @@ fn busybox_tokens(line: &[u8]) -> Option<(Vec<&[u8]>, &[u8])> {
 
 /// /etc/periodic/{15min,hourly,daily,weekly,monthly}: Alpine's run-parts
 /// directories, which crond runs only because root's packaged crontab says
-/// `run-parts /etc/periodic/<period>` on that schedule. Each script is a
-/// cron entry, on when it is executable, run-parts' rule selects it, and a
-/// loaded crontab line names its directory.
+/// `run-parts /etc/periodic/<period>` on that schedule.
 fn periodic(cx: &mut Ctx, out: &mut Vec<Entry>) {
-    let flavour = super::run_parts_flavour(cx);
     for period in ["15min", "hourly", "daily", "weekly", "monthly"] {
-        let dir = format!("etc/periodic/{period}");
-        let ents = cx.dir(&dir);
-        if ents.is_empty() {
-            continue;
-        }
-        // The directory as a crontab line names it: by its path on the host,
-        // whatever root the scan reads it through.
-        let named = format!("/{dir}");
-        let runner = out.iter().find(|e| {
+        run_parts_scripts(cx, &format!("etc/periodic/{period}"), period, out);
+    }
+}
+
+/// /etc/cron.{hourly,daily,weekly,monthly}. These are scripts run by
+/// run-parts, not crontab lines: there is no command to parse, the script
+/// itself is the target, and the schedule comes from the directory.
+fn run_parts(cx: &mut Ctx, period: &str, out: &mut Vec<Entry>) {
+    run_parts_scripts(cx, &format!("etc/cron.{period}"), period, out);
+}
+
+/// The scripts of one run-parts directory. Each is a cron entry, on when
+/// run-parts would run it and a loaded crontab or anacron job names its
+/// directory: nothing but such a job ever points run-parts at it, so a
+/// directory no job names is scripts nobody runs, however executable.
+fn run_parts_scripts(cx: &mut Ctx, dir: &str, period: &str, out: &mut Vec<Entry>) {
+    let flavour = super::run_parts_flavour(cx);
+    let files = super::run_parts_dir(cx, flavour, Path::new(dir));
+    if files.is_empty() {
+        return;
+    }
+    // The directory as a job names it: by its path on the host, whatever root
+    // the scan reads it through.
+    let named = format!("/{dir}");
+    let runner = out
+        .iter()
+        .find(|e| {
             e.kind == Kind::Cron
                 && e.enabled == Enablement::Enabled
                 && e.command.as_deref().is_some_and(|c| {
                     c.windows(9).any(|w| w == b"run-parts") && c.windows(named.len()).any(|w| w == named.as_bytes())
                 })
-        });
-        let runner = runner.map(|e| e.source.display().to_string());
-        for ent in ents {
-            if ent.is_dir {
-                continue;
-            }
-            let rel = Path::new(&dir).join(&ent.name);
-            let mut e = cx.entry(Kind::Cron, &rel, ent.name.to_string_lossy());
-            name_from_os(&mut e, &ent.name);
-            e.trigger = Trigger::Schedule;
-            e.principal = Some("root".to_string());
-            e.target_path = Some(cx.root.abs(&rel));
-            e.note("schedule", format!("@{period}"));
-            e.enabled = if e.mode & 0o111 != 0 { Enablement::Enabled } else { Enablement::Disabled };
-            if let Some(why) = super::run_parts_skips(cx, flavour, Path::new(&dir), ent.name.as_bytes()) {
-                e.enabled = Enablement::Disabled;
-                e.note("not_run", why);
-            }
-            match &runner {
-                Some(src) => e.note("run_by", format!("a crontab line in {src}")),
-                None => {
-                    e.enabled = Enablement::Disabled;
-                    e.note("not_run", "no loaded crontab line runs run-parts on this directory");
-                }
-            }
-            out.push(e);
+        })
+        .map(|e| e.source.display().to_string());
+    for f in files {
+        let mut e = cx.entry(Kind::Cron, &f.rel, f.name.to_string_lossy());
+        name_from_os(&mut e, &f.name);
+        e.trigger = Trigger::Schedule;
+        e.principal = Some("root".to_string());
+        e.target_path = Some(cx.root.abs(&f.rel));
+        e.note("schedule", format!("@{period}"));
+        e.enabled = Enablement::Enabled;
+        if let Some(why) = f.not_run {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", why);
         }
+        match &runner {
+            Some(src) => e.note("run_by", format!("a crontab line in {src}")),
+            None if e.enabled == Enablement::Enabled => {
+                e.enabled = Enablement::Disabled;
+                e.note("not_run", "no loaded crontab line runs run-parts on this directory");
+            }
+            None => {}
+        }
+        out.push(e);
     }
 }
 
@@ -457,35 +468,6 @@ fn crontab(cx: &mut Ctx, rel: &Path, layout: Layout<'_>, out: &mut Vec<Entry>) {
         }
         if crlf {
             e.note("line_ending", "crlf");
-        }
-        out.push(e);
-    }
-}
-
-/// /etc/cron.{hourly,daily,weekly,monthly}. These are scripts run by
-/// run-parts, not crontab lines: there is no command to parse, the script
-/// itself is the target, and the schedule comes from the directory.
-fn run_parts(cx: &mut Ctx, period: &str, out: &mut Vec<Entry>) {
-    let dir = format!("etc/cron.{period}");
-    let flavour = super::run_parts_flavour(cx);
-    for ent in cx.dir(&dir) {
-        if ent.is_dir {
-            continue;
-        }
-        let rel = Path::new(&dir).join(&ent.name);
-        let mut e = cx.entry(Kind::Cron, &rel, ent.name.to_string_lossy());
-        name_from_os(&mut e, &ent.name);
-        e.trigger = Trigger::Schedule;
-        e.principal = Some("root".to_string());
-        e.target_path = Some(cx.root.abs(&rel));
-        e.note("schedule", format!("@{period}"));
-        // run-parts runs what is executable and skips the rest, which is how
-        // a .dpkg-old copy of a script stops running, and passes over a name
-        // its own rule does not select.
-        e.enabled = if e.mode & 0o111 != 0 { Enablement::Enabled } else { Enablement::Disabled };
-        if let Some(why) = super::run_parts_skips(cx, flavour, Path::new(&dir), ent.name.as_bytes()) {
-            e.enabled = Enablement::Disabled;
-            e.note("not_run", why);
         }
         out.push(e);
     }
@@ -981,6 +963,36 @@ mod tests {
     }
 
     #[test]
+    fn a_run_parts_directory_no_job_names_runs_nothing_and_a_dangling_link_in_one_is_off() {
+        let dir = tree("gate");
+        for period in ["daily", "weekly"] {
+            put(&dir, &format!("etc/cron.{period}/job"), b"#!/bin/sh\n");
+            chmod(&dir, &format!("etc/cron.{period}/job"), 0o755);
+        }
+        std::os::unix::fs::symlink("/nowhere/at/all", dir.join("etc/cron.daily/dangling")).unwrap();
+        // The crontab points run-parts at daily only.
+        put(&dir, "etc/crontab", b"25 6 * * * root run-parts /etc/cron.daily\n");
+        let s = scan(&dir);
+        let of = |period: &str, name: &str| {
+            s.entries.iter().find(|e| e.name == name && e.raw.get("schedule").is_some_and(|p| p == &format!("@{period}"))).unwrap()
+        };
+        assert_eq!(of("daily", "job").enabled, Enablement::Enabled);
+        assert_eq!(of("weekly", "job").enabled, Enablement::Disabled);
+        assert!(of("weekly", "job").raw["not_run"].contains("no loaded crontab line"));
+        let dangling = of("daily", "dangling");
+        assert_eq!((dangling.enabled, dangling.raw["not_run"].as_str()), (Enablement::Disabled, "a link to nothing"));
+        // An anacron job that runs it counts too.
+        put(&dir, "etc/anacrontab", b"7 10 cron.weekly nice run-parts /etc/cron.weekly\n");
+        assert_eq!(scan_named(&dir, "weekly", "job"), Enablement::Enabled);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn scan_named(dir: &Path, period: &str, name: &str) -> Enablement {
+        let s = scan(dir);
+        s.entries.iter().find(|e| e.name == name && e.raw.get("schedule").is_some_and(|p| p == &format!("@{period}"))).unwrap().enabled
+    }
+
+    #[test]
     fn each_cron_reads_from_etc_cron_d_only_the_names_it_was_seen_to() {
         // The daemon says which cron this is; what follows is what each was
         // seen to run when files of these names were dropped in.
@@ -1095,9 +1107,12 @@ mod tests {
             chmod(&dir, f, 0o755);
         }
         let s = scan(&dir);
-        assert_eq!(named(&s, "backup.sh").enabled, Enablement::Enabled);
-        assert_eq!(named(&s, "ok-1_2").enabled, Enablement::Enabled);
-        assert_eq!(named(&s, ".x").raw["not_run"], "run-parts runs only names of letters, digits, _, - and dots after the first character");
+        // Nothing here names the directory (and the fixture is not root's), so
+        // it is the name rule alone that is read from what each says.
+        let says = |n: &str| named(&s, n).raw["not_run"].clone();
+        assert!(!says("backup.sh").contains("names of"), "a dot after the first character is allowed: {}", says("backup.sh"));
+        assert!(!says("ok-1_2").contains("names of"));
+        assert_eq!(says(".x"), "run-parts runs only names of letters, digits, _, - and dots after the first character");
         assert!(s.header.collectors[0].truncated.is_empty(), "reading the binary is not a limited read: {:?}", s.header.collectors[0].truncated);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1274,6 +1289,8 @@ mod tests {
         chmod(&dir, "etc/cron.daily/backup.sh", 0o755);
         put(&dir, "etc/cron.daily/rotate", b"#!/bin/sh\n");
         chmod(&dir, "etc/cron.daily/rotate", 0o755);
+        // The line that points run-parts at the directory, as Debian ships it.
+        put(&dir, "etc/crontab", b"25 6 * * * root cd / && run-parts --report /etc/cron.daily\n");
         let s = scan(&dir);
         assert_eq!(named(&s, "backup.sh").enabled, Enablement::Disabled, "debianutils runs no dotted name");
         assert_eq!(named(&s, "rotate").enabled, Enablement::Enabled);

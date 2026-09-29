@@ -168,6 +168,40 @@ pub(crate) fn run_parts_skips(cx: &mut Ctx, flavour: RunParts, dir: &Path, name:
     }
 }
 
+/// A name in a run-parts directory, and why run-parts would not run it, if it
+/// would not.
+pub(crate) struct RunPartsFile {
+    pub rel: PathBuf,
+    pub name: OsString,
+    pub not_run: Option<&'static str>,
+}
+
+/// Every name in a directory run-parts is pointed at, in the order it runs
+/// them, each judged as run-parts judges it: by the name rule of the run-parts
+/// the host has, then by the file the name leads to. The execute test follows
+/// a link, so a link to nothing, to a directory or to a file that is not
+/// executable runs nothing. Such a name is still reported, off: a script that
+/// was there and is not is evidence.
+pub(crate) fn run_parts_dir(cx: &mut Ctx, flavour: RunParts, dir: &Path) -> Vec<RunPartsFile> {
+    let mut ents = cx.dir(dir);
+    ents.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut out = Vec::new();
+    for ent in ents {
+        if ent.is_dir {
+            continue;
+        }
+        let rel = dir.join(&ent.name);
+        let not_run = run_parts_skips(cx, flavour, dir, ent.name.as_encoded_bytes()).or_else(|| match cx.root.stat_follow(&rel) {
+            Ok(m) if m.is_file && m.mode & 0o111 != 0 => None,
+            Ok(m) if m.is_file => Some("not executable"),
+            Ok(_) => Some("not a regular file"),
+            Err(_) => Some("a link to nothing"),
+        });
+        out.push(RunPartsFile { rel, name: ent.name, not_run });
+    }
+    out
+}
+
 /// The directories ldconfig puts in the loader's cache, read from
 /// /etc/ld.so.conf as ldconfig reads it: `#` starts a comment anywhere, an
 /// `include` line names whitespace-separated patterns relative to the file

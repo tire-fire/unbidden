@@ -61,20 +61,10 @@ fn kernel_hooks(cx: &mut Ctx) -> Vec<Entry> {
     let mut out = Vec::new();
     let flavour = super::run_parts_flavour(cx);
     for dir in KERNEL_RUN_PARTS {
-        let mut ents = cx.dir(dir);
-        ents.sort_by(|a, b| a.name.cmp(&b.name));
-        for ent in ents {
-            let rel = Path::new(dir).join(&ent.name);
-            if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
-                continue;
-            }
-            let mut e = kernel_entry(cx, &rel, dir);
+        for f in super::run_parts_dir(cx, flavour, Path::new(dir)) {
+            let mut e = kernel_entry(cx, &f.rel, dir);
             e.note("run_by", "run-parts");
-            if e.mode & 0o111 == 0 {
-                e.enabled = Enablement::Disabled;
-                e.note("not_run", "not executable");
-            }
-            if let Some(why) = super::run_parts_skips(cx, flavour, Path::new(dir), ent.name.as_bytes()) {
+            if let Some(why) = f.not_run {
                 e.enabled = Enablement::Disabled;
                 e.note("not_run", why);
             }
