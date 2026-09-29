@@ -82,8 +82,55 @@ fn entry(cx: &mut Ctx, rel: &Path, name: String, tool: &str, trigger: Trigger, i
     e
 }
 
+/// mkinitramfs's `maybe_add_conf` rule for conf.d: a name that starts with a
+/// letter or digit, holds only letters, digits, `.`, `_` and `-`, and is not
+/// a `.dpkg-*` leftover.
+fn conf_name(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) && plain_name(name) && !name.contains(".dpkg-")
+}
+
+/// The shell fragments mkinitramfs sources, as root, into its own shell at
+/// every build, and whose variables reach every hook: initramfs.conf, then
+/// conf.d (a name in /etc replacing the same name under /usr/share), then the
+/// packages' conf-hooks.d.
+fn initramfs_tools_conf(cx: &mut Ctx, out: &mut Vec<Entry>, installed: bool) {
+    let mut files: Vec<(PathBuf, String, Option<&'static str>)> = Vec::new();
+    files.push((PathBuf::from("etc/initramfs-tools/initramfs.conf"), "initramfs.conf".into(), None));
+    let etc_names: BTreeSet<String> = sorted_files(cx, Path::new("etc/initramfs-tools/conf.d")).iter().map(|r| file_name(r)).collect();
+    for rel in sorted_files(cx, Path::new("usr/share/initramfs-tools/conf.d")) {
+        let name = file_name(&rel);
+        let why = etc_names.contains(&name).then_some("a file of this name in /etc/initramfs-tools/conf.d is read instead");
+        files.push((rel, format!("conf.d/{name}"), why));
+    }
+    for rel in sorted_files(cx, Path::new("etc/initramfs-tools/conf.d")) {
+        let name = file_name(&rel);
+        files.push((rel, format!("conf.d/{name}"), None));
+    }
+    for rel in sorted_files(cx, Path::new("usr/share/initramfs-tools/conf-hooks.d")) {
+        let name = file_name(&rel);
+        files.push((rel, format!("conf-hooks.d/{name}"), None));
+    }
+    for (rel, label, why) in files {
+        let Ok(meta) = cx.root.stat_follow(&rel) else { continue };
+        if !meta.is_file {
+            continue;
+        }
+        let mut e = entry(cx, &rel, format!("initramfs-tools:conf:{label}"), "mkinitramfs", Trigger::PackageOp, installed);
+        e.note("runs_when", "every initramfs build: sourced as shell, its variables exported to every hook");
+        if label.starts_with("conf.d/") && !conf_name(&file_name(&rel)) {
+            e.enabled = Enablement::Disabled;
+            e.note("not_read", "mkinitramfs sources only names of letters, digits, ., _ and -, not .dpkg-* leftovers");
+        } else if let Some(w) = why {
+            e.enabled = Enablement::Disabled;
+            e.note("not_read", w);
+        }
+        out.push(e);
+    }
+}
+
 fn initramfs_tools(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let installed = cx.root.exists("usr/sbin/mkinitramfs");
+    initramfs_tools_conf(cx, out, installed);
     for base in ["usr/share/initramfs-tools", "etc/initramfs-tools"] {
         for rel in sorted_files(cx, &Path::new(base).join("hooks")) {
             let name = file_name(&rel);
@@ -280,6 +327,33 @@ mod tests {
         let root = Root::at(dir).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Initramfs)];
         crate::scan::run(&root, &Options { deep: false }, &collectors)
+    }
+
+    #[test]
+    fn mkinitramfs_sources_its_configuration_as_root_at_every_build() {
+        let d = std::env::temp_dir().join(format!("unbidden-initramfs-conf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        put(&d, "usr/sbin/mkinitramfs", b"", 0o755);
+        put(&d, "etc/initramfs-tools/initramfs.conf", b"MODULES=most\n", 0o644);
+        put(&d, "etc/initramfs-tools/conf.d/50-local", b"export PATH=/tmp:$PATH\n", 0o644);
+        put(&d, "etc/initramfs-tools/conf.d/50-local.dpkg-old", b"x\n", 0o644);
+        put(&d, "etc/initramfs-tools/conf.d/.hidden", b"x\n", 0o644);
+        put(&d, "usr/share/initramfs-tools/conf.d/50-local", b"# vendor\n", 0o644);
+        put(&d, "usr/share/initramfs-tools/conf.d/60-vendor", b"# vendor\n", 0o644);
+        put(&d, "usr/share/initramfs-tools/conf-hooks.d/zz-pkg", b"# pkg\n", 0o644);
+        let s = scan(&d);
+        let get = |name: &str| s.entries.iter().find(|e| e.name == format!("initramfs-tools:conf:{name}")).unwrap_or_else(|| panic!("no {name}"));
+        assert_eq!(get("initramfs.conf").enabled, Enablement::Enabled);
+        assert_eq!(get("initramfs.conf").raw["run_by"], "mkinitramfs");
+        let local: Vec<_> = s.entries.iter().filter(|e| e.name == "initramfs-tools:conf:conf.d/50-local").collect();
+        assert_eq!(local.len(), 2, "both copies are reported");
+        assert!(local.iter().any(|e| e.enabled == Enablement::Enabled && e.source.starts_with(d.join("etc"))));
+        assert!(local.iter().any(|e| e.enabled == Enablement::Disabled && e.raw["not_read"].contains("/etc/initramfs-tools/conf.d")));
+        assert_eq!(get("conf.d/60-vendor").enabled, Enablement::Enabled);
+        assert_eq!(get("conf-hooks.d/zz-pkg").enabled, Enablement::Enabled);
+        assert_eq!(get("conf.d/50-local.dpkg-old").enabled, Enablement::Disabled);
+        assert_eq!(get("conf.d/.hidden").enabled, Enablement::Disabled);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
