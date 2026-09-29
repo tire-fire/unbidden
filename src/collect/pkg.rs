@@ -1427,29 +1427,7 @@ fn service_file(
 
 /// The `[D-BUS Service]` group of a freedesktop key file.
 fn service_group(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut inside = false;
-    for line in bytes.split(|b| *b == b'\n') {
-        let line = line.trim_ascii();
-        if line.is_empty() || line[0] == b'#' {
-            continue;
-        }
-        if line[0] == b'[' {
-            let group = line.strip_prefix(b"[").and_then(|l| l.strip_suffix(b"]")).unwrap_or(line);
-            inside = lossy(group).eq_ignore_ascii_case("D-BUS Service");
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        let Some(eq) = line.iter().position(|b| *b == b'=') else { continue };
-        let key = lossy(line[..eq].trim_ascii());
-        if key.is_empty() {
-            continue;
-        }
-        out.push((key, line[eq + 1..].trim_ascii().to_vec()));
-    }
-    out
+    crate::text::ini(bytes).into_iter().filter(|l| l.section.eq_ignore_ascii_case("D-BUS Service")).map(|l| (l.key, l.value)).collect()
 }
 
 /// Bus name to the policy files that mention it. Read as bytes and scanned for
@@ -1536,30 +1514,12 @@ fn set_command(e: &mut Entry, bytes: &[u8]) {
 }
 
 
+/// The value of `key` under `[section]`, or failing that the first one of that
+/// name anywhere; both compared without regard to case.
 fn ini_lookup(bytes: &[u8], section: &str, key: &str) -> Option<String> {
-    let mut current = String::new();
-    let mut fallback = None;
-    for line in bytes.split(|b| *b == b'\n') {
-        let line = line.trim_ascii();
-        if line.is_empty() || line[0] == b'#' || line[0] == b';' {
-            continue;
-        }
-        if line[0] == b'[' {
-            let g = line.strip_prefix(b"[").and_then(|l| l.strip_suffix(b"]")).unwrap_or(line);
-            current = lossy(g);
-            continue;
-        }
-        let Some(eq) = line.iter().position(|b| *b == b'=') else { continue };
-        if !lossy(line[..eq].trim_ascii()).eq_ignore_ascii_case(key) {
-            continue;
-        }
-        let value = lossy(line[eq + 1..].trim_ascii());
-        if current.eq_ignore_ascii_case(section) {
-            return Some(value);
-        }
-        fallback.get_or_insert(value);
-    }
-    fallback
+    let lines: Vec<_> = crate::text::ini(bytes).into_iter().filter(|l| l.key.eq_ignore_ascii_case(key)).collect();
+    let line = lines.iter().find(|l| l.section.eq_ignore_ascii_case(section)).or(lines.first())?;
+    Some(lossy(&line.value))
 }
 
 fn as_bool(v: &str) -> Option<bool> {

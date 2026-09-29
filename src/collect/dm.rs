@@ -123,30 +123,6 @@ fn gdm(cx: &mut Ctx, out: &mut Vec<Entry>, active: Option<&str>) {
 
 // ---------------------------------------------------------------- ini ------
 
-/// `[section]` and `key=value` lines, `#` comments, both sides trimmed:
-/// what GKeyFile and SDDM's reader agree on.
-fn ini(bytes: &[u8]) -> Vec<(String, String, String)> {
-    let mut out = Vec::new();
-    let mut section = String::new();
-    for line in bytes.split(|b| *b == b'\n') {
-        let line = line.trim_ascii();
-        if line.is_empty() || line[0] == b'#' || line[0] == b';' {
-            continue;
-        }
-        if line[0] == b'[' {
-            if let Some(end) = line.iter().position(|b| *b == b']') {
-                section = String::from_utf8_lossy(&line[1..end]).into_owned();
-            }
-            continue;
-        }
-        let Some(eq) = line.iter().position(|b| *b == b'=') else { continue };
-        let key = String::from_utf8_lossy(line[..eq].trim_ascii()).into_owned();
-        let value = String::from_utf8_lossy(line[eq + 1..].trim_ascii()).into_owned();
-        out.push((section.clone(), key, value));
-    }
-    out
-}
-
 /// The files of a `.conf` directory, sorted.
 fn conf_dir(cx: &mut Ctx, dir: &str) -> Vec<PathBuf> {
     let names: Vec<_> =
@@ -160,7 +136,8 @@ fn merged(cx: &mut Ctx, files: &[PathBuf], wanted: impl Fn(&str) -> bool) -> BTr
     let mut out = BTreeMap::new();
     for f in files {
         let Some(bytes) = cx.read_capped(f, CAP) else { continue };
-        for (section, key, value) in ini(&bytes) {
+        for crate::text::IniLine { section, key, value, .. } in crate::text::ini(&bytes) {
+            let value = crate::text::lossy(&value);
             if wanted(&section) {
                 out.insert((section, key), (value, f.clone()));
             }

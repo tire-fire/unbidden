@@ -228,20 +228,22 @@ fn pkla(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
-/// `[section]` headers and the `key=value` lines under each. `#` and `;`
-/// start comments; lines before the first section belong to none and are
-/// dropped.
+/// The `[section]` blocks of a file and the `key=value` lines under each, in
+/// order. Two headers of one name are two blocks.
 fn ini(bytes: &[u8]) -> Vec<(String, Vec<(String, String)>)> {
     let mut out: Vec<(String, Vec<(String, String)>)> = Vec::new();
-    for raw in bytes.split(|b| *b == b'\n') {
-        let line = raw.trim_ascii();
-        if line.is_empty() || line[0] == b'#' || line[0] == b';' {
+    let mut block = 0;
+    for line in crate::text::ini(bytes) {
+        // Lines before the first header belong to no block and are dropped.
+        if line.block == 0 {
             continue;
         }
-        if line[0] == b'[' && line.ends_with(b"]") {
-            out.push((lossy(&line[1..line.len() - 1]), Vec::new()));
-        } else if let (Some((_, keys)), Some(eq)) = (out.last_mut(), line.iter().position(|b| *b == b'=')) {
-            keys.push((lossy(line[..eq].trim_ascii()), lossy(line[eq + 1..].trim_ascii())));
+        if line.block != block {
+            block = line.block;
+            out.push((line.section.clone(), Vec::new()));
+        }
+        if let Some((_, keys)) = out.last_mut() {
+            keys.push((line.key, lossy(&line.value)));
         }
     }
     out

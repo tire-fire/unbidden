@@ -403,28 +403,7 @@ fn read_exec(e: &mut Entry, exec: &[u8], root: &crate::root::Root) {
 
 /// The key/value lines of the `[Desktop Entry]` group, values undecoded.
 fn desktop_entry_group(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
-    let mut out = Vec::new();
-    let mut inside = false;
-    for line in bytes.split(|b| *b == b'\n') {
-        let line = line.trim_ascii();
-        if line.is_empty() || line[0] == b'#' {
-            continue;
-        }
-        if line[0] == b'[' {
-            inside = line == b"[Desktop Entry]".as_slice();
-            continue;
-        }
-        if !inside {
-            continue;
-        }
-        let Some(eq) = line.iter().position(|b| *b == b'=') else { continue };
-        let key = lossy(line[..eq].trim_ascii());
-        if key.is_empty() {
-            continue;
-        }
-        out.push((key, line[eq + 1..].trim_ascii().to_vec()));
-    }
-    out
+    crate::text::ini(bytes).into_iter().filter(|l| l.section == "Desktop Entry").map(|l| (l.key, l.value)).collect()
 }
 
 /// `Name[de]` splits into `Name` and `de`; everything else keeps its name.

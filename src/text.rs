@@ -143,6 +143,46 @@ pub fn base64_encode_unpadded(b: &[u8]) -> String {
     s
 }
 
+/// One `key=value` line of an INI-style file and where it sits.
+#[derive(Debug, PartialEq)]
+pub struct IniLine {
+    /// Which header it is under, counted from 1; lines before the first header
+    /// are block 0. Two headers of one name are two blocks.
+    pub block: usize,
+    pub section: String,
+    pub key: String,
+    pub value: Vec<u8>,
+}
+
+/// `[section]` headers and `key=value` lines. A line starting `#` or `;` is a
+/// comment; both sides of the `=` are trimmed; a line with no `=` or an empty
+/// key is dropped; a `[` line with no `]` is no header. What GKeyFile, SDDM's
+/// reader and dnf's agree on; a file with its own rules (continuations,
+/// interpolation) reads itself.
+pub fn ini(bytes: &[u8]) -> Vec<IniLine> {
+    let mut out = Vec::new();
+    let (mut block, mut section) = (0, String::new());
+    for line in bytes.split(|b| *b == b'\n') {
+        let line = line.trim_ascii();
+        if line.is_empty() || line[0] == b'#' || line[0] == b';' {
+            continue;
+        }
+        if line[0] == b'[' {
+            if let Some(end) = line.iter().position(|b| *b == b']') {
+                block += 1;
+                section = lossy(&line[1..end]);
+            }
+            continue;
+        }
+        let Some(eq) = line.iter().position(|b| *b == b'=') else { continue };
+        let key = lossy(line[..eq].trim_ascii());
+        if !key.is_empty() {
+            out.push(IniLine { block, section: section.clone(), key, value: line[eq + 1..].trim_ascii().to_vec() });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +224,22 @@ mod tests {
         assert_eq!(unquote(b"'x'"), b"x");
         assert_eq!(unquote(b"\"mixed'"), b"\"mixed'");
         assert_eq!(unquote(b"\""), b"\"");
+    }
+
+    #[test]
+    fn an_ini_file_reads_sections_blocks_and_keys() {
+        let lines = ini(b"stray = 0\n# c\n; c\n[main]\nenabled = 1\n  Name =  x y \n[broken\nignored\n[main]\nenabled=2\n=novalue\n");
+        let got: Vec<(usize, &str, &str, &[u8])> = lines.iter().map(|l| (l.block, l.section.as_str(), l.key.as_str(), l.value.as_slice())).collect();
+        assert_eq!(
+            got,
+            [
+                (0, "", "stray", &b"0"[..]),
+                (1, "main", "enabled", b"1"),
+                (1, "main", "Name", b"x y"),
+                (2, "main", "enabled", b"2"),
+            ],
+            "the unterminated header is no header and the empty key is dropped"
+        );
     }
 
     #[test]
