@@ -626,19 +626,13 @@ fn loaded_entries(cx: &mut Ctx, loaded: &Loaded) -> Vec<Entry> {
 
 /// /etc/modules and modules-load.d: a module name per line, loaded at boot.
 fn module_load_lists(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
-    let mut files: Vec<PathBuf> = vec![PathBuf::from("etc/modules")];
-    for (_, dir) in distinct_dirs(cx, MODULES_LOAD_DIRS) {
-        for ent in cx.dir(dir) {
-            if ent.is_dir || !ent.name.as_bytes().ends_with(b".conf") {
-                continue;
-            }
-            files.push(Path::new(dir).join(&ent.name));
-        }
-    }
+    let mut files: Vec<(PathBuf, Option<PathBuf>)> = vec![(PathBuf::from("etc/modules"), None)];
+    files.extend(super::replaceable(cx, MODULES_LOAD_DIRS, ".conf"));
 
     let mut out = Vec::new();
-    for rel in files {
+    for (rel, shadowed_by) in files {
         let Some(bytes) = cx.read(&rel) else { continue };
+        let first = out.len();
         let mut used: BTreeMap<String, usize> = BTreeMap::new();
         for line in logical_lines(&bytes, Join::Never) {
             // /etc/modules permits module parameters after the name.
@@ -655,27 +649,31 @@ fn module_load_lists(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
             set_loaded_state(&mut e, loaded, module);
             out.push(e);
         }
+        mark_shadowed(cx, &mut out[first..], shadowed_by);
     }
     out
+}
+
+/// A file a same-named one in an earlier directory replaces is not read, so
+/// nothing in it loads or runs. It is still reported, off.
+fn mark_shadowed(cx: &Ctx, entries: &mut [Entry], by: Option<PathBuf>) {
+    let Some(by) = by else { return };
+    for e in entries {
+        e.enabled = Enablement::Disabled;
+        e.note("shadowed_by", cx.root.abs(&by).display().to_string());
+    }
 }
 
 /// modprobe.d. `install <module> <command>` runs a shell command in place of
 /// loading the module, which makes it an execution mechanism rather than a
 /// note about one; the other directives are recorded as configuration.
 fn modprobe_configs(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
-    let mut files: Vec<PathBuf> = Vec::new();
-    for (_, dir) in distinct_dirs(cx, MODPROBE_DIRS) {
-        for ent in cx.dir(dir) {
-            if ent.is_dir || !ent.name.as_bytes().ends_with(b".conf") {
-                continue;
-            }
-            files.push(Path::new(dir).join(&ent.name));
-        }
-    }
+    let files = super::replaceable(cx, MODPROBE_DIRS, ".conf");
 
     let mut out = Vec::new();
-    for rel in files {
+    for (rel, shadowed_by) in files {
         let Some(bytes) = cx.read(&rel) else { continue };
+        let first = out.len();
         let mut used: BTreeMap<String, usize> = BTreeMap::new();
         for line in logical_lines(&bytes, Join::Kmod) {
             // A `#` inside a directive is kept rather than stripped: an install
@@ -728,6 +726,7 @@ fn modprobe_configs(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
             set_loaded_state(&mut e, loaded, module);
             out.push(e);
         }
+        mark_shadowed(cx, &mut out[first..], shadowed_by);
     }
     out
 }
@@ -1121,6 +1120,26 @@ mod tests {
             of_kind(&s, Kind::KernelModule).iter().map(|e| e.source.strip_prefix(&dir).unwrap().display().to_string()).collect();
         sources.sort();
         assert_eq!(sources, ["run/modprobe.d/a.conf", "usr/local/lib/modprobe.d/b.conf", "usr/local/lib/modules-load.d/c.conf"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_same_named_file_in_a_later_directory_is_not_read() {
+        let dir = tree("shadow");
+        put(&dir, "etc/modprobe.d/10-x.conf", b"install a /bin/local\n");
+        put(&dir, "usr/lib/modprobe.d/10-x.conf", b"install a /bin/vendor\n");
+        put(&dir, "usr/lib/modprobe.d/20-only.conf", b"install b /bin/only\n");
+        put(&dir, "etc/modules-load.d/net.conf", b"first\n");
+        put(&dir, "usr/lib/modules-load.d/net.conf", b"second\n");
+        let s = scan(&dir);
+        let by = |name: &str, under: &str| one(&s, |e| e.name == name && e.source.starts_with(dir.join(under)));
+        assert!(!by("install:a", "etc").raw.contains_key("shadowed_by"));
+        let vendor = by("install:a", "usr/lib");
+        assert_eq!(vendor.enabled, Enablement::Disabled);
+        assert_eq!(vendor.raw["shadowed_by"], dir.join("etc/modprobe.d/10-x.conf").display().to_string());
+        assert!(!by("install:b", "usr/lib").raw.contains_key("shadowed_by"), "nothing replaces a file that has no namesake");
+        assert_eq!(by("second", "usr/lib").enabled, Enablement::Disabled);
+        assert!(!by("first", "etc").raw.contains_key("shadowed_by"));
         fs::remove_dir_all(&dir).unwrap();
     }
 
