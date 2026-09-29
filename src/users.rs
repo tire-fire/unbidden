@@ -10,6 +10,15 @@ use std::path::{Path, PathBuf};
 
 use crate::root::{READ_CAP, Root};
 
+/// The accounts with one for each home directory, the first to name it. Two
+/// accounts can share a home (root and a second uid 0, a service account
+/// pointed at another's), and reading its files once per account would report
+/// each of them twice.
+pub fn one_per_home(users: &[User]) -> Vec<&User> {
+    let mut seen = std::collections::BTreeSet::new();
+    users.iter().filter(|u| seen.insert(&u.home)).collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct User {
     pub name: String,

@@ -617,11 +617,8 @@ fn extensions(cx: &mut Ctx) -> Vec<Entry> {
     let users = cx.users;
 
     let mut stacks: Vec<(String, Stack)> = Vec::new();
-    let mut homes: BTreeSet<PathBuf> = BTreeSet::new();
-    for u in users {
-        if homes.insert(u.home.clone()) {
-            stacks.push((u.name.clone(), dconf_stack(cx, u)));
-        }
+    for u in crate::users::one_per_home(users) {
+        stacks.push((u.name.clone(), dconf_stack(cx, u)));
     }
 
     let mut out = Vec::new();

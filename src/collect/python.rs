@@ -66,11 +66,7 @@ impl Collector for Python {
             }
         }
         let users = cx.users;
-        let mut homes = BTreeSet::new();
-        for u in users {
-            if !homes.insert(u.home.clone()) {
-                continue;
-            }
+        for u in crate::users::one_per_home(users) {
             for v in &versions {
                 let dir = u.in_home(&format!(".local/lib/{v}/site-packages"));
                 if cx.first_visit(&dir, &mut seen).is_some() {

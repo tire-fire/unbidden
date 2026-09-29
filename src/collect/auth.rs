@@ -915,11 +915,7 @@ fn ssh(cx: &mut Ctx, out: &mut Vec<Entry>) {
     login_script(cx, out, Path::new("etc/ssh/sshrc"), "sshrc", None);
 
     let users = cx.users;
-    let mut homes: BTreeSet<PathBuf> = BTreeSet::new();
-    for u in users {
-        if !homes.insert(u.home.clone()) {
-            continue;
-        }
+    for u in crate::users::one_per_home(users) {
         // The files AuthorizedKeysFile names for this account. The default
         // files are reported even where it names others, since a key left
         // in one is evidence, but as not read.
@@ -2369,12 +2365,8 @@ fn ssh_client(cx: &mut Ctx, out: &mut Vec<Entry>) {
     ssh_client_file(cx, &mut sys, system, None, false, &[], 0);
 
     let users = cx.users;
-    let mut homes: BTreeSet<PathBuf> = BTreeSet::new();
     let mut chains: Vec<(&crate::users::User, SshChain)> = Vec::new();
-    for u in users {
-        if !homes.insert(u.home.clone()) {
-            continue;
-        }
+    for u in crate::users::one_per_home(users) {
         let rel = u.in_home(".ssh/config");
         if !cx.root.exists(&rel) {
             continue;
