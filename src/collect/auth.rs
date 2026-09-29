@@ -6,7 +6,7 @@
 //! a rule carrying invalid UTF-8 survives as evidence rather than becoming
 //! replacement characters.
 
-use crate::text::{lossy, short_hash};
+use crate::text::{Padding, base64_decode, base64_encode_unpadded, lossy, short_hash};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -829,54 +829,14 @@ fn parse_options(s: &[u8]) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
     out
 }
 
-fn b64_decode(s: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(s.len() / 4 * 3);
-    let mut acc: u32 = 0;
-    let mut bits = 0;
-    for &c in s {
-        if c == b'=' {
-            break;
-        }
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        } as u32;
-        acc = (acc << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
-}
-
-fn b64_encode(b: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::with_capacity(b.len().div_ceil(3) * 4);
-    for c in b.chunks(3) {
-        let n = (c[0] as u32) << 16
-            | (*c.get(1).unwrap_or(&0) as u32) << 8
-            | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..c.len() + 1 {
-            s.push(T[(n >> (18 - 6 * i) & 63) as usize] as char);
-        }
-    }
-    s
-}
-
 /// The identity of a key is the key, never its position in the file. This is
 /// the same value `ssh-keygen -lf` prints, so an operator can match it against
 /// a key inventory directly.
 fn fingerprint(blob: &[u8]) -> (String, bool) {
-    match b64_decode(blob) {
+    match base64_decode(blob, Padding::Optional) {
         Some(raw) if !raw.is_empty() => {
             use sha2::{Digest, Sha256};
-            (format!("SHA256:{}", b64_encode(&Sha256::digest(&raw))), true)
+            (format!("SHA256:{}", base64_encode_unpadded(&Sha256::digest(&raw))), true)
         }
         _ => (format!("key:{}", short_hash(blob)), false),
     }
@@ -2917,11 +2877,6 @@ mod tests {
     fn fingerprints_match_ssh_keygen() {
         // The empty input's SHA-256, the one fingerprint that is easy to check
         // by hand, plus a real ssh-ed25519 blob.
-        assert_eq!(b64_encode(&[]), "");
-        assert_eq!(b64_encode(b"a"), "YQ");
-        assert_eq!(b64_encode(b"abc"), "YWJj");
-        assert_eq!(b64_decode(b"YWJj").unwrap(), b"abc");
-        assert!(b64_decode(b"not base64!").is_none());
 
         let blob = b"AAAAC3NzaC1lZDI1NTE5AAAAIJkBTGfOTNSCBkMmNDIrgX2VXdOdCTr1vAHdGJ3OiRPs";
         let (fp, ok) = fingerprint(blob);

@@ -204,7 +204,7 @@ fn digest(value: &[u8]) -> Option<(Alg, String)> {
     }
     let [encoding, alg, rest @ ..] = value else { return None };
     let decode = |chunk: &[u8]| match encoding {
-        b'Q' => base64(chunk),
+        b'Q' => crate::text::base64_decode(chunk, crate::text::Padding::Required),
         b'X' => unhex(chunk),
         _ => None,
     };
@@ -247,34 +247,6 @@ fn unhex(text: &[u8]) -> Option<Vec<u8>> {
     }
     let nibble = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
     text.chunks(2).map(|pair| Some(nibble(pair[0])? << 4 | nibble(pair[1])?)).collect()
-}
-
-/// Standard-alphabet base64 with `=` padding, refusing anything else, as
-/// apk's own table does.
-fn base64(text: &[u8]) -> Option<Vec<u8>> {
-    let value = |b: u8| match b {
-        b'A'..=b'Z' => Some(b - b'A'),
-        b'a'..=b'z' => Some(b - b'a' + 26),
-        b'0'..=b'9' => Some(b - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
-    };
-    let body = text.iter().rev().skip_while(|b| **b == b'=').count();
-    let padding = text.len() - body;
-    if text.len() % 4 != 0 || padding > 2 {
-        return None;
-    }
-    let mut out = Vec::with_capacity(text.len() / 4 * 3);
-    for quad in text[..body].chunks(4) {
-        let mut acc: u32 = 0;
-        for (i, b) in quad.iter().enumerate() {
-            acc |= u32::from(value(*b)?) << (18 - 6 * i);
-        }
-        let bytes = acc.to_be_bytes();
-        out.extend_from_slice(&bytes[1..quad.len()]);
-    }
-    Some(out)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -863,11 +835,6 @@ pub(crate) mod tests {
 
     #[test]
     fn the_digest_decoder_matches_apk() {
-        assert_eq!(base64(b"AAAA"), Some(vec![0, 0, 0]));
-        assert_eq!(base64(b"AQ=="), Some(vec![1]));
-        assert_eq!(base64(b"AQI="), Some(vec![1, 2]));
-        assert_eq!(base64(b"AQ="), None, "length not a multiple of four");
-        assert_eq!(base64(b"A?=="), None);
         assert_eq!(unhex(b"0aFF"), Some(vec![10, 255]));
         assert_eq!(unhex(b"0a0"), None);
         assert_eq!(digest(b"Q1"), None);
