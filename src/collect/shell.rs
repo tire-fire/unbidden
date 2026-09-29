@@ -520,21 +520,48 @@ fn preload(cx: &mut Ctx, out: &mut Vec<Entry>) {
 }
 
 /// The libraries `/etc/ld.so.preload` names, each with the line that named it,
-/// as glibc's loader reads the file (measured on 2.35, 2.41 and Fedora's):
-/// names are separated by blanks, tabs, colons and newlines and by nothing
-/// else, so a carriage return or a form feed is part of a name; a `#` starts a
-/// comment even in the middle of a word; a NUL ends what is read.
+/// as glibc's loader reads the file. Names are separated by blanks, tabs,
+/// colons and newlines and by nothing else, so a carriage return or a form
+/// feed is part of a name, and a NUL ends what is read.
+///
+/// Comments are a port of the loader's own blanking pass, faults included:
+/// the search for the next `#` restarts at the top of the file with the
+/// length left over from the last comment, so a comment past the first one
+/// often survives and its words are loaded as names (a `#` alone, a word
+/// after it). The port is checked against glibc 2.41 on random files; the
+/// vectors in the test below were measured there.
 fn preload_names(bytes: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let bytes = bytes.split(|b| *b == 0).next().unwrap_or_default();
-    let mut libs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    let mut listed = BTreeSet::new();
-    for line in bytes.split(|b| *b == b'\n') {
-        let body = line.split(|b| *b == b'#').next().unwrap_or_default();
-        for lib in body.split(|b| matches!(b, b' ' | b'\t' | b':')) {
-            if !lib.is_empty() && listed.insert(lib.to_vec()) {
-                libs.push((lib.to_vec(), line.to_vec()));
+    let mut buf = bytes.to_vec();
+    let mut rest = buf.len();
+    while rest > 0 {
+        let Some(found) = buf[..rest].iter().position(|b| *b == b'#') else { break };
+        rest -= found;
+        let mut at = found;
+        loop {
+            buf[at] = b' ';
+            rest -= 1;
+            if rest == 0 {
+                break;
+            }
+            at += 1;
+            if buf[at] == b'\n' {
+                break;
             }
         }
+    }
+    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+    let mut libs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut listed = BTreeSet::new();
+    let mut start = 0;
+    while start <= end {
+        let stop = buf[start..end].iter().position(|b| matches!(b, b' ' | b'\t' | b':' | b'\n')).map_or(end, |n| start + n);
+        let name = &buf[start..stop];
+        if !name.is_empty() && listed.insert(name.to_vec()) {
+            let from = bytes[..start].iter().rposition(|b| *b == b'\n').map_or(0, |n| n + 1);
+            let to = bytes[start..].iter().position(|b| *b == b'\n').map_or(bytes.len(), |n| start + n);
+            libs.push((name.to_vec(), bytes[from..to].to_vec()));
+        }
+        start = stop + 1;
     }
     libs
 }
@@ -1245,10 +1272,29 @@ mod tests {
     }
 
     #[test]
-    fn preload_names_are_split_the_way_glibc_splits_them() {
-        let names: Vec<Vec<u8>> = preload_names(b"/a.so  /b.so # c /d.so\n/e.so:/f.so\n/g#h.so\n/i.so\r\n\0/never.so\n").into_iter().map(|(n, _)| n).collect();
-        let want: [&[u8]; 6] = [b"/a.so", b"/b.so", b"/e.so", b"/f.so", b"/g", b"/i.so\r"];
-        assert_eq!(names, want);
+    fn preload_names_are_read_the_way_glibc_reads_them() {
+        // Each row was measured on glibc 2.41: the file, then the names the
+        // loader tried, in order.
+        let vectors: [(&[u8], &[&[u8]]); 9] = [
+            (b"/e#f::x\n/e#f/d/b", &[b"/e", b"/e#f/d/b"]),
+            (b"/a\n\n # /e#f/e#f/a\n#", &[b"/a", b"#"]),
+            (b"#\n#/e#f/d # /b /a", &[b"a"]),
+            (b"\t/a\nx/d\n\n#/a\t/d/e#f", &[b"/a", b"x/d"]),
+            (b"#/b\n# \n#\n#\t\n\tx/d#", &[b"#", b"x/d#"]),
+            (b"/c \t\n#/e#fx\n# /b:x", &[b"/c", b"#", b"/b", b"x"]),
+            (b"/A.so # c1\n/B.so # c2\n/C.so # c3\n", &[b"#", b"/A.so", b"/B.so", b"/C.so", b"c3"]),
+            (b"/a.so\r\n/b.so\n", &[b"/a.so\r", b"/b.so"]),
+            (b"/a.so\0/never.so\n", &[b"/a.so"]),
+        ];
+        for (file, want) in vectors {
+            let mut got: Vec<Vec<u8>> = preload_names(file).into_iter().map(|(n, _)| n).collect();
+            let mut want: Vec<Vec<u8>> = want.iter().map(|w| w.to_vec()).collect();
+            // The loader prints each name once per process and the order it
+            // tried them in is not what was recorded for the rows above.
+            got.sort();
+            want.sort();
+            assert_eq!(got, want, "{:?}", String::from_utf8_lossy(file));
+        }
     }
 
     #[test]

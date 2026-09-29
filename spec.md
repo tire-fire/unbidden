@@ -180,7 +180,7 @@ NSS modules
 udev
 /etc/udev/rules.d/*, /run/udev/rules.d/*, /usr/local/lib/udev/rules.d/*, /lib/udev/rules.d/* — rules carrying RUN+=
 ld.so preload
-/etc/ld.so.preload, read as glibc's loader reads it (names separated by blanks, tabs, colons and newlines only, a # starting a comment anywhere, a NUL ending the file), one entry per library, and, where the loader is musl's alone, which ignores the file, disabled and visible; and LD_PRELOAD assignments found in any collector's environment notes
+/etc/ld.so.preload, read as glibc's loader reads it (names separated by blanks, tabs, colons and newlines only, comments blanked by the loader's own pass, whose fault lets a later comment survive as names, a NUL ending the file), one entry per library, and, where the loader is musl's alone, which ignores the file, disabled and visible; and LD_PRELOAD assignments found in any collector's environment notes
 kernel callouts
 Programs the kernel itself runs as root. kernel.core_pattern when it pipes (|), kernel.modprobe and kernel.hotplug, from the sysctl.d directories systemd-sysctl reads (/etc, /run, /usr/local/lib, /usr/lib, a same-named file in an earlier one replacing the later) and /etc/sysctl.conf, and on a live root the values the kernel holds now, since one written into /proc runs until reboot whatever the files say. binfmt_misc handlers from the same four binfmt.d directories and, live, from /proc/sys/fs/binfmt_misc, noting flag C, which hands the interpreter a setuid file's credentials. request-key.conf and request-key.d, whose program runs when the kernel needs a key. A live value's entry is about the program it names and takes that program's verdict, as a loaded module takes its .ko's
 library search directories
