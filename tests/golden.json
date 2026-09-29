@@ -33,9 +33,11 @@
     },
     {
       "collector": "systemd",
-      "command": null,
+      "command": "/opt/pre.sh",
+      "command_utf8": true,
       "enabled": "not-applicable",
       "flags": [
+        "target-missing",
         "unpackaged"
       ],
       "id": "392265a32575fb234a506c4fa44e86360f2682640ab4ab3a9cd80ccf9ad9cbea",
@@ -51,13 +53,16 @@
       "raw": {
         "dropin_for": "ssh.service",
         "exec.ExecStartPre": "/opt/pre.sh",
+        "exec_command_from": "ExecStartPre",
         "scope": "system",
-        "search_path_rank": "4"
+        "search_path_rank": "4",
+        "target_provenance": "unpackaged"
       },
       "source": "<ROOT>/etc/systemd/system/ssh.service.d/override.conf",
       "source_utf8": true,
-      "target_path": null,
-      "target_sha256": "81ddf75e8fee1ab69469ccb82740749ff77a882d6bc4aa52f3ac78a0564094fe",
+      "target_path": "<ROOT>/opt/pre.sh",
+      "target_path_utf8": true,
+      "target_sha256": null,
       "trigger": "boot"
     },
     {

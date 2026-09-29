@@ -144,8 +144,8 @@ const USER_PRESET_PATHS: [&str; 5] = [
 
 const UNIT_SUFFIXES: [&str; 4] = [".service", ".timer", ".socket", ".path"];
 
-const EXEC_KEYS: [&str; 6] =
-    ["ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop", "ExecStopPost", "ExecReload"];
+const EXEC_KEYS: [&str; 7] =
+    ["ExecStart", "ExecStartPre", "ExecStartPost", "ExecCondition", "ExecStop", "ExecStopPost", "ExecReload"];
 
 const TIMER_KEYS: [&str; 4] = ["OnCalendar", "OnBootSec", "OnUnitActiveSec", "Persistent"];
 
@@ -1156,9 +1156,19 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
             note_bytes(e, &indexed(&format!("exec.{key}"), i), v);
         }
     }
-    if let Some(first) = f.exec.get("ExecStart").and_then(|v| v.first()) {
+    // The command an entry stands for is its ExecStart, and where there is
+    // none, the first of the others that runs: a drop-in that adds only an
+    // ExecStartPre= is the commonest way to add a command to a vendor unit,
+    // and it has to carry a target like any other. The rest of a unit's Exec
+    // lines are on the entry as notes; each entry has one command, and a
+    // unit that runs several is already reported for the file it is in.
+    let primary = EXEC_KEYS.iter().find_map(|k| f.exec.get(k).and_then(|v| v.first()).map(|v| (*k, v)));
+    if let Some((key, first)) = primary {
         if std::str::from_utf8(first).is_err() {
             e.flag(Flag::EncodingAnomaly);
+        }
+        if key != "ExecStart" {
+            e.note("exec_command_from", key);
         }
         e.target_path = exec_target(first);
         e.command = Some(first.clone());
@@ -1890,6 +1900,8 @@ mod tests {
         assert_eq!(e.kind, Kind::SystemdUnit);
         assert_eq!(e.raw["dropin_for"], "cups.service");
         assert_eq!(e.raw["exec.ExecStartPre"], "/opt/pwn/stage2");
+        assert_eq!(e.target_path, Some(PathBuf::from("/opt/pwn/stage2")), "a hook added by a drop-in has a target to check");
+        assert_eq!(e.raw["exec_command_from"], "ExecStartPre");
         assert_eq!(e.raw["env.LD_PRELOAD"], "/dev/shm/x.so");
         assert_eq!(e.raw["env.TZ"], "UTC");
         assert_eq!(e.enabled, Enablement::NotApplicable);
