@@ -481,7 +481,13 @@ impl Walk {
             .ok()
             .filter(|m| m.is_symlink)
             .and_then(|_| cx.root.read_link(&f.rel).ok());
-        let masked = target.as_deref() == Some(Path::new("/dev/null"));
+        // systemd masks a unit with a link to /dev/null and, just the same,
+        // with an empty file (`null_or_empty_path`).
+        let empty = cx.root.stat_follow(&f.rel).is_ok_and(|m| m.is_file && m.size == 0);
+        let masked = empty || target.as_deref() == Some(Path::new("/dev/null"));
+        if empty {
+            e.note("masked_by", "an empty file");
+        }
 
         let facts = if masked { Facts::default() } else { parse_into_facts(cx, &f.rel) };
         fill(cx, &mut e, &facts, &f.scope);
@@ -1723,6 +1729,18 @@ mod tests {
         let e = one(&s, "telemetry.service");
         assert_eq!(e.enabled, Enablement::Masked);
         assert_eq!(e.raw["symlink_target"], "/dev/null");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_empty_unit_file_masks_like_a_link_to_dev_null() {
+        let dir = tree("masked-empty");
+        write(&dir, "usr/lib/systemd/system/telemetry.service", b"[Service]\nExecStart=/usr/bin/telemetry\n[Install]\nWantedBy=multi-user.target\n");
+        write(&dir, "etc/systemd/system/telemetry.service", b"");
+        let s = scan(&dir);
+        let by_path: BTreeMap<bool, &Entry> = named(&s, "telemetry.service").into_iter().map(|e| (e.source.starts_with(dir.join("etc")), e)).collect();
+        assert_eq!(by_path[&true].enabled, Enablement::Masked);
+        assert_eq!(by_path[&true].raw["masked_by"], "an empty file");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
