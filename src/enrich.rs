@@ -74,7 +74,7 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
         cross_reference_suid(&mut scan.entries);
         gate_on_super_server(&mut scan.entries);
         vouch_for_sources(&mut scan.entries);
-        vouch_for_templates(&mut scan.entries, &answers);
+        vouch_for_templates(root, &mut scan.entries, &answers);
     });
 
     if let Some(preloads) = stage(&mut failed, "preloads", || preload_entries(root, &scan.entries)) {
@@ -1191,11 +1191,13 @@ fn vouch_for_sources(entries: &mut [Entry]) {
 /// postinst copies /usr/share/sysvinit/inittab to /etc/inittab, so dpkg owns
 /// the template and never the file — is what the package wrote, however the
 /// file it sits in came to be. Noted, for the default view to judge by.
-fn vouch_for_templates(entries: &mut [Entry], answers: &provenance::Answers) {
+fn vouch_for_templates(root: &Root, entries: &mut [Entry], answers: &provenance::Answers) {
     for e in entries.iter_mut() {
         let Some(template) = e.raw.get("matches_template") else { continue };
-        let rel = Path::new(template).strip_prefix("/").unwrap_or(Path::new(template));
-        if answers.get(rel).is_some_and(Provenance::is_verified) {
+        // Noted in the scan root's coordinates, which on an offline root carry
+        // the mount prefix the answers are keyed without.
+        let rel = root.rel(Path::new(template));
+        if answers.get(&rel).is_some_and(Provenance::is_verified) {
             e.note("vouched", "a line of the packaged template, unchanged");
         }
     }
@@ -2196,10 +2198,15 @@ mod tests {
 
     #[test]
     fn an_inittab_line_is_vouched_for_by_a_verified_template() {
-        let line = |name: &str, template: bool| {
-            let mut e = Entry::new(Kind::Inittab, "/etc/inittab", name);
-            if template {
-                e.note("matches_template", "/usr/share/sysvinit/inittab");
+        // An offline root, whose paths carry the mount prefix.
+        let dir = std::env::temp_dir().join(format!("unbidden-vouch-template-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        let template = root.abs("usr/share/sysvinit/inittab").display().to_string();
+        let line = |name: &str, has_template: bool| {
+            let mut e = Entry::new(Kind::Inittab, root.abs("etc/inittab"), name);
+            if has_template {
+                e.note("matches_template", template.clone());
             }
             e
         };
@@ -2209,7 +2216,7 @@ mod tests {
             PathBuf::from("usr/share/sysvinit/inittab"),
             Provenance::Packaged { package: "sysvinit-core".into(), version: "3.14-4".into(), integrity: crate::entry::Integrity::Intact },
         );
-        vouch_for_templates(&mut entries, &answers);
+        vouch_for_templates(&root, &mut entries, &answers);
         let vouched: Vec<bool> = entries.iter().map(|e| e.raw.contains_key("vouched")).collect();
         assert_eq!(vouched, [true, false, true]);
 
@@ -2218,8 +2225,9 @@ mod tests {
             Provenance::Packaged { package: "sysvinit-core".into(), version: "3.14-4".into(), integrity: crate::entry::Integrity::Modified },
         );
         let mut entries = vec![line("1", true)];
-        vouch_for_templates(&mut entries, &answers);
+        vouch_for_templates(&root, &mut entries, &answers);
         assert!(!entries[0].raw.contains_key("vouched"), "an edited template vouches for nothing");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
