@@ -62,6 +62,13 @@ for _ in $(seq 1 60); do
     sleep 2
 done
 echo "   systemd is $state"
+# Two minutes of polling ended without it running: every check after this
+# would be against a half-booted box, and a failure there would read as a
+# finding about the distribution.
+case "$state" in
+    running | degraded) ;;
+    *) echo "systemd never came up in $IMAGE (state: ${state:-none})" >&2; exit 1 ;;
+esac
 
 in_box() { docker exec -e DEBIAN_FRONTEND=noninteractive "$name" "$@"; }
 

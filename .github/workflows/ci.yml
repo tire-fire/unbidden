@@ -28,9 +28,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --all-targets
-      - run: cargo build --locked --release
-      - name: no warnings
-        run: cargo build --locked --release 2>&1 | tee /tmp/build.log && ! grep -q '^warning' /tmp/build.log
+      - name: release build, with no warnings
+        run: |
+          set -o pipefail
+          cargo build --locked --release 2>&1 | tee /tmp/build.log
+          ! grep -q '^warning' /tmp/build.log
 
   lint:
     # The CI scripts are code that decides whether a release ships, and a
@@ -183,7 +185,7 @@ jobs:
       - run: chmod +x target/x86_64-unknown-linux-musl/release/unbidden
       - name: ${{ matrix.image }}
         run: |
-          for i in 1 2 3; do docker pull ${{ matrix.image }} && break; sleep $((i * 10)); done
+          bash ci/pull-image.sh ${{ matrix.image }}
           ci/container-harness.sh --image ${{ matrix.image }} --expect ${{ matrix.expect }} ${{ matrix.args }}
 
   desktop:
@@ -216,24 +218,7 @@ jobs:
       - run: chmod +x ./bin/unbidden
       - name: a ${{ matrix.desktop }} session on ${{ matrix.image }}
         run: |
-          # Any registry resets a connection now and then, and the pull is
-          # the only part of this job that talks to one.
-          pull() {
-            for i in 1 2 3; do
-              docker pull "$1" && return 0
-              # AWS caps anonymous pulls by volume, and the runners share
-              # addresses. Google's mirror of the same library stands in.
-              case "$1" in
-                public.ecr.aws/docker/library/*)
-                  alt="mirror.gcr.io/library/${1#public.ecr.aws/docker/library/}"
-                  docker pull "$alt" && docker tag "$alt" "$1" && return 0
-                  ;;
-              esac
-              sleep $((i * 10))
-            done
-            return 1
-          }
-          pull ${{ matrix.image }}
+          bash ci/pull-image.sh ${{ matrix.image }}
           docker run --rm -v "$PWD:/w" -w /w \
             -e DEBIAN_FRONTEND=noninteractive \
             -e UNBIDDEN_DESKTOP=${{ matrix.desktop }} \
@@ -307,24 +292,7 @@ jobs:
       - run: chmod +x ./bin/unbidden
       - name: ${{ matrix.image }}
         run: |
-          # Any registry resets a connection now and then, and the pull is
-          # the only part of this job that talks to one.
-          pull() {
-            for i in 1 2 3; do
-              docker pull "$1" && return 0
-              # AWS caps anonymous pulls by volume, and the runners share
-              # addresses. Google's mirror of the same library stands in.
-              case "$1" in
-                public.ecr.aws/docker/library/*)
-                  alt="mirror.gcr.io/library/${1#public.ecr.aws/docker/library/}"
-                  docker pull "$alt" && docker tag "$alt" "$1" && return 0
-                  ;;
-              esac
-              sleep $((i * 10))
-            done
-            return 1
-          }
-          pull ${{ matrix.image }}
+          bash ci/pull-image.sh ${{ matrix.image }}
           docker run --rm -v "$PWD:/w" -w /w \
             -e UNBIDDEN_EXPECT_ID=${{ matrix.expect_id }} \
             -e UNBIDDEN_EXPECT_VERSION=${{ matrix.expect_version }} \

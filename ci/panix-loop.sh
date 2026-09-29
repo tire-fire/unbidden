@@ -66,13 +66,20 @@ scan() { "$BIN" --deep --json --all "$@"; }
 # have had. Both are printed: an unreadable path that appears only after a
 # plant is worth knowing about, and a detection must not hinge on one.
 compare() {
-    scan --against "$BASE" > /tmp/compare.ndjson
+    scan --against "$BASE" > /tmp/compare.ndjson || return 1
     head -1 /tmp/compare.ndjson | python3 -c '
 import json, sys
 for why in json.load(sys.stdin).get("coverage_changes", {}).values():
     print("     coverage moved: " + why)
 '
     tail -n +2 /tmp/compare.ndjson | sed 's/"delta":"uncertain",\(.*\)"would_be":"\([a-z]*\)"/"delta":"\2",\1"would_be":"\2","uncertain":true/'
+}
+
+# compare, or the run ends. A scan that crashed leaves nothing to read, and an
+# empty comparison says "nothing differs": a crash after a revert would read
+# as "reverted clean". The output is left in /tmp/compared.ndjson.
+compare_or_die() {
+    compare > /tmp/compared.ndjson || { echo "   the comparison scan failed"; exit 1; }
 }
 
 # What each module needs to plant. These genuinely differ — some take a
@@ -182,7 +189,8 @@ for m in "${modules[@]}"; do
         continue
     fi
 
-    found=$(compare | grep -E '"delta":"(added|changed)"')
+    compare_or_die
+    found=$(grep -E '"delta":"(added|changed)"' /tmp/compared.ndjson)
     kinds=$(echo "$found" | sed -n 's/.*"kind":"\([a-z_]*\)".*/\1/p' | sort -u | tr '\n' ' ')
 
     # One entry has to satisfy the row whole: the right kind, from the right
@@ -224,7 +232,8 @@ for m in "${modules[@]}"; do
         continue
     fi
 
-    compare | grep -E '"delta":"(added|changed|removed)"' > /tmp/residue.ndjson
+    compare_or_die
+    grep -E '"delta":"(added|changed|removed)"' /tmp/compared.ndjson > /tmp/residue.ndjson
     residue=$(wc -l < /tmp/residue.ndjson)
     phantom=0
     if [ "$residue" -eq 0 ]; then
