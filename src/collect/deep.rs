@@ -12,6 +12,7 @@
 //! been in, and gives up at a ceiling rather than following a tree that
 //! generates itself.
 
+use crate::text::{normalize};
 use crate::collect::first_absolute;
 use crate::text::{lossy};
 use std::collections::HashSet;
@@ -625,24 +626,6 @@ fn gitdir_file(cx: &mut Ctx, w: &mut Walk, rel: &Path, worktree: &Path) -> Vec<E
         return Vec::new();
     }
     repository(cx, w, &gitdir, worktree)
-}
-
-/// `..` resolved in the path rather than on disk. It matches how the root
-/// resolves a path — confined, so a `..` above the root stays at the root —
-/// and it keeps `..` out of the paths an operator is shown, where it would
-/// make one repository look like two across a diff.
-fn normalize(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in p.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::Normal(name) => out.push(name),
-            _ => {}
-        }
-    }
-    out
 }
 
 /// The git config keys that run a command: the pager and editor git spawns,

@@ -51,6 +51,34 @@ pub fn glob_match(pat: &[u8], s: &[u8]) -> bool {
     p == pat.len()
 }
 
+/// A path with `.` and `..` resolved in the text rather than on disk, for what
+/// an operator is shown: it matches how the root resolves a path (confined, so
+/// a `..` above the root stays at the root) and keeps `..` out of paths that
+/// would otherwise make one file look like two across a diff. Matching is done
+/// against the kernel's answer, not this.
+pub fn normalize(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => out.push(name),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Strips one matched pair of surrounding quotes, as pam_env and crond do.
+pub fn unquote(v: &[u8]) -> &[u8] {
+    match v {
+        [q @ (b'"' | b'\''), inner @ .., last] if q == last => inner,
+        _ => v,
+    }
+}
+
 /// Whether `=` padding is required to make the length a multiple of four, or
 /// whatever the alphabet decodes is taken up to the first `=` or the end.
 #[derive(Clone, Copy, PartialEq)]
@@ -146,6 +174,16 @@ mod tests {
         assert_eq!(lenient(b"YWJj").unwrap(), b"abc");
         assert_eq!(lenient(b"YQ").unwrap(), b"a");
         assert!(lenient(b"not base64!").is_none());
+    }
+
+    #[test]
+    fn paths_and_quotes_are_tidied_as_the_files_read_them_do() {
+        assert_eq!(normalize(std::path::Path::new("/a/b/../c/./d")), std::path::PathBuf::from("a/c/d"));
+        assert_eq!(normalize(std::path::Path::new("../../x")), std::path::PathBuf::from("x"), "stays inside the root");
+        assert_eq!(unquote(b"\"a b\""), b"a b");
+        assert_eq!(unquote(b"'x'"), b"x");
+        assert_eq!(unquote(b"\"mixed'"), b"\"mixed'");
+        assert_eq!(unquote(b"\""), b"\"");
     }
 
     #[test]

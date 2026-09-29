@@ -5,6 +5,7 @@
 //! an environment assignment rather than a job, where a command ends, and how
 //! a line is named so that inserting a line above it does not re-identify it.
 
+use crate::text::{unquote};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -749,13 +750,6 @@ fn assignment(line: &[u8]) -> Option<(&[u8], &[u8])> {
         i += 1;
     }
     Some((name, &line[i..]))
-}
-
-fn unquote(v: &[u8]) -> &[u8] {
-    match v {
-        [q @ (b'"' | b'\''), inner @ .., last] if q == last => inner,
-        _ => v,
-    }
 }
 
 /// Position-independent identity (§4). The name is derived from what the job

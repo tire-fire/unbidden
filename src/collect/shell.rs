@@ -11,6 +11,7 @@
 //! one thing this tool must never do. The blind spots are listed on
 //! `scan_shell` and are deliberate.
 
+use crate::text::{unquote};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -938,15 +939,6 @@ fn strip_cr(line: &[u8]) -> &[u8] {
     match line.split_last() {
         Some((b'\r', rest)) => rest,
         _ => line,
-    }
-}
-
-/// Strips one matched pair of surrounding quotes, which is what pam_env does.
-fn unquote(v: &[u8]) -> &[u8] {
-    if v.len() >= 2 && (v[0] == b'"' || v[0] == b'\'') && v[v.len() - 1] == v[0] {
-        &v[1..v.len() - 1]
-    } else {
-        v
     }
 }
 

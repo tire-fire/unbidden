@@ -9,10 +9,11 @@
 //! it, which is the SysV shape of the `.wants` problem systemd has, and
 //! treating presence in init.d as enablement is the defect this avoids.
 
+use crate::text::{normalize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, hex, name_from_os};
 use crate::scan::{Collector, Ctx, Read};
@@ -1147,22 +1148,6 @@ fn env_assignment(line: &[u8]) -> Option<(&[u8], &[u8])> {
         }
     };
     Some((name, value))
-}
-
-/// Lexical tidying for display only — what the operator would type to reach
-/// the link's target. Matching is done against the kernel's answer, not this.
-fn normalize(p: &Path) -> PathBuf {
-    let mut out: Vec<&OsStr> = Vec::new();
-    for c in p.components() {
-        match c {
-            Component::Normal(n) => out.push(n),
-            Component::ParentDir => {
-                out.pop();
-            }
-            _ => {}
-        }
-    }
-    out.into_iter().collect()
 }
 
 // ------------------------------------------------------------- DHCP hooks ----

@@ -7,10 +7,11 @@
 use crate::collect::first_absolute;
 use crate::text::{lossy, short_hash, take_word};
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, hex};
+use crate::entry::{Enablement, Entry, Flag, Kind, Trigger, hex, name_from_os};
 use crate::scan::{Collector, Ctx};
 
 pub struct Kernel;
@@ -341,7 +342,7 @@ fn udev_rules(cx: &mut Ctx) -> Vec<Entry> {
                     e.note("shadows", shadows.join(", "));
                 }
                 for (k, v) in &facts {
-                    append_note(&mut e, k, v);
+                    e.append_note(k, v);
                 }
                 out.push(e);
             }
@@ -635,7 +636,7 @@ fn module_load_lists(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
             let mut e = cx.entry(Kind::KernelModule, &rel, name);
             e.trigger = Trigger::Boot;
             e.note("directive", "load");
-            name_bytes(&mut e, module);
+            name_from_os(&mut e, OsStr::from_bytes(module));
             e.note("module", lossy(module));
             if !params.is_empty() {
                 e.note("params", lossy(params));
@@ -688,7 +689,7 @@ fn modprobe_configs(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
             let mut e = cx.entry(Kind::KernelModule, &rel, name);
             e.trigger = Trigger::Boot;
             e.note("directive", directive.clone());
-            name_bytes(&mut e, first);
+            name_from_os(&mut e, OsStr::from_bytes(first));
 
             // `alias <pattern> <module>` names the module second; every other
             // directive names it first.
@@ -813,24 +814,7 @@ fn distinct_dirs(cx: &mut Ctx, candidates: &[&'static str]) -> Vec<(usize, &'sta
 
 
 
-fn name_bytes(e: &mut Entry, name: &[u8]) {
-    if std::str::from_utf8(name).is_err() {
-        e.flag(Flag::EncodingAnomaly);
-        e.note("name_raw_hex", hex(name));
-    }
-}
 
-
-
-fn append_note(e: &mut Entry, key: &str, value: &str) {
-    match e.raw.get_mut(key) {
-        Some(existing) => {
-            existing.push_str(", ");
-            existing.push_str(value);
-        }
-        None => e.note(key, value.to_string()),
-    }
-}
 
 fn path_note(cx: &Ctx, rel: &Path) -> String {
     cx.root.abs(rel).display().to_string()

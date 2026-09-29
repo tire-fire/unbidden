@@ -393,6 +393,18 @@ impl Entry {
         self.raw.insert(key.to_string(), value.into());
     }
 
+    /// Adds to a note that more than one thing can say, `, `-separated.
+    pub fn append_note(&mut self, key: &str, value: impl Into<String>) {
+        let value = value.into();
+        match self.raw.get_mut(key) {
+            Some(existing) => {
+                existing.push_str(", ");
+                existing.push_str(&value);
+            }
+            None => self.note(key, value),
+        }
+    }
+
     /// The verdict on the file this entry runs, if one was taken.
     pub fn target_verdict(&self) -> Option<TargetVerdict> {
         self.raw.get(TARGET_PROVENANCE).map(|words| TargetVerdict::from_words(words))

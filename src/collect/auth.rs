@@ -124,17 +124,6 @@ fn normalized(line: &[u8]) -> Vec<u8> {
     join_ws(&words(line))
 }
 
-fn append_note(e: &mut Entry, key: &str, value: impl Into<String>) {
-    let v = value.into();
-    match e.raw.get(key) {
-        Some(prev) => {
-            let merged = format!("{prev}, {v}");
-            e.note(key, merged);
-        }
-        None => e.note(key, v),
-    }
-}
-
 fn flag_non_utf8(e: &mut Entry, bytes: &[u8]) {
     if std::str::from_utf8(bytes).is_err() {
         e.flag(Flag::EncodingAnomaly);
@@ -712,19 +701,19 @@ fn namespace_init(cx: &mut Ctx, out: &mut Vec<Entry>) {
         e.enabled = Enablement::Enabled;
         if services.is_empty() {
             e.enabled = Enablement::Disabled;
-            append_note(&mut e, "not_run", "no session stack loads pam_namespace.so");
+            e.append_note("not_run", "no session stack loads pam_namespace.so");
         } else {
             e.note("services", services.iter().cloned().collect::<Vec<_>>().join(","));
         }
         if used_by.is_empty() {
             e.enabled = Enablement::Disabled;
-            append_note(&mut e, "not_run", "no polyinstantiated directory uses it");
+            e.append_note("not_run", "no polyinstantiated directory uses it");
         } else {
             e.note("polydirs", used_by.join(","));
         }
         if exists && cx.root.stat_follow(&target_rel).is_ok_and(|m| m.mode & 0o111 == 0) {
             e.enabled = Enablement::Disabled;
-            append_note(&mut e, "not_run", "not executable, which fails the session");
+            e.append_note("not_run", "not executable, which fails the session");
         }
         flag_non_utf8(&mut e, &script);
         out.push(e);
@@ -997,10 +986,10 @@ fn authorized_keys(
                     }
                     ("environment", Some(v)) => match split_once(&v, b'=') {
                         Some((k, val)) => e.note(&format!("env.{}", lossy(k)), lossy(val)),
-                        None => append_note(&mut e, "opt.environment", lossy(&v)),
+                        None => e.append_note("opt.environment", lossy(&v)),
                     },
-                    (_, Some(v)) => append_note(&mut e, &format!("opt.{name}"), lossy(&v)),
-                    (_, None) => append_note(&mut e, &format!("opt.{name}"), "true"),
+                    (_, Some(v)) => e.append_note(&format!("opt.{name}"), lossy(&v)),
+                    (_, None) => e.append_note(&format!("opt.{name}"), "true"),
                 }
             }
         }
@@ -1962,7 +1951,7 @@ fn doas(cx: &mut Ctx, out: &mut Vec<Entry>) {
             e.note("nopasswd", "true");
         }
         for v in &r.setenv {
-            append_note(&mut e, "setenv", lossy(v));
+            e.append_note("setenv", lossy(v));
         }
         if let Some(c) = &r.cmd {
             let mut command = c.clone();

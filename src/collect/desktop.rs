@@ -147,7 +147,7 @@ fn autostart(cx: &mut Ctx) -> Vec<Entry> {
                 let vendor = out[ix].source.to_string_lossy().into_owned();
                 e.note("overrides", vendor);
                 let mine = e.source.to_string_lossy().into_owned();
-                append_note(&mut out[ix], "overridden_by", &mine);
+                out[ix].append_note("overridden_by", &mine);
             }
             out.push(e);
         }
@@ -170,7 +170,7 @@ fn autostart(cx: &mut Ctx) -> Vec<Entry> {
                 let vendor = out[ix].source.to_string_lossy().into_owned();
                 e.note("overrides", vendor);
                 let mine = e.source.to_string_lossy().into_owned();
-                append_note(&mut out[ix], "overridden_by", &mine);
+                out[ix].append_note("overridden_by", &mine);
             }
             out.push(e);
         }
@@ -275,14 +275,6 @@ fn autostart(cx: &mut Ctx) -> Vec<Entry> {
 
 fn is_desktop(name: &OsStr) -> bool {
     name.as_bytes().ends_with(b".desktop")
-}
-
-fn append_note(e: &mut Entry, key: &str, value: &str) {
-    let merged = match e.raw.get(key) {
-        Some(prev) => format!("{prev}, {value}"),
-        None => value.to_string(),
-    };
-    e.note(key, merged);
 }
 
 fn desktop_file(cx: &mut Ctx, rel: &Path, file: &OsStr, principal: Option<&str>) -> Option<Entry> {
