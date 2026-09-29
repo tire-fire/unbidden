@@ -857,7 +857,54 @@ fn dnf_plugins(cx: &mut Ctx) -> Vec<Entry> {
             out.push(e);
         }
     }
+    dnf_modules_without_conf(cx, &mut out, pythons);
     out
+}
+
+/// dnf (the python one) imports every `*.py` in its plugin directory, and
+/// importing runs the module's top level as root: a plugin's `.conf` decides
+/// only whether its class is then instantiated. A module dropped there with no
+/// conf at all runs all the same, so each one no conf entry has claimed is
+/// reported here, off only if dnf's plugins are.
+fn dnf_modules_without_conf(cx: &mut Ctx, out: &mut Vec<Entry>, pythons: Option<Vec<PathBuf>>) {
+    // A host with no dnf at all never has its interpreter directories read.
+    if pythons.is_none() && !cx.root.exists("usr/bin/dnf") && !cx.root.exists("usr/bin/dnf-3") {
+        return;
+    }
+    let pythons = pythons.unwrap_or_else(|| python_dirs(cx));
+    // dnf5 is not python and loads none of these; dnf's own module says
+    // there is a python dnf here to import them.
+    if !pythons.iter().any(|p| cx.root.exists(p.join("site-packages/dnf/plugin.py"))) {
+        return;
+    }
+    let off = cx.read("etc/dnf/dnf.conf").and_then(|b| ini_lookup(&b, "main", "plugins")).and_then(|v| as_bool(&v)) == Some(false);
+    let claimed: BTreeSet<PathBuf> = out.iter().filter_map(|e| e.target_path.clone()).collect();
+    for python in &pythons {
+        let dir = python.join("site-packages/dnf-plugins");
+        for ent in cx.dir(&dir) {
+            if ent.is_dir || !ent.name.as_bytes().ends_with(b".py") {
+                continue;
+            }
+            let rel = dir.join(&ent.name);
+            if claimed.contains(&cx.root.abs(&rel)) {
+                continue;
+            }
+            let plugin = lossy(&ent.name.as_bytes()[..ent.name.as_bytes().len() - 3]);
+            let mut e = cx.entry(Kind::PkgHook, &rel, format!("dnf-plugin:{plugin}"));
+            name_from_os(&mut e, &ent.name);
+            e.trigger = Trigger::PackageOp;
+            e.principal = Some("root".to_string());
+            e.note("manager", "dnf");
+            e.note("plugin", plugin);
+            e.note("runs_when", "imported by every dnf run, whether or not a plugin conf enables it");
+            e.target_path = Some(cx.root.abs(&rel));
+            e.enabled = if off { Enablement::Disabled } else { Enablement::Enabled };
+            if off {
+                e.note("enablement", "plugins=0 in etc/dnf/dnf.conf disables every plugin");
+            }
+            out.push(e);
+        }
+    }
 }
 
 /// The python installations a plugin's module could live under. One directory
@@ -2449,6 +2496,29 @@ mod tests {
         assert_eq!(div[0].raw["diverted_to"], "/usr/sbin/sshd.real");
         std::fs::remove_dir_all(&d).unwrap();
     }
+    #[test]
+    fn a_dnf_plugin_module_with_no_conf_is_still_imported_and_so_reported() {
+        let dir = tree("dnf-noconf");
+        put(&dir, "usr/bin/dnf-3", b"");
+        put(&dir, "usr/lib/python3.12/site-packages/dnf/plugin.py", b"");
+        put(&dir, "usr/lib/python3.12/site-packages/dnf-plugins/copr.py", b"import dnf\n");
+        put(&dir, "etc/dnf/plugins/copr.conf", b"[main]\nenabled=1\n");
+        put(&dir, "usr/lib/python3.12/site-packages/dnf-plugins/evil.py", b"import os\nos.system('/tmp/x')\n");
+        let s = scan(&dir);
+        let evil = one(&s, |e| e.name == "dnf-plugin:evil");
+        assert_eq!(evil.enabled, Enablement::Enabled);
+        assert_eq!(evil.target_path, Some(dir.join("usr/lib/python3.12/site-packages/dnf-plugins/evil.py")));
+        assert_eq!(s.entries.iter().filter(|e| e.raw.get("plugin").is_some_and(|p| p == "copr")).count(), 1, "a plugin with a conf is not reported twice");
+        fs::remove_dir_all(&dir).unwrap();
+
+        // dnf5 loads no python: nothing here is imported.
+        let dir = tree("dnf5-noconf");
+        put(&dir, "usr/bin/dnf", b"");
+        put(&dir, "usr/lib/python3.12/site-packages/dnf-plugins/evil.py", b"");
+        assert!(scan(&dir).entries.iter().all(|e| e.name != "dnf-plugin:evil"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn libdnf5_plugins_and_actions_are_package_hooks() {
         let d = std::env::temp_dir().join(format!("unbidden-libdnf5-{}", std::process::id()));
