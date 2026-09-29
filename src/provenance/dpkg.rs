@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::entry::{Integrity, Provenance};
 use crate::root::Root;
 
-use super::{Answers, spellings};
+use super::{Answers, Outcome, spellings};
 
 const INFO: &str = "var/lib/dpkg/info";
 const STATUS: &str = "var/lib/dpkg/status";
@@ -73,10 +73,14 @@ pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
     out
 }
 
-pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
+pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Outcome {
     if !present(root) {
-        return None;
+        return Outcome::Absent;
     }
+    // What could not be read, and so what a path's absence from the answers
+    // proves nothing about: a path is Unpackaged only if the whole database
+    // was read and did not list it.
+    let mut gaps: Vec<String> = Vec::new();
 
     // Every spelling of every wanted path, mapped back to the one the caller
     // asked about, so a /lib vs /usr/lib mismatch cannot lose an answer.
@@ -92,8 +96,9 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
         }
     }
 
-    // The owning package, and the name its manifests list the file under.
-    let mut owner: BTreeMap<PathBuf, (String, PathBuf)> = BTreeMap::new();
+    // The owning packages, and the name each one's manifest lists the file
+    // under. A path more than one package lists is claimed by all of them.
+    let mut owner: BTreeMap<PathBuf, Vec<(String, PathBuf)>> = BTreeMap::new();
 
     // dpkg's own metadata directory is not listed in anybody's .list, so
     // every maintainer script in it reads as unpackaged — a hundred rows of
@@ -104,15 +109,29 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
         let name = name.to_string_lossy();
         let Some((stem, ext)) = name.rsplit_once('.') else { continue };
         if MAINTAINER_SCRIPTS.contains(&ext) && !stem.is_empty() {
-            owner.insert(w.clone(), (stem.to_string(), w.clone()));
+            owner.entry(w.clone()).or_default().push((stem.to_string(), w.clone()));
         }
     }
 
     let diverted = diversions(root);
-    for ent in root.read_dir_optional(INFO).unwrap_or_default() {
+    let listing = root.read_dir_optional(INFO).unwrap_or_else(|e| {
+        gaps.push(format!("{INFO} could not be listed: {e}"));
+        Vec::new()
+    });
+    for ent in listing {
         let name = ent.name.to_string_lossy().into_owned();
         let Some(pkg) = name.strip_suffix(".list") else { continue };
-        let Ok((bytes, _)) = root.read_capped(format!("{INFO}/{name}"), DB_CAP) else { continue };
+        let bytes = match root.read_capped(format!("{INFO}/{name}"), DB_CAP) {
+            Ok((bytes, false)) => bytes,
+            Ok((bytes, true)) => {
+                gaps.push(format!("{INFO}/{name} is larger than the read cap"));
+                bytes
+            }
+            Err(e) => {
+                gaps.push(format!("{INFO}/{name} could not be read: {e}"));
+                continue;
+            }
+        };
         for line in bytes.split(|b| *b == b'\n') {
             let listed = strip_slash(line);
             if listed.is_empty() {
@@ -125,30 +144,43 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
             };
             if let Some(ws) = alias_to_wanted.get(on_disk) {
                 for w in ws {
-                    owner.insert(w.clone(), (pkg.to_string(), listed.clone()));
+                    let claims = owner.entry(w.clone()).or_default();
+                    if !claims.iter().any(|(p, _)| p == pkg) {
+                        claims.push((pkg.to_string(), listed.clone()));
+                    }
                 }
             }
         }
     }
 
-    if owner.is_empty() {
-        return Some(Answers::new());
-    }
-
-    let needed: BTreeSet<String> = owner.values().map(|(p, _)| p.clone()).collect();
-    let status = read_status(root, &needed);
-
     let mut out = Answers::new();
-    for (path, (pkg, listed)) in &owner {
-        let Some(info) = status.get(pkg) else { continue };
-        let integrity = verify(root, path, listed, pkg, info);
-        out.insert(path.clone(), Provenance::Packaged {
-            package: base_name(pkg).to_string(),
-            version: info.version.clone(),
-            integrity,
-        });
+    if !owner.is_empty() {
+        let needed: BTreeSet<String> = owner.values().flatten().map(|(p, _)| p.clone()).collect();
+        let (status, status_gap) = read_status(root, &needed);
+        gaps.extend(status_gap);
+
+        for (path, claims) in &owner {
+            // Which of several packages a file belongs to is not in the
+            // database; one it is intact for is the one that shipped it.
+            let verdicts: Vec<Provenance> = claims
+                .iter()
+                .filter_map(|(pkg, listed)| {
+                    let info = status.get(pkg)?;
+                    let integrity = verify(root, path, listed, pkg, info);
+                    Some(Provenance::Packaged { package: base_name(pkg).to_string(), version: info.version.clone(), integrity })
+                })
+                .collect();
+            let chosen = verdicts.iter().find(|v| v.is_packaged_intact()).or(verdicts.last()).cloned();
+            if let Some(verdict) = chosen {
+                out.insert(path.clone(), verdict);
+            }
+        }
     }
-    Some(out)
+    match gaps.split_first() {
+        None => Outcome::Complete(out),
+        Some((first, [])) => Outcome::Incomplete(out, first.clone()),
+        Some((first, rest)) => Outcome::Incomplete(out, format!("{first} (and {} more)", rest.len())),
+    }
 }
 
 #[derive(Default)]
@@ -161,9 +193,17 @@ struct PkgInfo {
 
 /// Streams the status file once, keeping only the packages that own
 /// something the scan asked about.
-fn read_status(root: &Root, needed: &BTreeSet<String>) -> BTreeMap<String, PkgInfo> {
+fn read_status(root: &Root, needed: &BTreeSet<String>) -> (BTreeMap<String, PkgInfo>, Option<String>) {
     let mut out = BTreeMap::new();
-    let Ok((bytes, _)) = root.read_capped(STATUS, DB_CAP) else { return out };
+    let mut gap = None;
+    let bytes = match root.read_capped(STATUS, DB_CAP) {
+        Ok((bytes, false)) => bytes,
+        Ok((bytes, true)) => {
+            gap = Some(format!("{STATUS} is larger than the read cap"));
+            bytes
+        }
+        Err(e) => return (out, Some(format!("{STATUS} could not be read: {e}"))),
+    };
     let text = String::from_utf8_lossy(&bytes);
 
     let mut package = String::new();
@@ -214,7 +254,7 @@ fn read_status(root: &Root, needed: &BTreeSet<String>) -> BTreeMap<String, PkgIn
         }
     }
     flush(&mut package, &mut arch, &mut info, &mut out);
-    out
+    (out, gap)
 }
 
 /// Diverted path, to where it went and who diverted it (`:` by hand), from
@@ -298,6 +338,13 @@ fn verify(root: &Root, path: &Path, listed: &Path, pkg: &str, info: &PkgInfo) ->
 }
 
 fn link_by_change_time(root: &Root, link: &Path, pkg: &str) -> Integrity {
+    // Only a live host's change times mean anything. On a tree copied out of
+    // an image (rsync, tar, docker export) every inode changed when it was
+    // copied, so a link repointed since install reads as untouched: Intact
+    // there would hide exactly the link an attacker moved.
+    if !root.is_live() {
+        return Integrity::Unknown;
+    }
     let (Ok(link), Ok(list)) = (root.stat(link), root.stat(format!("{INFO}/{pkg}.list"))) else {
         return Integrity::Unknown;
     };
@@ -381,6 +428,55 @@ mod tests {
     }
 
     #[test]
+    fn a_database_that_could_not_be_read_whole_is_incomplete_not_a_reason_to_call_paths_unpackaged() {
+        let f = Fixture::new("incomplete");
+        f.write(STATUS, b"Package: dash\nStatus: install ok installed\nArchitecture: amd64\nVersion: 0.5\n\n");
+        f.write(&format!("{INFO}/dash.list"), b"/usr/bin/dash\n");
+        f.write(&format!("{INFO}/dash.md5sums"), b"");
+        // A list that cannot be read as a file: whatever it names is not known.
+        std::fs::create_dir_all(f.0.join(INFO).join("broken.list")).unwrap();
+        let wanted: BTreeSet<PathBuf> = ["usr/bin/dash", "usr/bin/other"].iter().map(PathBuf::from).collect();
+        match resolve(&f.root(), &wanted) {
+            Outcome::Incomplete(answers, why) => {
+                assert!(why.contains("broken.list"), "{why}");
+                assert!(answers.contains_key(Path::new("usr/bin/dash")), "what was read stands");
+            }
+            _ => panic!("an unreadable list is a gap"),
+        }
+        // Without the gap the same database is complete.
+        std::fs::remove_dir(f.0.join(INFO).join("broken.list")).unwrap();
+        assert!(matches!(resolve(&f.root(), &wanted), Outcome::Complete(_)));
+        // And a status file that cannot be read is one too.
+        std::fs::remove_file(f.0.join(STATUS)).unwrap();
+        std::fs::create_dir_all(f.0.join(STATUS)).unwrap();
+        assert!(matches!(resolve(&f.root(), &wanted), Outcome::Incomplete(_, why) if why.contains("status")));
+    }
+
+    #[test]
+    fn a_file_two_packages_list_is_judged_by_the_one_it_is_intact_for() {
+        // Either package may be the one that shipped it, whichever the
+        // directory listing happens to give first.
+        for (owner, other) in [("aaa", "zzz"), ("zzz", "aaa")] {
+            let f = Fixture::new(&format!("coowned-{owner}"));
+            let shipped = b"#!/bin/sh\n";
+            f.write("usr/bin/tool", shipped);
+            f.write(
+                STATUS,
+                b"Package: aaa\nStatus: install ok installed\nArchitecture: amd64\nVersion: 1\n\nPackage: zzz\nStatus: install ok installed\nArchitecture: amd64\nVersion: 2\n\n",
+            );
+            for pkg in ["aaa", "zzz"] {
+                f.write(&format!("{INFO}/{pkg}.list"), b"/usr/bin/tool\n");
+            }
+            f.write(&format!("{INFO}/{owner}.md5sums"), format!("{}  usr/bin/tool\n", md5_of(shipped)).as_bytes());
+            f.write(&format!("{INFO}/{other}.md5sums"), format!("{}  usr/bin/tool\n", md5_of(b"other")).as_bytes());
+            match &ask(&f.root(), &["usr/bin/tool"])[Path::new("usr/bin/tool")] {
+                Provenance::Packaged { package, integrity, .. } => assert_eq!((package.as_str(), *integrity), (owner, Integrity::Intact)),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn a_packaged_link_to_a_conffile_is_judged_by_the_conffile() {
         // isc-dhcp-client's layout: hook directories hold links to a conffile,
         // whose digest is in the status file and not in the md5sums.
@@ -425,12 +521,16 @@ Version: 1.9
         f.write(&format!("{INFO}/sudo.list"), b"/usr/lib/systemd/system/sudo.service
 ");
         f.write(&format!("{INFO}/sudo.md5sums"), b"");
-        let answers = ask(&f.root(), &["usr/lib/systemd/system/sudo.service"]);
-        assert!(
-            matches!(answers[Path::new("usr/lib/systemd/system/sudo.service")], Provenance::Packaged { integrity: Integrity::Intact, .. }),
-            "written in the same unpack as its list: {:?}",
-            answers[Path::new("usr/lib/systemd/system/sudo.service")]
-        );
+        let wanted: BTreeSet<PathBuf> = [PathBuf::from("usr/lib/systemd/system/sudo.service")].into_iter().collect();
+        let integrity = |root: &Root| match &resolve(root, &wanted).unwrap()[Path::new("usr/lib/systemd/system/sudo.service")] {
+            Provenance::Packaged { integrity, .. } => *integrity,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(integrity(&Root::at_as_live(&f.0).unwrap()), Integrity::Intact, "written in the same unpack as its list");
+        // A tree that is not the running system may be a copy, in which every
+        // inode changed when it was copied: the answer there is that nothing
+        // can be told, not that the link is untouched.
+        assert_eq!(integrity(&f.root()), Integrity::Unknown);
         // A change time well past the list's is a link dpkg did not write.
         let list = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         assert!(changed_after_install(list + std::time::Duration::from_secs(3_600), list).is_some());

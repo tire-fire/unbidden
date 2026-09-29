@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use crate::entry::{Integrity, Provenance};
 use crate::root::Root;
 
-use super::{Answers, spellings};
+use super::{Answers, Outcome, spellings};
 
 const INSTALLED: &str = "lib/apk/db/installed";
 const PROTECTED_D: &str = "etc/apk/protected_paths.d";
@@ -54,13 +54,17 @@ pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
     out
 }
 
-pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
+pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Outcome {
     if !present(root) {
-        return None;
+        return Outcome::Absent;
     }
-    // A database that is there but cannot be read answers for nobody: that
-    // is Unknown for every path, not Unpackaged.
-    let (bytes, _) = root.read_capped(INSTALLED, DB_CAP).ok()?;
+    // A database that is there but cannot be read, or not all of it, answers
+    // for nobody it does not name: Unknown for every other path, not
+    // Unpackaged.
+    let (bytes, truncated) = match root.read_capped(INSTALLED, DB_CAP) {
+        Ok(read) => read,
+        Err(e) => return Outcome::Incomplete(Answers::new(), format!("{INSTALLED} could not be read: {e}")),
+    };
 
     let mut alias_to_wanted: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     for w in wanted {
@@ -85,7 +89,10 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
             );
         }
     });
-    Some(out)
+    if truncated {
+        return Outcome::Incomplete(out, format!("{INSTALLED} is larger than the read cap"));
+    }
+    Outcome::Complete(out)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -653,6 +660,15 @@ pub(crate) mod tests {
     fn ask(root: &Root, paths: &[&str]) -> Answers {
         let wanted: BTreeSet<PathBuf> = paths.iter().map(PathBuf::from).collect();
         resolve(root, &wanted).unwrap()
+    }
+
+    #[test]
+    fn an_installed_database_that_cannot_be_read_is_incomplete_not_unpackaged() {
+        let f = Fixture::new("unreadable");
+        // Present, and not a file that can be read.
+        std::fs::create_dir_all(f.0.join(INSTALLED)).unwrap();
+        let wanted: BTreeSet<PathBuf> = [PathBuf::from("usr/bin/x")].into_iter().collect();
+        assert!(matches!(resolve(&f.root(), &wanted), Outcome::Incomplete(a, why) if a.is_empty() && why.contains("could not be read")));
     }
 
     fn integrity(answers: &Answers, path: &str) -> Integrity {

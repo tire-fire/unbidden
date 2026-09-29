@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use crate::entry::{Integrity, Provenance};
 use crate::root::Root;
 
-use super::{Answers, spellings};
+use super::{Answers, Outcome, spellings};
 
 const DB: &str = "var/lib/rpm/rpmdb.sqlite";
 
@@ -179,9 +179,9 @@ fn db_path(root: &Root) -> Option<&'static str> {
     DBS.into_iter().find(|p| root.exists(p))
 }
 
-pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
+pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Outcome {
     if !present(root) {
-        return None;
+        return Outcome::Absent;
     }
 
     // One alias can stand for more than one wanted path: a scan that asks
@@ -197,8 +197,16 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
     }
 
     let mut claims: BTreeMap<PathBuf, Vec<Claim>> = BTreeMap::new();
-    for blob in read_blobs(root)? {
-        let Some(header) = Header::parse(&blob) else { continue };
+    let (blobs, unread) = match try_blobs(root) {
+        Ok(read) => read,
+        Err(why) => return Outcome::Incomplete(Answers::new(), why),
+    };
+    let mut unparsed = 0;
+    for blob in blobs {
+        let Some(header) = Header::parse(&blob) else {
+            unparsed += 1;
+            continue;
+        };
         collect_claims(&header, &alias_to_wanted, &mut claims);
     }
 
@@ -207,7 +215,12 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
         let verdict = verify(root, &path, &candidates);
         out.insert(path, verdict);
     }
-    Some(out)
+    // A package whose header could not be read is one whose files are not
+    // claimed above, and would read as unpackaged.
+    match unread + unparsed {
+        0 => Outcome::Complete(out),
+        n => Outcome::Incomplete(out, format!("{n} package headers could not be read")),
+    }
 }
 
 /// The package headers, read through the Root like everything else.
@@ -220,14 +233,20 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
 /// The consequence, accepted deliberately: a transaction sitting in a live
 /// -wal during a concurrent dnf run is not seen. A scanner reads a snapshot.
 fn read_blobs(root: &Root) -> Option<Vec<Vec<u8>>> {
-    let db = db_path(root)?;
-    let meta = root.stat_follow(db).ok()?;
+    try_blobs(root).ok().map(|(blobs, _)| blobs)
+}
+
+/// The headers, and how many rows the database could not give up; or why it
+/// could not be opened at all.
+fn try_blobs(root: &Root) -> Result<(Vec<Vec<u8>>, usize), String> {
+    let db = db_path(root).ok_or("no database")?;
+    let meta = root.stat_follow(db).map_err(|e| format!("{db} could not be examined: {e}"))?;
     if meta.size == 0 || meta.size > DB_CAP {
-        return None;
+        return Err(format!("{db} is empty or larger than the read cap"));
     }
-    let (mut bytes, truncated) = root.read_capped(db, DB_CAP as usize).ok()?;
+    let (mut bytes, truncated) = root.read_capped(db, DB_CAP as usize).map_err(|e| format!("{db} could not be read: {e}"))?;
     if truncated || bytes.len() < SQLITE_HEADER {
-        return None;
+        return Err(format!("{db} is truncated"));
     }
 
     // rpm keeps its database in WAL mode, and SQLite refuses to open a WAL
@@ -245,12 +264,19 @@ fn read_blobs(root: &Root) -> Option<Vec<Vec<u8>>> {
     bytes[SQLITE_READ_VERSION] = 1;
 
     let size = bytes.len();
-    let mut conn = rusqlite::Connection::open_in_memory().ok()?;
-    conn.deserialize_read_exact("main", bytes.as_slice(), size, true).ok()?;
+    let mut conn = rusqlite::Connection::open_in_memory().map_err(|e| format!("SQLite: {e}"))?;
+    conn.deserialize_read_exact("main", bytes.as_slice(), size, true).map_err(|e| format!("{db} is not a database SQLite can open: {e}"))?;
 
-    let mut stmt = conn.prepare("SELECT blob FROM Packages").ok()?;
-    let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0)).ok()?;
-    Some(rows.filter_map(|r| r.ok()).collect())
+    let mut stmt = conn.prepare("SELECT blob FROM Packages").map_err(|e| format!("{db} has no Packages table: {e}"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, Vec<u8>>(0)).map_err(|e| format!("{db} Packages could not be read: {e}"))?;
+    let (mut blobs, mut unread) = (Vec::new(), 0);
+    for row in rows {
+        match row {
+            Ok(blob) => blobs.push(blob),
+            Err(_) => unread += 1,
+        }
+    }
+    Ok((blobs, unread))
 }
 
 #[derive(Clone)]
@@ -869,6 +895,18 @@ pub(crate) mod tests {
     fn ask(root: &Root, paths: &[&str]) -> Answers {
         let wanted: BTreeSet<PathBuf> = paths.iter().map(PathBuf::from).collect();
         resolve(root, &wanted).unwrap()
+    }
+
+    #[test]
+    fn a_database_that_cannot_be_opened_is_incomplete_not_absent() {
+        let f = Fixture::new("unusable");
+        // Bytes with a SQLite header's length and nothing behind it.
+        f.write(DB, &[0u8; 4096]);
+        let wanted: BTreeSet<PathBuf> = [PathBuf::from("usr/bin/x")].into_iter().collect();
+        assert!(matches!(resolve(&f.root(), &wanted), Outcome::Incomplete(_, why) if why.contains("Packages")), "an unusable rpmdb is a recorded failure");
+        // No database at all is still just absent.
+        let none = Fixture::new("absent");
+        assert!(matches!(resolve(&none.root(), &wanted), Outcome::Absent));
     }
 
     #[test]

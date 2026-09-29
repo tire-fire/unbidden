@@ -25,11 +25,36 @@ use crate::root::Root;
 
 pub type Answers = BTreeMap<PathBuf, Provenance>;
 
+/// What one backend made of its database.
+pub enum Outcome {
+    /// There is no database of this kind on the root.
+    Absent,
+    /// It was read to the end: a path it does not list is unpackaged.
+    Complete(Answers),
+    /// It is there but was not read to the end, for the reason given. What it
+    /// did answer stands, and any other path might have been in the part not
+    /// read, so those are unknown.
+    Incomplete(Answers, String),
+}
+
+#[cfg(test)]
+impl Outcome {
+    /// The answers of a database a test expects to have been read whole.
+    pub fn unwrap(self) -> Answers {
+        match self {
+            Outcome::Complete(answers) => answers,
+            Outcome::Incomplete(_, why) => panic!("database not read to the end: {why}"),
+            Outcome::Absent => panic!("no database"),
+        }
+    }
+}
+
 /// What the provenance pass learned, and which backends it could not ask.
 pub struct Resolution {
     pub answers: Answers,
-    /// Backends that panicked on their database. §3 treats every parsed file
-    /// as hostile, and a package database is a file.
+    /// Backends that panicked on their database, or found it there and could
+    /// not read all of it. §3 treats every parsed file as hostile, and a
+    /// package database is a file.
     pub failures: Vec<String>,
 }
 
@@ -52,7 +77,7 @@ pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Resolution {
     resolve_with(root, wanted, &[("dpkg", dpkg::resolve), ("rpm", rpm::resolve), ("apk", apk::resolve)])
 }
 
-type Backend = fn(&Root, &BTreeSet<PathBuf>) -> Option<Answers>;
+type Backend = fn(&Root, &BTreeSet<PathBuf>) -> Outcome;
 
 fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Backend)]) -> Resolution {
     let mut out = Answers::new();
@@ -62,19 +87,24 @@ fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Back
     let wanted = &asked;
     let mut failures = Vec::new();
 
-    // A backend returns None when its database is not on this root, which is
-    // a different fact from "the database says nothing owns that path". One
-    // that panics is a third fact: its database is there, and what it would
-    // have said is unknown.
+    // A backend is Absent when its database is not on this root, which is a
+    // different fact from "the database says nothing owns that path". One
+    // that panics, or could not read its database to the end, is a third fact:
+    // the database is there, and what it would have said is unknown.
     let mut backend_ran = false;
     let mut backend_failed = false;
     for (name, backend) in backends {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| backend(root, wanted))) {
-            Ok(Some(answers)) => {
+            Ok(Outcome::Complete(answers)) => {
                 out.extend(answers);
                 backend_ran = true;
             }
-            Ok(None) => {}
+            Ok(Outcome::Incomplete(answers, why)) => {
+                out.extend(answers);
+                failures.push(format!("{name} database: {why}"));
+                backend_failed = true;
+            }
+            Ok(Outcome::Absent) => {}
             Err(payload) => {
                 failures.push(format!("{name} database: {}", crate::scan::panic_message(payload)));
                 backend_failed = true;
@@ -274,14 +304,14 @@ mod tests {
 
     #[test]
     fn a_copy_of_an_intact_packaged_template_is_generated_by_its_package() {
-        fn ships_template(_: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
+        fn ships_template(_: &Root, wanted: &BTreeSet<PathBuf>) -> Outcome {
             let mut a = Answers::new();
             let t = PathBuf::from("usr/share/libc-bin/nsswitch.conf");
             if wanted.contains(&t) {
                 let v = Provenance::Packaged { package: "libc-bin".into(), version: "2.39".into(), integrity: Integrity::Intact };
                 a.insert(t, v);
             }
-            Some(a)
+            Outcome::Complete(a)
         }
         let dir = std::env::temp_dir().join(format!("unbidden-prov-template-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -328,14 +358,14 @@ mod tests {
             # and here are more per-package modules (the \"Additional\" block)\n\
             auth\toptional\t\t\tpam_cap.so \n\
             # end of pam-auth-update config\n";
-        fn ships_everything(_: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
+        fn ships_everything(_: &Root, wanted: &BTreeSet<PathBuf>) -> Outcome {
             let intact = Provenance::Packaged { package: "libpam-runtime".into(), version: "1.5".into(), integrity: Integrity::Intact };
-            Some(wanted.iter().filter(|p| p.starts_with("usr/share")).map(|p| (p.clone(), intact.clone())).collect())
+            Outcome::Complete(wanted.iter().filter(|p| p.starts_with("usr/share")).map(|p| (p.clone(), intact.clone())).collect())
         }
-        fn ships_template_only(root: &Root, wanted: &BTreeSet<PathBuf>) -> Option<Answers> {
-            let mut a = ships_everything(root, wanted)?;
+        fn ships_template_only(root: &Root, wanted: &BTreeSet<PathBuf>) -> Outcome {
+            let Outcome::Complete(mut a) = ships_everything(root, wanted) else { unreachable!() };
             a.remove(Path::new("usr/share/pam-configs/capability"));
-            Some(a)
+            Outcome::Complete(a)
         }
         let dir = std::env::temp_dir().join(format!("unbidden-prov-pam-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -366,12 +396,12 @@ mod tests {
         // A package database is a file an attacker can write. If reading it
         // panics, every path it might have claimed is unknown; calling them
         // unpackaged would flag the whole system on the attacker's say-so.
-        fn owns_one(_: &Root, _: &BTreeSet<PathBuf>) -> Option<Answers> {
+        fn owns_one(_: &Root, _: &BTreeSet<PathBuf>) -> Outcome {
             let mut a = Answers::new();
             a.insert(PathBuf::from("usr/bin/ok"), Provenance::Unpackaged);
-            Some(a)
+            Outcome::Complete(a)
         }
-        fn explodes(_: &Root, _: &BTreeSet<PathBuf>) -> Option<Answers> {
+        fn explodes(_: &Root, _: &BTreeSet<PathBuf>) -> Outcome {
             panic!("header index 4294967295 out of range")
         }
         let dir = std::env::temp_dir().join(format!("unbidden-prov-panic-{}", std::process::id()));
@@ -385,6 +415,25 @@ mod tests {
         assert!(r.failures[0].starts_with("rpm database: header index"), "{:?}", r.failures);
         assert_eq!(r.answers[Path::new("usr/bin/ok")], Provenance::Unpackaged, "what dpkg said stands");
         assert_eq!(r.answers[Path::new("etc/other")], Provenance::Unknown);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_database_that_could_not_be_read_to_the_end_leaves_unclaimed_paths_unknown_and_says_so() {
+        fn half_read(_: &Root, _: &BTreeSet<PathBuf>) -> Outcome {
+            let mut a = Answers::new();
+            a.insert(PathBuf::from("usr/bin/ok"), Provenance::Unpackaged);
+            Outcome::Incomplete(a, "status is larger than the read cap".into())
+        }
+        let dir = std::env::temp_dir().join(format!("unbidden-prov-incomplete-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        let wanted: BTreeSet<PathBuf> = ["usr/bin/ok", "etc/other"].iter().map(PathBuf::from).collect();
+        let r = resolve_with(&root, &wanted, &[("dpkg", half_read)]);
+        assert_eq!(r.failures, ["dpkg database: status is larger than the read cap"]);
+        assert_eq!(r.answers[Path::new("usr/bin/ok")], Provenance::Unpackaged, "what it did answer stands");
+        assert_eq!(r.answers[Path::new("etc/other")], Provenance::Unknown, "the rest might have been in the part not read");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -119,6 +119,15 @@ impl Root {
         Root::open_root("/", true)
     }
 
+    /// A tree under test that has to answer as a running system does, for the
+    /// rules that trust a live host's change times.
+    #[cfg(test)]
+    pub fn at_as_live(path: impl AsRef<Path>) -> io::Result<Root> {
+        let mut root = Root::open_root(path.as_ref(), false)?;
+        root.live = true;
+        Ok(root)
+    }
+
     /// A mounted image or chroot. Live-only interfaces are unavailable and
     /// resolution is confined to the root by the kernel.
     pub fn at(path: impl AsRef<Path>) -> io::Result<Root> {
