@@ -1291,17 +1291,29 @@ fn is_alias_name(s: &str) -> bool {
     s.as_bytes().first().is_some_and(u8::is_ascii_uppercase) && s.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
 
+/// Members one expansion may visit. Depth is bounded, but nesting multiplies
+/// breadth: forty levels of two references each is 2^40 members, and `visudo`
+/// accepts it, so a 930-byte sudoers hung a scan for minutes. A legitimate
+/// list has a handful. Past the budget the rest stays as written.
+const SUDO_EXPANSION_BUDGET: usize = 2048;
+
 /// A comma-separated list with each alias of `kind` replaced by its
 /// members, as sudo resolves it once every file is read: aliases nest, and
-/// a negated alias negates each member. Expansion is bounded, so a cycle,
-/// which sudo rejects outright, ends rather than recurses. The flag says
-/// whether anything was an alias: a list with none is left as written.
-fn expand_sudo_aliases(aliases: &BTreeMap<(String, String), String>, kind: &str, list: &str, depth: usize) -> (String, bool) {
+/// a negated alias negates each member. Expansion is bounded in depth and
+/// in the members it visits, so a cycle, which sudo rejects outright, ends
+/// rather than recurses. The flag says whether anything was an alias: a list
+/// with none is left as written. `budget` reads zero afterwards if the
+/// expansion was cut short.
+fn expand_sudo_aliases(aliases: &BTreeMap<(String, String), String>, kind: &str, list: &str, depth: usize, budget: &mut usize) -> (String, bool) {
     let mut changed = false;
     let members: Vec<String> = list
         .split(',')
         .map(|m| {
             let m = m.trim();
+            if *budget == 0 {
+                return m.to_string();
+            }
+            *budget -= 1;
             let (neg, name) = match m.strip_prefix('!') {
                 Some(n) => (true, n.trim()),
                 None => (false, m),
@@ -1309,7 +1321,7 @@ fn expand_sudo_aliases(aliases: &BTreeMap<(String, String), String>, kind: &str,
             match aliases.get(&(kind.to_string(), name.to_string())) {
                 Some(v) if depth < 16 && is_alias_name(name) => {
                     changed = true;
-                    let (inner, _) = expand_sudo_aliases(aliases, kind, v, depth + 1);
+                    let (inner, _) = expand_sudo_aliases(aliases, kind, v, depth + 1, budget);
                     if neg { inner.split(", ").map(|x| format!("!{x}")).collect::<Vec<_>>().join(", ") } else { inner }
                 }
                 _ => m.to_string(),
@@ -1339,7 +1351,11 @@ fn resolve_sudo_aliases(entries: &mut [Entry]) {
         }
         for (key, kind, resolved_key) in [("commands", "cmnd_alias", "commands_resolved"), ("user_list", "user_alias", "user_list_resolved"), ("host_list", "host_alias", "host_list_resolved")] {
             let Some(list) = e.raw.get(key).cloned() else { continue };
-            let (resolved, changed) = expand_sudo_aliases(&aliases, kind, &list, 0);
+            let mut budget = SUDO_EXPANSION_BUDGET;
+            let (resolved, changed) = expand_sudo_aliases(&aliases, kind, &list, 0, &mut budget);
+            if budget == 0 {
+                e.note("alias_expansion_truncated", format!("{key}: more than {SUDO_EXPANSION_BUDGET} members; the rest is left as written"));
+            }
             if changed {
                 e.note(resolved_key, resolved.clone());
                 if key == "commands" {
@@ -1351,7 +1367,8 @@ fn resolve_sudo_aliases(entries: &mut [Entry]) {
         // Runas is `user` or `user:group`, either an alias.
         if let Some(p) = e.principal.clone() {
             let (user, group) = p.split_once(':').map(|(u, g)| (u.trim(), Some(g))).unwrap_or((p.trim(), None));
-            let (resolved, changed) = expand_sudo_aliases(&aliases, "runas_alias", user, 0);
+            let mut budget = SUDO_EXPANSION_BUDGET;
+            let (resolved, changed) = expand_sudo_aliases(&aliases, "runas_alias", user, 0, &mut budget);
             if changed {
                 e.note("runas_resolved", resolved.clone());
                 e.principal = Some(match group {
@@ -3238,6 +3255,30 @@ PKCS11Provider /opt/a.so extra
         assert_eq!(u2f.entry.raw["control"], "optional");
         std::fs::remove_dir_all(&d).unwrap();
     }
+    #[test]
+    fn nested_aliases_that_multiply_are_cut_off_not_expanded() {
+        // Forty levels, two references each, no cycle: visudo accepts it,
+        // and expanding it is 2^40 members.
+        let mut sudoers = String::new();
+        for i in (0..40).rev() {
+            let next = if i == 39 { "/bin/true".to_string() } else { format!("C{}, C{}", i + 1, i + 1) };
+            sudoers.push_str(&format!("Cmnd_Alias C{i} = {next}\n"));
+        }
+        sudoers.push_str("alice ALL = (root) NOPASSWD: C0\n");
+        let d = std::env::temp_dir().join(format!("unbidden-sudo-multiply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("etc")).unwrap();
+        std::fs::write(d.join("etc/sudoers"), sudoers).unwrap();
+        let started = std::time::Instant::now();
+        let root = crate::root::Root::at(&d).unwrap();
+        let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Auth)];
+        let s = crate::scan::run(&root, &crate::scan::Options { deep: false }, &collectors);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
+        let spec = s.entries.iter().find(|e| e.raw.contains_key("alias_expansion_truncated")).expect("the cut is on the entry");
+        assert!(spec.raw["alias_expansion_truncated"].contains("2048"));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
     #[test]
     fn sudoers_aliases_resolve_and_includes_nest() {
         let d = std::env::temp_dir().join(format!("unbidden-sudoers-alias-{}", std::process::id()));
