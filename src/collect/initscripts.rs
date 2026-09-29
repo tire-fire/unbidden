@@ -9,6 +9,7 @@
 //! it, which is the SysV shape of the `.wants` problem systemd has, and
 //! treating presence in init.d as enablement is the defect this avoids.
 
+use crate::entry::key;
 use crate::text::{normalize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -536,7 +537,7 @@ fn sysv(cx: &mut Ctx) -> Vec<Entry> {
             let rel = dir.join(&ent.name);
             let mut e = script_entry(cx, kind, &rel, &ent.name, Trigger::Boot);
             if openrc.is_some() && !first_of_name.insert(ent.name.as_bytes().to_vec()) {
-                e.note("shadowed_by", "a script of the same name in an earlier init.d");
+                e.note(key::SHADOWED_BY, "a script of the same name in an earlier init.d");
             }
             index.insert((*id, ent.name.as_bytes().to_vec()), scripts.len());
             scripts.push(e);
@@ -787,7 +788,7 @@ fn openrc_service(cx: &mut Ctx, rc: &Openrc, e: &mut Entry, conf_d: &mut BTreeSe
         e.note("not_run", ".sh files are not init scripts to OpenRC");
         return;
     }
-    if e.raw.contains_key("shadowed_by") {
+    if e.raw.contains_key(key::SHADOWED_BY) {
         e.enabled = Enablement::Disabled;
         return;
     }

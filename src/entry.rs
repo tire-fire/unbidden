@@ -192,6 +192,60 @@ impl Scope {
     }
 }
 
+/// The names of the notes that one part of the tool writes and another reads
+/// to decide something, so each spelling has one owner. The rest of `raw` is
+/// evidence for whoever reads the record and is spelled where it is written.
+/// The spellings are the record's contract, pinned by the tests and the golden
+/// record.
+pub mod key {
+    /// The collector knows there is no program to find (a Lua scriptlet, a right, a variable an interpreter reads), so a missing target is no finding.
+    pub const TARGET_UNVERIFIABLE: &str = "target_unverifiable";
+    /// This file replaces others of the same name in later directories.
+    pub const SHADOWS: &str = "shadows";
+    /// Another file of the same name in an earlier directory is read instead.
+    pub const SHADOWED_BY: &str = "shadowed_by";
+    /// The line is found verbatim in this packaged template, and is judged by it.
+    pub const MATCHES_TEMPLATE: &str = "matches_template";
+    /// The signing keys a repository names.
+    pub const TRUSTS: &str = "trusts";
+    /// A verified input stands behind the entry: for a repository, every key it trusts is packaged and intact; for an inittab line, the packaged template holds it unchanged.
+    pub const VOUCHED: &str = "vouched";
+    /// The entry is a record read out of a package database, not a file of its own.
+    pub const READ_FROM: &str = "read_from";
+    /// No package manager records a digest of this metadata, so none can be checked.
+    pub const DIGEST_UNAVAILABLE: &str = "digest_unavailable";
+    /// The id of the entry this one was made out of.
+    pub const DECLARED_BY_ENTRY: &str = "declared_by_entry";
+    /// A script tests for the target before running it.
+    pub const GUARDED_BY_TEST: &str = "guarded_by_test";
+    /// A failing Condition on the file the unit runs.
+    pub const GUARDED_BY_CONDITION: &str = "guarded_by_condition";
+    /// The command is a shell script run by an interpreter, not a command line.
+    pub const SCRIPT_SHELL: &str = "script_shell";
+    /// A zero-byte file holds no mechanism.
+    pub const EMPTY_FILE: &str = "empty_file";
+    /// Where the entry's own file, a link, points.
+    pub const SYMLINK_TARGET: &str = "symlink_target";
+    /// The template a systemd instance is made from.
+    pub const TEMPLATE_UNIT: &str = "template_unit";
+    /// The `Scope` a systemd unit belongs to.
+    pub const SCOPE: &str = "scope";
+    /// The uid whose user manager may speak for a unit in a home.
+    pub const SCOPE_UID: &str = "scope_uid";
+    /// What the collector read, kept beside an authoritative answer that replaced it.
+    pub const INFERRED_ENABLEMENT: &str = "inferred_enablement";
+    /// The inode changed well after its package was installed.
+    pub const CHANGED_AFTER_INSTALL: &str = "changed_after_install";
+    /// Whether a repository checks signatures.
+    pub const SIGNATURE_CHECKING: &str = "signature_checking";
+    /// A registry no package can own, written by a trigger.
+    pub const REGISTRY_GENERATED: &str = "registry_generated";
+    /// A name that follows a `#` a person reads as a comment.
+    pub const AFTER_HASH: &str = "after_hash";
+    /// The daemon a super-server service runs under.
+    pub const DAEMON: &str = "daemon";
+}
+
 /// The note that carries an entry's `TargetVerdict`.
 const TARGET_PROVENANCE: &str = "target_provenance";
 
@@ -670,6 +724,39 @@ pub fn hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The spellings are the record's contract: a baseline written by one
+    /// version is read by another.
+    #[test]
+    fn the_keys_that_carry_a_decision_keep_their_spelling() {
+        for (constant, spelled) in [
+            (key::TARGET_UNVERIFIABLE, "target_unverifiable"),
+            (key::SHADOWS, "shadows"),
+            (key::SHADOWED_BY, "shadowed_by"),
+            (key::MATCHES_TEMPLATE, "matches_template"),
+            (key::TRUSTS, "trusts"),
+            (key::VOUCHED, "vouched"),
+            (key::READ_FROM, "read_from"),
+            (key::DIGEST_UNAVAILABLE, "digest_unavailable"),
+            (key::DECLARED_BY_ENTRY, "declared_by_entry"),
+            (key::GUARDED_BY_TEST, "guarded_by_test"),
+            (key::GUARDED_BY_CONDITION, "guarded_by_condition"),
+            (key::SCRIPT_SHELL, "script_shell"),
+            (key::EMPTY_FILE, "empty_file"),
+            (key::SYMLINK_TARGET, "symlink_target"),
+            (key::TEMPLATE_UNIT, "template_unit"),
+            (key::SCOPE, "scope"),
+            (key::SCOPE_UID, "scope_uid"),
+            (key::INFERRED_ENABLEMENT, "inferred_enablement"),
+            (key::CHANGED_AFTER_INSTALL, "changed_after_install"),
+            (key::SIGNATURE_CHECKING, "signature_checking"),
+            (key::REGISTRY_GENERATED, "registry_generated"),
+            (key::AFTER_HASH, "after_hash"),
+            (key::DAEMON, "daemon"),
+        ] {
+            assert_eq!(constant, spelled);
+        }
+    }
+
     #[test]
     fn every_target_verdict_survives_the_words_it_is_recorded_in() {
         let verdicts = [

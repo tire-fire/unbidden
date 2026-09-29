@@ -24,6 +24,7 @@
 //! (no package owns it) and loaded by every GTK program that shows an
 //! image. A relative library name is resolved on the loader's search path.
 
+use crate::entry::key;
 use std::path::{Path, PathBuf};
 
 use crate::entry::{Enablement, Entry, Kind, Trigger};
@@ -105,7 +106,7 @@ fn target(cx: &mut Ctx, e: &mut Entry, lib: &str, libdirs: &[String]) {
             return;
         }
     }
-    e.note("target_unverifiable", "a library found on the loader's search path");
+    e.note(key::TARGET_UNVERIFIABLE, "a library found on the loader's search path");
 }
 
 fn entry(cx: &mut Ctx, rel: &Path, name: String, framework: &str, trigger: Trigger) -> Entry {
@@ -296,7 +297,7 @@ fn gdk_pixbuf(cx: &mut Ctx, out: &mut Vec<Entry>) {
                     let name = path.rsplit('/').next().unwrap_or(path);
                     let mut e = entry(cx, &rel, format!("gdk-pixbuf:{name}"), "gdk-pixbuf", Trigger::Always);
                     e.target_path = Some(PathBuf::from(path));
-                    e.note("registry_generated", "written by gdk-pixbuf-query-loaders; no package owns it");
+                    e.note(key::REGISTRY_GENERATED, "written by gdk-pixbuf-query-loaders; no package owns it");
                     out.push(e);
                 }
                 at_stanza_start = false;

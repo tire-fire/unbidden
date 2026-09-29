@@ -18,6 +18,7 @@
 //! /usr/lib is two entries plus the rank and the path of its neighbour, so
 //! enrichment can decide which shadows which; the collector does not.
 
+use crate::entry::key;
 use crate::text::{lossy};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -430,10 +431,10 @@ impl Walk {
             }
         }
         for (i, paths) in shadows {
-            out[i].note("shadows", paths.into_iter().collect::<Vec<_>>().join(", "));
+            out[i].note(key::SHADOWS, paths.into_iter().collect::<Vec<_>>().join(", "));
         }
         for (i, paths) in shadowed_by {
-            out[i].note("shadowed_by", paths.into_iter().collect::<Vec<_>>().join(", "));
+            out[i].note(key::SHADOWED_BY, paths.into_iter().collect::<Vec<_>>().join(", "));
         }
     }
 
@@ -534,10 +535,10 @@ fn dropin_entry(cx: &mut Ctx, f: &Found) -> Entry {
 /// other about the unit, so the uid comes from the account database here
 /// rather than from anything the unit file or its owner could set.
 fn note_scope(cx: &Ctx, e: &mut Entry, scope: &Scope) {
-    e.note("scope", scope.label());
+    e.note(key::SCOPE, scope.label());
     if let Scope::Home(who) = scope {
         if let Some(uid) = cx.users.iter().find(|u| &u.name == who).and_then(|u| u.uid) {
-            e.note("scope_uid", uid.to_string());
+            e.note(key::SCOPE_UID, uid.to_string());
         }
     }
 }
@@ -594,7 +595,7 @@ fn generators(cx: &mut Ctx, seen: &mut BTreeSet<(u64, u64)>) -> Vec<Entry> {
             e.enabled = Enablement::NotApplicable;
             e.command = Some(abs.clone().into_os_string().into_vec());
             e.target_path = Some(abs);
-            e.note("scope", scope);
+            e.note(key::SCOPE, scope);
             if dir.ends_with("environment-generators") {
                 e.note("generator_type", "environment");
             }
@@ -734,13 +735,13 @@ fn manager_environment(cx: &mut Ctx) -> Vec<Entry> {
                 let mut e = cx.entry(Kind::SystemdHook, &rel, name);
                 e.trigger = Trigger::Boot;
                 e.note("hook", d.key.clone());
-                e.note("scope", scope);
+                e.note(key::SCOPE, scope);
                 if scope == "system" {
                     e.principal = Some("root".into());
                 }
                 if let Some(a) = &account {
                     e.principal = Some(a.clone());
-                    e.note("scope", "the account's own user manager");
+                    e.note(key::SCOPE, "the account's own user manager");
                 }
                 for (k, v) in split_env(&d.value) {
                     e.note(&format!("env.{k}"), v);
@@ -860,7 +861,7 @@ fn tmpfiles_file(cx: &mut Ctx, rel: &Path, shadowed_by: Option<&Path>, principal
         }
         e.note("line", lossy(line));
         if let Some(by) = shadowed_by {
-            e.note("shadowed_by", cx.root.abs(by).display().to_string());
+            e.note(key::SHADOWED_BY, cx.root.abs(by).display().to_string());
         }
         if std::str::from_utf8(line).is_err() {
             e.flag(Flag::EncodingAnomaly);
@@ -914,13 +915,13 @@ fn presets(cx: &mut Ctx, dirs: &[&str], units: &[SearchDir], scope: &str) -> Vec
             e.trigger = Trigger::PackageOp;
             e.enabled =
                 if shadowed_by.is_some() || before.is_some() { Enablement::Disabled } else { Enablement::Enabled };
-            e.note("scope", scope);
+            e.note(key::SCOPE, scope);
             e.note("pattern", lossy(pattern));
             if !instances.is_empty() {
                 e.note("instances", lossy(instances));
             }
             if let Some(by) = &shadowed_by {
-                e.note("shadowed_by", cx.root.abs(by).display().to_string());
+                e.note(key::SHADOWED_BY, cx.root.abs(by).display().to_string());
             }
             if let Some(at) = before {
                 e.note("decided_by", at);
@@ -1217,7 +1218,7 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
     if !fails.is_empty() {
         e.note("condition_fails", fails.join("; "));
         if let Some(how) = guard {
-            e.note("guarded_by_condition", how);
+            e.note(key::GUARDED_BY_CONDITION, how);
         }
         e.note("not_run", format!("a condition of the unit does not hold: {}", fails[0]));
     }
@@ -1373,7 +1374,7 @@ fn note_template(e: &mut Entry, unit: &str, suffix: Option<&str>) {
     if instance.is_empty() {
         e.note("template", "true");
     } else {
-        e.note("template_unit", template);
+        e.note(key::TEMPLATE_UNIT, template);
         e.note("instance", instance);
     }
 }

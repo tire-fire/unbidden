@@ -56,6 +56,7 @@
 //! shell abrt-handle-event runs, as root under abrtd, when that event fires
 //! for a crash; `#` comments to the end of the line.
 
+use crate::entry::key;
 use std::path::{Path, PathBuf};
 
 use crate::entry::{Enablement, Entry, Kind, Trigger, hex};
@@ -281,7 +282,7 @@ fn spamassassin(cx: &mut Ctx, out: &mut Vec<Entry>) {
             match words.next() {
                 Some(file) if file.starts_with('/') => e.target_path = Some(PathBuf::from(file)),
                 Some(file) => e.target_path = Some(cx.root.abs(dir.join(file))),
-                None => e.note("target_unverifiable", "a Perl module found on @INC"),
+                None => e.note(key::TARGET_UNVERIFIABLE, "a Perl module found on @INC"),
             }
             out.push(e);
         }
@@ -406,7 +407,7 @@ fn kea(cx: &mut Ctx, out: &mut Vec<Entry>) {
                 if lib.starts_with('/') {
                     e.target_path = Some(PathBuf::from(lib));
                 } else {
-                    e.note("target_unverifiable", "a hooks library found in Kea's hooks directory");
+                    e.note(key::TARGET_UNVERIFIABLE, "a hooks library found in Kea's hooks directory");
                 }
                 if !installed {
                     e.enabled = Enablement::Disabled;

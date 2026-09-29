@@ -6,6 +6,7 @@
 //! a rule carrying invalid UTF-8 survives as evidence rather than becoming
 //! replacement characters.
 
+use crate::entry::key;
 use crate::text::{Padding, base64_decode, base64_encode_unpadded, lossy, short_hash};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -365,7 +366,7 @@ fn nss(cx: &mut Ctx, out: &mut Vec<Entry>) {
         e.note("library", file.to_string_lossy());
         if after_hash {
             // What reads as a comment to a person is a source to glibc.
-            e.note("after_hash", "true");
+            e.note(key::AFTER_HASH, "true");
         }
         match found.first() {
             Some(lib) => {
@@ -403,10 +404,10 @@ fn pam_include(cx: &mut Ctx, rel: &Path, service: &str, keyword: &str, stack: &[
     e.trigger = Trigger::Auth;
     e.enabled = if shadowed_by.is_some() { Enablement::Disabled } else { Enablement::Enabled };
     if let Some(by) = shadowed_by {
-        e.note("shadowed_by", by.clone());
+        e.note(key::SHADOWED_BY, by.clone());
     }
     if let Some(paths) = shadows {
-        e.note("shadows", paths.clone());
+        e.note(key::SHADOWS, paths.clone());
     }
     e.note("service", service);
     e.note("include", lossy(stack));
@@ -490,10 +491,10 @@ fn pam(cx: &mut Ctx, out: &mut Vec<Entry>) {
             e.trigger = Trigger::Auth;
             e.enabled = if shadowed_by.is_some() { Enablement::Disabled } else { Enablement::Enabled };
             if let Some(by) = &shadowed_by {
-                e.note("shadowed_by", by.clone());
+                e.note(key::SHADOWED_BY, by.clone());
             }
             if let Some(paths) = &shadows {
-                e.note("shadows", paths.clone());
+                e.note(key::SHADOWS, paths.clone());
             }
             e.note("service", service);
             e.note("module_type", mtype);
@@ -1642,7 +1643,7 @@ fn groups(cx: &mut Ctx, out: &mut Vec<Entry>) {
             e.principal = Some(user.clone());
             e.note("group", g);
             e.note("grants", why);
-            e.note("target_unverifiable", "a right, not a program");
+            e.note(key::TARGET_UNVERIFIABLE, "a right, not a program");
             if !shells.contains_key(user.as_str()) {
                 e.note("account", "no local account; a directory's, or none");
             }

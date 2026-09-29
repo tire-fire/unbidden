@@ -4,6 +4,7 @@
 //! and both are read from a search path whose merged-usr aliases must collapse to a single directory
 //! before anything is emitted (§5).
 
+use crate::entry::key;
 use crate::collect::first_absolute;
 use crate::text::{lossy, short_hash, take_word};
 use std::collections::BTreeMap;
@@ -131,7 +132,7 @@ fn sysctl_callouts(cx: &mut Ctx) -> Vec<Entry> {
             let mut e = callout_entry(cx, &rel, which, *trigger, command);
             if let Some(by) = &shadowed_by {
                 e.enabled = Enablement::Disabled;
-                e.note("shadowed_by", path_note(cx, by));
+                e.note(key::SHADOWED_BY, path_note(cx, by));
             }
             out.push(e);
         }
@@ -175,7 +176,7 @@ fn binfmt_handlers(cx: &mut Ctx) -> Vec<Entry> {
             e.note("match", if *kind == b"E" { "extension" } else { "magic" });
             if let Some(by) = &shadowed_by {
                 e.enabled = Enablement::Disabled;
-                e.note("shadowed_by", path_note(cx, by));
+                e.note(key::SHADOWED_BY, path_note(cx, by));
             }
             out.push(e);
         }
@@ -322,7 +323,7 @@ fn udev_rules(cx: &mut Ctx) -> Vec<Entry> {
                     // Nothing to resolve: the value is a unit name, and the
                     // systemd collector has its own entry for the file.
                     e.note("systemd_unit", String::from_utf8_lossy(t.value));
-                    e.note("target_unverifiable", "names a systemd unit, not a program");
+                    e.note(key::TARGET_UNVERIFIABLE, "names a systemd unit, not a program");
                 } else {
                     e.target_path = first_absolute(t.value);
                 }
@@ -336,10 +337,10 @@ fn udev_rules(cx: &mut Ctx) -> Vec<Entry> {
                 e.note("op", String::from_utf8_lossy(t.op));
                 e.note("rank", rank.to_string());
                 if let Some(by) = &shadowed_by {
-                    e.note("shadowed_by", by.clone());
+                    e.note(key::SHADOWED_BY, by.clone());
                 }
                 if !shadows.is_empty() {
-                    e.note("shadows", shadows.join(", "));
+                    e.note(key::SHADOWS, shadows.join(", "));
                 }
                 for (k, v) in &facts {
                     e.append_note(k, v);
@@ -655,7 +656,7 @@ fn mark_shadowed(cx: &Ctx, entries: &mut [Entry], by: Option<PathBuf>) {
     let Some(by) = by else { return };
     for e in entries {
         e.enabled = Enablement::Disabled;
-        e.note("shadowed_by", cx.root.abs(&by).display().to_string());
+        e.note(key::SHADOWED_BY, cx.root.abs(&by).display().to_string());
     }
 }
 

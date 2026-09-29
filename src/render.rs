@@ -4,6 +4,7 @@
 //! never a scan decision. The scan always collects everything, --json always
 //! emits everything, and the human table always says how many rows it hid.
 
+use crate::entry::key;
 use std::io::{self, IsTerminal, Write};
 
 use crate::entry::{Entry, Flag, Kind, Trigger};
@@ -53,7 +54,7 @@ pub fn suppressed(e: &Entry) -> bool {
     let quiet = e.flags.iter().all(|f| *f == Flag::DegradedEnablement || (*f == Flag::TargetUnresolvable && vendor_text));
     // A zero-byte file holds no mechanism: /etc/environment as most hosts
     // ship it, owned by nothing. Anything written into it makes it a row.
-    if e.raw.contains_key("empty_file") && e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged)) {
+    if e.raw.contains_key(key::EMPTY_FILE) && e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged)) {
         return true;
     }
     let target_verified = e.target_verdict().is_none_or(|v| v.is_verified());
@@ -68,7 +69,7 @@ pub fn suppressed(e: &Entry) -> bool {
     // unpackaged or modified library shows through target_provenance.
     if e.kind == Kind::NssModule && !e.provenance.is_verified() {
         let source_only = e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
-        return source_only && target_verified && !e.raw.contains_key("after_hash");
+        return source_only && target_verified && !e.raw.contains_key(key::AFTER_HASH);
     }
     // A plug-in registry file is machinery; the library it names is the
     // payload. A packaged, intact registry (glibc's gconv-modules, a
@@ -82,7 +83,7 @@ pub fn suppressed(e: &Entry) -> bool {
         // A registry no package can own — gdk-pixbuf's loaders.cache is
         // written by a trigger after every loader install — is judged by the
         // libraries it names alone.
-        if !e.provenance.is_verified() && !e.raw.contains_key("registry_generated") {
+        if !e.provenance.is_verified() && !e.raw.contains_key(key::REGISTRY_GENERATED) {
             return false;
         }
         let target_ok = target_verified || e.has_flag(Flag::TargetMissing);
@@ -92,12 +93,12 @@ pub fn suppressed(e: &Entry) -> bool {
     // A repository whose sources file no package owns, but whose every
     // trusted key is packaged and intact, can install only what a package
     // already vouched for: the distribution's own, as its installer wrote it.
-    if e.kind == Kind::PkgSource && e.raw.contains_key("vouched") {
+    if e.kind == Kind::PkgSource && e.raw.contains_key(key::VOUCHED) {
         return e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged | Flag::ConffileModified));
     }
     // An inittab line the packaged template holds verbatim runs what the
     // package meant it to, once its target verifies.
-    if e.kind == Kind::Inittab && e.raw.contains_key("vouched") {
+    if e.kind == Kind::Inittab && e.raw.contains_key(key::VOUCHED) {
         return target_verified && e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
     }
     // What a generator, snapd or a vendor preset wrote is derived from
@@ -108,7 +109,7 @@ pub fn suppressed(e: &Entry) -> bool {
     let derived = matches!(&e.provenance, crate::entry::Provenance::GeneratedBy { by } if by.derives_from_packaged_inputs());
     // A file whose inode changed after its package installed it was touched
     // by something other than the package manager, however it verifies.
-    let untouched = !e.raw.contains_key("changed_after_install");
+    let untouched = !e.raw.contains_key(key::CHANGED_AFTER_INSTALL);
     quiet && target_verified && untouched && (e.provenance.is_verified() || from_package_database(e) || derived)
 }
 
@@ -143,12 +144,12 @@ pub fn suppressed(e: &Entry) -> bool {
 /// it last changed, and one changed after its package was installed is shown:
 /// dpkg did not write it, and that is exactly the script worth reading.
 fn from_package_database(e: &Entry) -> bool {
-    let metadata = e.raw.contains_key("read_from") || e.raw.contains_key("digest_unavailable");
+    let metadata = e.raw.contains_key(key::READ_FROM) || e.raw.contains_key(key::DIGEST_UNAVAILABLE);
     // apk's scripts archive is written by apk, not shipped by a package:
     // GeneratedBy apk is that database's way of being the package manager's
     // own machinery.
     metadata
-        && !e.raw.contains_key("changed_after_install")
+        && !e.raw.contains_key(key::CHANGED_AFTER_INSTALL)
         && matches!(e.provenance, crate::entry::Provenance::Packaged { .. } | crate::entry::Provenance::GeneratedBy { .. })
 }
 

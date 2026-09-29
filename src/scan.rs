@@ -6,6 +6,7 @@
 //! failed collector and the scan continues, because a scan that aborts on the
 //! one file the attacker crafted is a scan the attacker controls.
 
+use crate::entry::key;
 use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -236,7 +237,7 @@ impl<'a> Ctx<'a> {
 
             let meta = if link.is_symlink {
                 if let Ok(t) = self.root.read_link(rel) {
-                    e.note("symlink_target", t.to_string_lossy());
+                    e.note(key::SYMLINK_TARGET, t.to_string_lossy());
                 }
                 match self.root.stat_follow(rel) {
                     Ok(target) => target,

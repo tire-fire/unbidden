@@ -15,6 +15,7 @@
 //! in the distribution's /etc pref files, names a `.cfg` in the install
 //! directory that Firefox evaluates at startup.
 
+use crate::entry::key;
 use std::path::{Path, PathBuf};
 
 use crate::entry::{Enablement, Entry, Kind, Trigger};
@@ -65,9 +66,9 @@ fn extension(cx: &mut Ctx, rel: &Path, browser: &str, installed: bool, id: &str,
         Some(u) if u.starts_with('/') => e.target_path = Some(PathBuf::from(u)),
         Some(u) => {
             e.note("install_url", u);
-            e.note("target_unverifiable", "code fetched from a URL");
+            e.note(key::TARGET_UNVERIFIABLE, "code fetched from a URL");
         }
-        None => e.note("target_unverifiable", "code fetched from the browser's web store"),
+        None => e.note(key::TARGET_UNVERIFIABLE, "code fetched from the browser's web store"),
     }
     e
 }

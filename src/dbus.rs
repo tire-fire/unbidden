@@ -16,6 +16,7 @@
 //! has to be reported, and that is exactly where an attacker's unit sits
 //! before its first boot.
 
+use crate::entry::key;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -332,8 +333,8 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
         // instance, and only then does the template's file speak for it.
         let template_file = e
             .raw
-            .get("symlink_target")
-            .filter(|t| e.raw.get("template_unit").is_some_and(|template| Path::new(t.as_str()).file_name().is_some_and(|n| n == template.as_str())))
+            .get(key::SYMLINK_TARGET)
+            .filter(|t| e.raw.get(key::TEMPLATE_UNIT).is_some_and(|template| Path::new(t.as_str()).file_name().is_some_and(|n| n == template.as_str())))
             .filter(|_| manager.by_path.get(&e.source).is_none());
         let via_template = template_file.is_some();
         let key = template_file.map_or_else(|| e.source.clone(), PathBuf::from);
@@ -349,8 +350,8 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
         // manager, a unit in someone's home from that account's own manager,
         // and a unit on the shared user search path from any user manager —
         // which is then one account's view, and says whose.
-        let owner_manager = e.raw.get("scope_uid").map(|uid| format!("user:{uid}"));
-        let scope = e.raw.get("scope").and_then(|s| Scope::from_label(s)).unwrap_or(Scope::System);
+        let owner_manager = e.raw.get(key::SCOPE_UID).map(|uid| format!("user:{uid}"));
+        let scope = e.raw.get(key::SCOPE).and_then(|s| Scope::from_label(s)).unwrap_or(Scope::System);
         let may_answer = |m: &str| match &scope {
             Scope::User => m.starts_with("user:"),
             Scope::Home(_) => owner_manager.as_deref() == Some(m),
@@ -362,7 +363,7 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
         // path testable. It is the offline implementation, and a live host
         // is the only place its answers can be checked against systemd's.
         if e.enabled != Enablement::Unknown {
-            e.note("inferred_enablement", e.enabled.as_str());
+            e.note(key::INFERRED_ENABLEMENT, e.enabled.as_str());
         }
         if via_template {
             // The template being enabled says its default instance is; this

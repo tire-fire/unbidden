@@ -93,6 +93,7 @@
 //! cmd.script the arguments are the command; any other function's payload
 //! is the module's own or comes from the master, and is not read.
 
+use crate::entry::key;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -185,7 +186,7 @@ fn audit_plugins(cx: &mut Ctx, out: &mut Vec<Entry>) {
         if path.starts_with('/') {
             e.target_path = Some(PathBuf::from(&path));
         } else {
-            e.note("target_unverifiable", "runs inside auditd, not a program");
+            e.note(key::TARGET_UNVERIFIABLE, "runs inside auditd, not a program");
         }
         let why = if name.starts_with('.') || name.matches('.').count() > 1 {
             Some("auditd skips hidden names and names with more than one dot")
@@ -734,7 +735,7 @@ fn remote(cx: &mut Ctx, rel: &Path, agent: &str, value: &str, denied: bool) -> E
     let mut e = cx.entry(Kind::MonitorPlugin, rel, format!("zabbix:{agent}:system.run"));
     e.trigger = Trigger::Schedule;
     e.note("allows", value);
-    e.note("target_unverifiable", "whatever command the Zabbix server sends");
+    e.note(key::TARGET_UNVERIFIABLE, "whatever command the Zabbix server sends");
     if denied {
         e.enabled = Enablement::Disabled;
         e.note("not_run", "an earlier DenyKey refuses system.run");
@@ -835,10 +836,10 @@ fn salt(cx: &mut Ctx, out: &mut Vec<Entry>) {
             if matches!(function.as_str(), "cmd.run" | "cmd.shell" | "cmd.script" | "cmd.run_all") && !args.is_empty() {
                 e.command = Some(args.join(" ").into_bytes());
                 if function == "cmd.script" {
-                    e.note("target_unverifiable", "a script the minion fetches from the master or a URL");
+                    e.note(key::TARGET_UNVERIFIABLE, "a script the minion fetches from the master or a URL");
                 }
             } else {
-                e.note("target_unverifiable", "a salt execution module, its payload not in this file");
+                e.note(key::TARGET_UNVERIFIABLE, "a salt execution module, its payload not in this file");
                 if !args.is_empty() {
                     e.note("args", args.join(" "));
                 }
@@ -1130,7 +1131,7 @@ fn code_entry(cx: &mut Ctx, rel: &Path, lang: &str, name: &str, file: Option<Str
     e.command = Some(name.as_bytes().to_vec());
     match file {
         Some(f) => e.target_path = Some(PathBuf::from(f)),
-        None => e.note("target_unverifiable", format!("a {lang} module found on the interpreter's own path")),
+        None => e.note(key::TARGET_UNVERIFIABLE, format!("a {lang} module found on the interpreter's own path")),
     }
     e
 }

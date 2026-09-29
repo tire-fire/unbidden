@@ -16,6 +16,7 @@
 //! Fedora 44). The user site, `~/.local/lib/pythonX.Y/site-packages`, is
 //! read for every account.
 
+use crate::entry::key;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -150,7 +151,7 @@ fn pth(cx: &mut Ctx, out: &mut Vec<Entry>, rel: &Path, user: Option<&str>) {
     }
     e.command = Some(imports.join(&b'\n'));
     // Python, not shell: there is no program in it for enrichment to find.
-    e.note("target_unverifiable", "Python code run inside the interpreter");
+    e.note(key::TARGET_UNVERIFIABLE, "Python code run inside the interpreter");
     if std::str::from_utf8(&bytes).is_err() {
         e.flag(crate::entry::Flag::EncodingAnomaly);
     }

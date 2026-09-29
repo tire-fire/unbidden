@@ -6,6 +6,7 @@
 //! This is also where a rule engine would eventually go. The Entry record
 //! carries the raw facts precisely so that it could.
 
+use crate::entry::key;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -155,7 +156,7 @@ fn resolve_bare_targets(root: &Root, entries: &mut [Entry]) {
     for entry in entries {
         // A collector that already knows there is no program to find says
         // so. The first word of a lua scriptlet is lua, not a command name.
-        if entry.target_path.is_some() || entry.raw.contains_key("target_unverifiable") {
+        if entry.target_path.is_some() || entry.raw.contains_key(key::TARGET_UNVERIFIABLE) {
             continue;
         }
         let Some(command) = &entry.command else { continue };
@@ -260,7 +261,7 @@ fn made_from(root: &Root, carrier: &Entry, kind: Kind, name: &str, declared: boo
     e.owner_uid = carrier.owner_uid;
     e.mode = carrier.mode;
     e.mtime = carrier.mtime;
-    e.note("declared_by_entry", &carrier.id);
+    e.note(key::DECLARED_BY_ENTRY, &carrier.id);
     e
 }
 
@@ -277,8 +278,8 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
         // A body that is shell text run by an interpreter (a package
         // scriptlet) is a script, not a command line: its target is the
         // interpreter, and each program the text starts is an entry of its own.
-        let script = entry.raw.contains_key("script_shell");
-        if entry.raw.contains_key("target_unverifiable") && !script {
+        let script = entry.raw.contains_key(key::SCRIPT_SHELL);
+        if entry.raw.contains_key(key::TARGET_UNVERIFIABLE) && !script {
             continue;
         }
         let Some(command) = entry.command.clone() else { continue };
@@ -325,7 +326,7 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
                 }
                 entry.target_path = run.program.as_deref().and_then(|p| program_path(root, entry.kind, p));
                 if let Some(how) = run.program.as_deref().and_then(|p| guarded_by_test(command, p.as_bytes())) {
-                    entry.note("guarded_by_test", how);
+                    entry.note(key::GUARDED_BY_TEST, how);
                 }
             }
             _ => {
@@ -350,7 +351,7 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
                     }
                     e.note("chain", if script { "script" } else { "command line" });
                     if let Some(how) = run.program.as_deref().and_then(|p| guarded_by_test(command, p.as_bytes())) {
-                        e.note("guarded_by_test", how);
+                        e.note(key::GUARDED_BY_TEST, how);
                     }
                     out.push(e);
                     listed += 1;
@@ -747,7 +748,7 @@ fn paths_to_resolve(root: &Root, entries: &[Entry]) -> BTreeSet<PathBuf> {
             out.insert(source);
         }
         // A line copied from a packaged template is judged by the template.
-        if let Some(t) = e.raw.get("matches_template") {
+        if let Some(t) = e.raw.get(key::MATCHES_TEMPLATE) {
             out.insert(root.rel(Path::new(t)));
         }
         if let Some(t) = &e.target_path {
@@ -820,7 +821,7 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
     // synthesised out of another entry, and one whose source is a kernel
     // interface no package can own. A loaded module's subject is the .ko it
     // came from, and that file is packaged like any other.
-    let about_target = entry.raw.contains_key("declared_by_entry")
+    let about_target = entry.raw.contains_key(key::DECLARED_BY_ENTRY)
         || is_kernel_interface(&root.rel(&entry.source));
     // A guarded absent program has no verdict to take: an entry about one
     // is judged by the file that names it. An unguarded absent one keeps
@@ -977,7 +978,7 @@ fn apply_target(root: &Root, entry: &mut Entry) {
             // Reporting it missing would be a false finding on every
             // template unit and every sshd Include line.
             if let Some(why) = unverifiable(target) {
-                entry.note("target_unverifiable", why);
+                entry.note(key::TARGET_UNVERIFIABLE, why);
                 return;
             }
             let rel = root.rel(target);
@@ -985,7 +986,7 @@ fn apply_target(root: &Root, entry: &mut Entry) {
                 // Absent, but tested for before it would run: a script's
                 // `[ -x ]` around it, or the unit's own Condition on it.
                 // The script or unit is written for a host without it.
-                let guard = entry.raw.get("guarded_by_test").or_else(|| entry.raw.get("guarded_by_condition")).cloned();
+                let guard = entry.raw.get(key::GUARDED_BY_TEST).or_else(|| entry.raw.get(key::GUARDED_BY_CONDITION)).cloned();
                 match guard {
                     Some(how) => entry.set_target_verdict(TargetVerdict::AbsentGuarded { by: how }),
                     None => entry.flag(Flag::TargetMissing),
@@ -1003,8 +1004,8 @@ fn apply_target(root: &Root, entry: &mut Entry) {
             // so, and is believed: a udev rule naming a systemd unit, or one
             // whose action runs inside udev itself, has no file to resolve.
             if entry.raw.get("key").is_some_and(|k| k.contains("{builtin}")) {
-                entry.note("target_unverifiable", "runs inside udev, not a program");
-            } else if entry.command.is_some() && !entry.raw.contains_key("target_unverifiable") {
+                entry.note(key::TARGET_UNVERIFIABLE, "runs inside udev, not a program");
+            } else if entry.command.is_some() && !entry.raw.contains_key(key::TARGET_UNVERIFIABLE) {
                 entry.flag(Flag::TargetUnresolvable);
             }
             root.rel(&entry.source)
@@ -1026,7 +1027,7 @@ fn apply_target(root: &Root, entry: &mut Entry) {
     // here at all.
     let about_itself = entry.target_path.as_ref().is_none_or(|t| root.rel(t) == root.rel(&entry.source));
     if about_itself && root.stat_follow(&hashed).is_ok_and(|m| m.is_file && m.size == 0) {
-        entry.note("empty_file", "true");
+        entry.note(key::EMPTY_FILE, "true");
     }
 }
 
@@ -1127,7 +1128,7 @@ fn apply_location(root: &Root, entry: &mut Entry) {
     // collector looked. What matters is where a symlink from inside one
     // actually leads: `systemctl link /tmp/evil.service` leaves a perfectly
     // ordinary-looking unit name in /etc.
-    if let Some(target) = entry.raw.get("symlink_target") {
+    if let Some(target) = entry.raw.get(key::SYMLINK_TARGET) {
         // Masking is a link to /dev/null. That is the documented way to turn
         // a unit off, not a mechanism hiding outside its search path.
         if target == "/dev/null" {
@@ -1273,13 +1274,13 @@ fn vouch_for_sources(entries: &mut [Entry]) {
         .map(|e| (e.source.to_string_lossy().into_owned(), e.provenance.is_verified()))
         .collect();
     for e in entries.iter_mut() {
-        if e.kind != Kind::PkgSource || e.raw.contains_key("signature_checking") {
+        if e.kind != Kind::PkgSource || e.raw.contains_key(key::SIGNATURE_CHECKING) {
             continue;
         }
-        let Some(trusts) = e.raw.get("trusts") else { continue };
+        let Some(trusts) = e.raw.get(key::TRUSTS) else { continue };
         let all = trusts.split(", ").all(|k| verified.get(k).copied().unwrap_or(false));
         if all {
-            e.note("vouched", "every key it trusts is packaged and intact");
+            e.note(key::VOUCHED, "every key it trusts is packaged and intact");
         }
     }
 }
@@ -1290,12 +1291,12 @@ fn vouch_for_sources(entries: &mut [Entry]) {
 /// file it sits in came to be. Noted, for the default view to judge by.
 fn vouch_for_templates(root: &Root, entries: &mut [Entry], answers: &provenance::Answers) {
     for e in entries.iter_mut() {
-        let Some(template) = e.raw.get("matches_template") else { continue };
+        let Some(template) = e.raw.get(key::MATCHES_TEMPLATE) else { continue };
         // Noted in the scan root's coordinates, which on an offline root carry
         // the mount prefix the answers are keyed without.
         let rel = root.rel(Path::new(template));
         if answers.get(&rel).is_some_and(Provenance::is_verified) {
-            e.note("vouched", "a line of the packaged template, unchanged");
+            e.note(key::VOUCHED, "a line of the packaged template, unchanged");
         }
     }
 }
@@ -1336,7 +1337,7 @@ fn gate_on_super_server(entries: &mut [Entry]) {
             (None, None) => (None, ""),
         };
         for e in entries.iter_mut() {
-            if e.kind != Kind::InetdService || e.raw.get("daemon").map(String::as_str) != Some(daemon) {
+            if e.kind != Kind::InetdService || e.raw.get(key::DAEMON).map(String::as_str) != Some(daemon) {
                 continue;
             }
             match daemon_state {
@@ -1346,7 +1347,7 @@ fn gate_on_super_server(entries: &mut [Entry]) {
                     if e.enabled == Enablement::Enabled && s != Enablement::Enabled {
                         // What the collector read is kept, as the bus answer
                         // keeps it, so the override can be told from the file.
-                        e.note("inferred_enablement", e.enabled.as_str());
+                        e.note(key::INFERRED_ENABLEMENT, e.enabled.as_str());
                         e.enabled = s;
                     }
                 }
@@ -1359,7 +1360,7 @@ fn gate_on_super_server(entries: &mut [Entry]) {
 /// is worth a flag needs the whole set, so it happens here.
 fn apply_shadowing(entries: &mut [Entry]) {
     for e in entries {
-        if e.raw.contains_key("shadows") {
+        if e.raw.contains_key(key::SHADOWS) {
             e.flag(Flag::ShadowsVendorUnit);
         }
     }
@@ -1472,7 +1473,7 @@ fn interpreter_entries(root: &Root, entries: &[Entry]) -> Vec<Entry> {
                 e.target_path = Some(root.abs(root.rel(Path::new(f))));
             }
             // What the variable holds is code or options, not a command line.
-            e.note("target_unverifiable", "a variable an interpreter reads");
+            e.note(key::TARGET_UNVERIFIABLE, "a variable an interpreter reads");
             e.note("variable", variable);
             e.note("read_by", reads);
             e.note("declared_in", carrier.source.to_string_lossy());
@@ -1504,7 +1505,7 @@ fn setuid_changed_after_install(root: &Root, e: &mut Entry) {
     let Some(changed) = file.ctime else { return };
     let Some(after) = crate::provenance::dpkg::changed_after_install(changed, installed) else { return };
     if !crate::provenance::dpkg::statoverridden(root, &rel) {
-        e.note("changed_after_install", format!("inode changed {}s after {list} was written", after.as_secs()));
+        e.note(key::CHANGED_AFTER_INSTALL, format!("inode changed {}s after {list} was written", after.as_secs()));
     }
 }
 
@@ -1696,7 +1697,7 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
             e.note("chain", via);
             e.note("chain_from", root.abs(&script).to_string_lossy());
             if let Some(how) = guarded_by_test(&head, e.command.as_deref().unwrap_or(b"")) {
-                e.note("guarded_by_test", how);
+                e.note(key::GUARDED_BY_TEST, how);
             }
             out.push(e);
         }

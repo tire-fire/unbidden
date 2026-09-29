@@ -6,6 +6,7 @@
 //! Both are read only where their daemon is installed. A configuration left
 //! behind by a removed package starts nothing.
 
+use crate::entry::key;
 use crate::text::{lossy};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -79,7 +80,7 @@ fn xinetd(cx: &mut Ctx, out: &mut Vec<Entry>) {
         let name = base;
         let mut e = cx.entry(Kind::InetdService, &s.rel, name);
         e.trigger = Trigger::NetworkEvent;
-        e.note("daemon", "xinetd");
+        e.note(key::DAEMON, "xinetd");
         let switched_off = s.attrs.get("disable").is_some_and(|v| v.eq_ignore_ascii_case("yes"))
             || conf.disabled.contains(&id)
             || conf.enabled.as_ref().is_some_and(|only| !only.contains(&id));
@@ -207,7 +208,7 @@ fn inetd(cx: &mut Ctx, out: &mut Vec<Entry>) {
         let mut e = cx.entry(Kind::InetdService, rel, name);
         e.trigger = Trigger::NetworkEvent;
         e.enabled = Enablement::Enabled;
-        e.note("daemon", "inetd");
+        e.note(key::DAEMON, "inetd");
         e.note("socket_type", lossy(socket_type));
         e.note("wait", lossy(wait));
         let account = user.split(|b| *b == b'.' || *b == b':').next().unwrap_or_default();

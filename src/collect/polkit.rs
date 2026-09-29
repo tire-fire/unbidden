@@ -10,6 +10,7 @@
 //! the engine is taken from the daemon itself: only the JavaScript one holds
 //! `polkit._runRules`, and only 0.105 holds the local-authority backend.
 
+use crate::entry::key;
 use crate::text::{lossy};
 use std::path::Path;
 
@@ -102,7 +103,7 @@ fn rules(cx: &mut Ctx, out: &mut Vec<Entry>) {
         let mut e = entry(cx, Kind::PolkitRule, &rel, name);
         if let Some(by) = &shadowed_by {
             e.enabled = Enablement::Disabled;
-            e.note("shadowed_by", cx.root.abs(by).display().to_string());
+            e.note(key::SHADOWED_BY, cx.root.abs(by).display().to_string());
         }
         if contains(&bytes, b"polkit.Result.YES") {
             e.note("returns_yes", "true");
@@ -288,7 +289,7 @@ fn actions(cx: &mut Ctx, out: &mut Vec<Entry>) {
         let mut e = entry(cx, Kind::PolkitAction, &rel, name);
         if let Some(by) = &shadowed_by {
             e.enabled = Enablement::Disabled;
-            e.note("shadowed_by", cx.root.abs(by).display().to_string());
+            e.note(key::SHADOWED_BY, cx.root.abs(by).display().to_string());
         }
         let (mut no_auth, mut exec) = (Vec::new(), Vec::new());
         for action in elements(&bytes, b"<action", b"</action>") {

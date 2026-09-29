@@ -14,6 +14,7 @@
 //! them. Both run as root on a package operation, so both are read — the
 //! second through the header parser §7's provenance backend already owns.
 
+use crate::entry::key;
 use crate::collect::first_absolute;
 use crate::text::{lossy, short_hash};
 use std::collections::{BTreeMap, BTreeSet};
@@ -81,7 +82,7 @@ fn kernel_hooks(cx: &mut Ctx) -> Vec<Entry> {
             e.enabled = Enablement::Masked;
         } else if let Some(by) = shadowed_by {
             e.enabled = Enablement::Disabled;
-            e.note("shadowed_by", cx.root.abs(&by).display().to_string());
+            e.note(key::SHADOWED_BY, cx.root.abs(&by).display().to_string());
         } else if e.mode & 0o111 == 0 {
             e.enabled = Enablement::Disabled;
             e.note("not_run", "not executable");
@@ -626,7 +627,7 @@ fn note_changed_after_install(cx: &Ctx, e: &mut Entry, rel: &Path, stem: &[u8]) 
     let Some(changed) = cx.root.stat(rel).ok().and_then(|m| m.ctime) else { return };
     if let Some(after) = changed_after_install(changed, installed) {
         e.note(
-            "changed_after_install",
+            key::CHANGED_AFTER_INSTALL,
             format!("inode changed {}s after {} was written", after.as_secs(), cx.root.abs(Path::new(DPKG_INFO).join(list)).display()),
         );
     }
@@ -670,7 +671,7 @@ fn dpkg_scripts(cx: &mut Ctx) -> Vec<Entry> {
         // own metadata, so no scan can ever verify a maintainer script
         // against anything. That is a property of the ecosystem rather than a
         // gap in this run, and the renderer needs to know the difference.
-        e.note("digest_unavailable", "dpkg keeps no digest for maintainer scripts");
+        e.note(key::DIGEST_UNAVAILABLE, "dpkg keeps no digest for maintainer scripts");
         note_changed_after_install(cx, &mut e, &rel, stem);
         match lossy(stem).split_once(':') {
             Some((pkg, arch)) => {
@@ -1117,7 +1118,7 @@ fn rpm_scriptlets(cx: &mut Ctx) -> (Vec<Entry>, &'static str) {
         }
         // The source is a database file, and an operator who sees one has to
         // know the entry is a field inside it rather than the file itself.
-        e.note("read_from", "rpm package header");
+        e.note(key::READ_FROM, "rpm package header");
         if !s.fires_on.is_empty() {
             e.note("fires_on", s.fires_on.join(", "));
         }
@@ -1136,10 +1137,10 @@ fn rpm_scriptlets(cx: &mut Ctx) -> (Vec<Entry>, &'static str) {
         // into itself. Saying so is what keeps every lua scriptlet on the
         // host from being reported as a command whose program went missing.
         if s.prog == "<lua>" || s.prog.is_empty() {
-            e.note("target_unverifiable", "rpm runs this itself; no program is named");
+            e.note(key::TARGET_UNVERIFIABLE, "rpm runs this itself; no program is named");
         }
         if is_shell(s.prog.as_bytes()) {
-            e.note("script_shell", "true");
+            e.note(key::SCRIPT_SHELL, "true");
         }
         out.push(e);
     }
@@ -1182,7 +1183,7 @@ fn apk_hooks(cx: &mut Ctx) -> Vec<Entry> {
         e.note("package", s.package.clone());
         e.note("version", s.version.clone());
         e.note("script", s.phase.clone());
-        e.note("read_from", "apk scripts archive");
+        e.note(key::READ_FROM, "apk scripts archive");
         if s.phase == "trigger" {
             with_script.insert(s.digest.clone());
             let dirs: Vec<&str> = triggers.iter().filter(|t| t.digest == s.digest).flat_map(|t| t.dirs.iter().map(String::as_str)).collect();
@@ -1197,9 +1198,9 @@ fn apk_hooks(cx: &mut Ctx) -> Vec<Entry> {
         // shebang's. No file on disk is that program; where the shebang names
         // a shell, the body is shell text and the enrichment pass reads the
         // programs it starts out of it.
-        e.note("target_unverifiable", "apk runs the script from its archive; no file on disk is the program");
+        e.note(key::TARGET_UNVERIFIABLE, "apk runs the script from its archive; no file on disk is the program");
         if s.body.strip_prefix(b"#!").is_some_and(|line| is_shell(line.split(|b| *b == b'\n').next().unwrap_or_default())) {
-            e.note("script_shell", "true");
+            e.note(key::SCRIPT_SHELL, "true");
         }
         out.push(e);
     }
@@ -1218,10 +1219,10 @@ fn apk_hooks(cx: &mut Ctx) -> Vec<Entry> {
                 e.note("version", v.clone());
             }
             e.note("script", "trigger");
-            e.note("read_from", "apk triggers file");
+            e.note(key::READ_FROM, "apk triggers file");
             e.note("fires_on", t.dirs.join(", "));
             e.note("not_run", "no trigger script for it in the scripts archive");
-            e.note("target_unverifiable", "a registration in apk's triggers file, not a file");
+            e.note(key::TARGET_UNVERIFIABLE, "a registration in apk's triggers file, not a file");
             out.push(e);
         }
     }

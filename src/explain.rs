@@ -9,6 +9,7 @@
 //! live compromised host an entry whose bytes changed between the scan and
 //! the inspection is itself a finding.
 
+use crate::entry::key;
 use std::io::{self, Write};
 
 use crate::entry::{Entry, Provenance};
@@ -131,7 +132,7 @@ fn write_source(w: &mut impl Write, root: &Root, entry: &Entry) -> io::Result<()
     // Some entries were read out of a binary database, not a text file.
     // Dumping twenty lines of mangled sqlite helps nobody, and the record
     // itself is already above in `command`.
-    if let Some(from) = entry.raw.get("read_from") {
+    if let Some(from) = entry.raw.get(key::READ_FROM) {
         writeln!(
             w,
             "source is the {} database at {}, not a text file",

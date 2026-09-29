@@ -5,6 +5,7 @@
 //! `event.name`; a value beginning `python:` names a Python function loaded
 //! into hg instead of a command. Git's hooks are the deep collector's.
 
+use crate::entry::key;
 use std::path::{Path, PathBuf};
 
 use crate::entry::{Enablement, Entry, Kind, Trigger};
@@ -44,7 +45,7 @@ impl Collector for Vcs {
                 e.note("event", key.split('.').next().unwrap_or_default());
                 if let Some(py) = value.strip_prefix("python:") {
                     e.note("python", py.trim());
-                    e.note("target_unverifiable", "a Python function loaded into hg");
+                    e.note(key::TARGET_UNVERIFIABLE, "a Python function loaded into hg");
                 } else {
                     e.command = Some(value.as_bytes().to_vec());
                     if let Some(first) = value.split_whitespace().next().filter(|w| w.starts_with('/')) {

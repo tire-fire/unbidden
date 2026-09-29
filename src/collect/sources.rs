@@ -14,6 +14,7 @@
 //! /usr/share/dnf5/repos.d, one entry per repository, with the key files its
 //! `gpgkey` names; `gpgcheck=0` turns package signature checking off.
 
+use crate::entry::key;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
@@ -127,7 +128,7 @@ fn apt(cx: &mut Ctx, out: &mut Vec<Entry>, keys: &mut BTreeSet<PathBuf>, store: 
                 e.note("components", r.components.clone());
             }
             if r.trusted {
-                e.note("signature_checking", "off (trusted=yes)");
+                e.note(key::SIGNATURE_CHECKING, "off (trusted=yes)");
             }
             // The key files this repository trusts, which enrichment checks.
             let trusts: Vec<PathBuf> = match &r.signed_by {
@@ -146,7 +147,7 @@ fn apt(cx: &mut Ctx, out: &mut Vec<Entry>, keys: &mut BTreeSet<PathBuf>, store: 
             };
             if !trusts.is_empty() && !r.trusted {
                 let abs: Vec<String> = trusts.iter().map(|k| cx.root.abs(k).display().to_string()).collect();
-                e.note("trusts", abs.join(", "));
+                e.note(key::TRUSTS, abs.join(", "));
             }
             keys.extend(trusts);
             if !r.enabled {
@@ -267,12 +268,12 @@ fn rpmdb_keys(cx: &mut Ctx, out: &mut Vec<Entry>, keys: &mut BTreeSet<PathBuf>) 
         e.note("key_id", k.key_id.clone());
         e.note("created", k.created.clone());
         e.note("user_id", k.summary.clone());
-        e.note("target_unverifiable", "a key in the rpm database, not a file");
+        e.note(key::TARGET_UNVERIFIABLE, "a key in the rpm database, not a file");
         let body = armored_body(&k.armored);
         if let Some((f, _)) = bodies.iter().find(|(_, b)| !body.is_empty() && b.contains(&body)) {
             let abs = cx.root.abs(f).display().to_string();
             e.note("matches_key_file", abs.clone());
-            e.note("trusts", abs);
+            e.note(key::TRUSTS, abs);
             keys.insert(f.clone());
         }
         out.push(e);
@@ -322,9 +323,9 @@ fn apk(cx: &mut Ctx, out: &mut Vec<Entry>, keys: &mut BTreeSet<PathBuf>) {
                 e.note("tag", t);
             }
             if trusts.is_empty() {
-                e.note("signature_checking", "no key in /etc/apk/keys; apk refuses every index unless run with --allow-untrusted");
+                e.note(key::SIGNATURE_CHECKING, "no key in /etc/apk/keys; apk refuses every index unless run with --allow-untrusted");
             } else {
-                e.note("trusts", trusts.join(", "));
+                e.note(key::TRUSTS, trusts.join(", "));
             }
             out.push(e);
         }
@@ -391,7 +392,7 @@ fn dnf(cx: &mut Ctx, out: &mut Vec<Entry>, keys: &mut BTreeSet<PathBuf>) {
                 }
                 let off = |k: &str| get(k).is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no"));
                 if off("gpgcheck") {
-                    e.note("signature_checking", "off (gpgcheck=0)");
+                    e.note(key::SIGNATURE_CHECKING, "off (gpgcheck=0)");
                 }
                 if off("enabled") {
                     e.enabled = Enablement::Disabled;

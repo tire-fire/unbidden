@@ -13,6 +13,7 @@
 //! Which init a host has is read from /sbin/init: what it resolves to, and
 //! whether that binary carries the strings it would need to do the reading.
 
+use crate::entry::key;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -252,7 +253,7 @@ fn sysv(cx: &mut Ctx, init: Init, shown: &str, out: &mut Vec<Entry>) {
             }
         }
         if template.contains(piece) {
-            e.note("matches_template", cx.root.abs(TEMPLATE).display().to_string());
+            e.note(key::MATCHES_TEMPLATE, cx.root.abs(TEMPLATE).display().to_string());
         }
         lines.push(e);
     };
