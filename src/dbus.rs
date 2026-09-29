@@ -18,9 +18,10 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use crate::entry::{Enablement, Entry, Flag, Kind, Provenance};
+use crate::entry::{Enablement, Entry, Flag, Kind};
 use crate::root::Root;
 
 /// How the system manager names itself in an answer. User managers are
@@ -100,7 +101,7 @@ impl Manager {
 
         let buses = user_buses(root);
         if !buses.is_empty() {
-            if let Some(users) = with_deadline(USER_DEADLINE, move || query_users(buses)) {
+            if let Some(users) = until_deadline(USER_DEADLINE, move |heard| query_users(buses, heard)) {
                 match &mut merged {
                     Some(system) => system.merge(users),
                     None => merged = Some(users),
@@ -123,7 +124,9 @@ const USER_BUDGET: Duration = Duration::from_secs(5);
 
 /// What the user phase gets before it is abandoned. It stops starting new
 /// queries at USER_BUDGET, so the extra is only there to let a query already
-/// in flight finish and hand back what the earlier users answered.
+/// in flight finish. One that stalls past it is abandoned, and the answers
+/// the earlier users gave are kept: they are merged into a shared slot as
+/// they arrive, not returned at the end.
 const USER_DEADLINE: Duration = Duration::from_secs(7);
 
 /// Runs one query on a thread and abandons it at the deadline.
@@ -141,14 +144,33 @@ fn with_deadline<T: Send + 'static>(
     rx.recv_timeout(deadline).ok().flatten()
 }
 
+/// Runs `f` on a thread and abandons it at the deadline, keeping whatever it
+/// had put in the slot by then. Unlike `with_deadline`, a stall late in `f`
+/// costs only what it had not yet produced.
+fn until_deadline<T: Send + 'static>(
+    deadline: Duration,
+    f: impl FnOnce(&Mutex<Option<T>>) + Send + 'static,
+) -> Option<T> {
+    let slot = Arc::new(Mutex::new(None));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let theirs = Arc::clone(&slot);
+    std::thread::spawn(move || {
+        f(&theirs);
+        let _ = tx.send(());
+    });
+    let _ = rx.recv_timeout(deadline);
+    // A panic in `f` poisons the slot but leaves what was merged before it.
+    let mut held = slot.lock().unwrap_or_else(PoisonError::into_inner);
+    held.take()
+}
+
 /// Asks each user manager in turn, all of them inside one budget.
 ///
 /// One thread for the lot, not one per user: a thread per account means
 /// fifty simultaneous connections into a host that may already be under
 /// stress, and fifty threads that cannot be joined when one of them wedges.
-fn query_users(buses: Vec<(u32, String)>) -> Option<Manager> {
+fn query_users(buses: Vec<(u32, String)>, heard: &Mutex<Option<Manager>>) {
     let start = Instant::now();
-    let mut merged: Option<Manager> = None;
     for (uid, address) in buses {
         // Tested before the connect rather than after it: what has to be
         // bounded is the time this pass can still start spending.
@@ -157,12 +179,12 @@ fn query_users(buses: Vec<(u32, String)>) -> Option<Manager> {
         }
         let Some(conn) = connect_user(&address) else { continue };
         let Some(answers) = Manager::from_bus(&format!("user:{uid}"), &conn) else { continue };
-        match &mut merged {
+        let mut held = heard.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *held {
             Some(acc) => acc.merge(answers),
-            None => merged = Some(answers),
+            None => *held = Some(answers),
         }
     }
-    merged
 }
 
 /// The user managers worth asking. /run/user/<uid> exists only while a user
@@ -393,6 +415,19 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::entry::Provenance;
+
+    #[test]
+    fn a_stall_late_in_the_user_phase_keeps_what_earlier_users_answered() {
+        let started = Instant::now();
+        let got = until_deadline(Duration::from_millis(200), |heard: &Mutex<Option<Vec<u32>>>| {
+            *heard.lock().unwrap() = Some(vec![1000]);
+            // The second user's manager accepts the connection and never answers.
+            std::thread::sleep(Duration::from_secs(30));
+        });
+        assert_eq!(got, Some(vec![1000]));
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
 
     /// One path's answers, as the managers gave them.
     fn answers(pairs: &[(&str, &str)]) -> UnitFile {
