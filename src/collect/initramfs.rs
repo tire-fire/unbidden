@@ -177,8 +177,11 @@ fn dracut(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
     for module in sorted_dirs(cx, Path::new("usr/lib/dracut/modules.d")) {
         let name = file_name(&module);
-        // A module directory is NN<name>.
-        if name.len() < 3 || !name[..2].chars().all(|c| c.is_ascii_digit()) {
+        // A module directory is NN<name>. Split by bytes, not by a byte index
+        // into text: a directory named `9€bad` has no boundary at 2, and the
+        // slice used to panic the whole collector.
+        let Some((order, module_name)) = name.split_at_checked(2) else { continue };
+        if module_name.is_empty() || !order.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
         let setup = module.join("module-setup.sh");
@@ -186,7 +189,7 @@ fn dracut(cx: &mut Ctx, out: &mut Vec<Entry>) {
         if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
             continue;
         }
-        let mut e = entry(cx, &rel, format!("dracut:module:{}", &name[2..]), "dracut", Trigger::PackageOp, installed);
+        let mut e = entry(cx, &rel, format!("dracut:module:{module_name}"), "dracut", Trigger::PackageOp, installed);
         e.note("runs_when", "every initramfs build: check() decides inclusion, install() copies into the image");
         out.push(e);
     }
@@ -277,6 +280,21 @@ mod tests {
         let root = Root::at(dir).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Initramfs)];
         crate::scan::run(&root, &Options { deep: false }, &collectors)
+    }
+
+    #[test]
+    fn a_module_directory_named_in_multibyte_text_cannot_fail_the_collector() {
+        let d = std::env::temp_dir().join(format!("unbidden-initramfs-utf8-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        put(&d, "usr/bin/dracut", b"", 0o755);
+        put(&d, "usr/lib/dracut/modules.d/9\u{20ac}bad/module-setup.sh", b"", 0o755);
+        put(&d, "usr/lib/dracut/modules.d/\u{20ac}9x/module-setup.sh", b"", 0o755);
+        put(&d, "usr/lib/dracut/modules.d/98evil/module-setup.sh", b"install() { inst /opt/e /bin/e; }\n", 0o755);
+        let s = scan(&d);
+        let status = &s.header.collectors[0].status;
+        assert!(matches!(status, crate::scan::Status::Complete), "a planted directory beside the real ones must not blind the collector: {status:?}");
+        assert!(s.entries.iter().any(|e| e.name == "dracut:module:evil"), "the module beside it is still read");
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

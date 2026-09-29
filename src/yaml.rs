@@ -506,7 +506,8 @@ fn python_int(s: &str, radix: u32) -> Option<Option<i128>> {
         _ => None,
     };
     let digits = match prefix {
-        Some(p) if body.len() > 2 && body[..2].eq_ignore_ascii_case(p) => &body[2..],
+        // `get`, not an index: `0x€1` has no character boundary at 2.
+        Some(p) if body.len() > 2 && body.get(..2).is_some_and(|h| h.eq_ignore_ascii_case(p)) => &body[2..],
         _ => body,
     };
     if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
@@ -736,6 +737,15 @@ mod tests {
         assert!(parse("[!,").is_err());
         assert!(parse("a: ''|\n 0").is_err());
         assert!(parse("[!x,]").is_err(), "PyYAML wants a blank after a tag");
+    }
+
+    #[test]
+    fn an_integer_tag_on_multibyte_text_is_an_error_not_a_panic() {
+        // PyYAML raises ValueError for these; the file then reads as empty.
+        for text in ["a: !!int \"0x\u{20ac}1\"", "a: !!int \"\u{20ac}\u{20ac}\"", "a: !!int \"-0b\u{20ac}\"", "a: !!int \"0o\u{20ac}\u{20ac}\""] {
+            let _ = parse(text);
+        }
+        assert!(parse("a: !!int \"0x\u{20ac}1\"").is_err());
     }
 
     #[test]

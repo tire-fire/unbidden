@@ -126,6 +126,11 @@ impl Collector for Agents {
     }
 }
 
+/// The plugin a `Plugins.<name>.System.Path` key names, if it names one.
+fn plugin_name(key: &str) -> Option<&str> {
+    key.strip_prefix("Plugins.")?.strip_suffix(".System.Path").filter(|n| !n.is_empty())
+}
+
 fn sorted(cx: &mut Ctx, dir: &Path) -> Vec<PathBuf> {
     let mut names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
     names.sort();
@@ -688,8 +693,11 @@ fn zabbix(cx: &mut Ctx, out: &mut Vec<Entry>) {
                 }
                 "AllowKey" if v.starts_with("system.run") => remote(cx, rel, agent, v, denied),
                 "EnableRemoteCommands" if v == "1" => remote(cx, rel, agent, v, denied),
-                _ if agent == "agent2" && k.starts_with("Plugins.") && k.ends_with(".System.Path") => {
-                    let name = &k["Plugins.".len()..k.len() - ".System.Path".len()];
+                // `Plugins.System.Path` passes both an affix test and is too
+                // short to hold a name between them, so the two are stripped
+                // in turn, never by adding their lengths up.
+                _ if agent == "agent2" && plugin_name(k).is_some() => {
+                    let name = plugin_name(k).unwrap_or_default();
                     let mut e = cx.entry(Kind::MonitorPlugin, rel, format!("zabbix:agent2:plugin:{name}"));
                     e.trigger = Trigger::Always;
                     e.command = Some(v.as_bytes().to_vec());
@@ -1129,6 +1137,27 @@ mod tests {
         let d = std::env::temp_dir().join(format!("unbidden-agents-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    #[test]
+    fn plugin_key_names_are_cut_by_stripping_not_by_index() {
+        assert_eq!(plugin_name("Plugins.Foo.System.Path"), Some("Foo"));
+        assert_eq!(plugin_name("Plugins.System.Path"), None, "the two affixes overlap");
+        assert_eq!(plugin_name("Plugins..System.Path"), None);
+        assert_eq!(plugin_name("Plugins.Foo.Bar.System.Path"), Some("Foo.Bar"));
+        assert_eq!(plugin_name("Plugin.Foo.System.Path"), None);
+    }
+
+    #[test]
+    fn a_zabbix_key_that_overlaps_its_own_affixes_cannot_fail_the_collector() {
+        let d = fixture("zabbix-overlap");
+        put(&d, "usr/sbin/zabbix_agent2", b"");
+        put(&d, "etc/zabbix/zabbix_agent2.conf", b"Plugins.System.Path=/x\nPlugins.Real.System.Path=/opt/real\n");
+        let s = scan(&d);
+        let status = &s.header.collectors[0].status;
+        assert!(matches!(status, crate::scan::Status::Complete), "{status:?}");
+        assert!(s.entries.iter().any(|e| e.name == "zabbix:agent2:plugin:Real"));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
