@@ -48,6 +48,26 @@ pub(crate) fn shell_word(word: &[u8]) -> &[u8] {
     &word[..end]
 }
 
+/// The first word of a command that is an absolute path, skipping any leading
+/// environment assignments so that `LD_PRELOAD=/x /usr/bin/y` resolves to the
+/// program rather than to the preload.
+pub(crate) fn first_absolute(command: &[u8]) -> Option<PathBuf> {
+    let mut rest = command;
+    loop {
+        let (word, tail) = crate::text::take_word(rest)?;
+        let is_env = word
+            .iter()
+            .position(|b| *b == b'=')
+            .is_some_and(|eq| !word[..eq].is_empty() && word[0] != b'-' && word[0] != b'/');
+        if !is_env {
+            let word = shell_word(word);
+            return (word.first() == Some(&b'/'))
+                .then(|| PathBuf::from(OsStr::from_bytes(word).to_os_string()));
+        }
+        rest = tail;
+    }
+}
+
 /// An include path resolved root-relative: absolute means relative to the scan
 /// root, bare means relative to `base`.
 pub(crate) fn include_rel(base: &Path, spec: &[u8]) -> PathBuf {

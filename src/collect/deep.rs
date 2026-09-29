@@ -12,6 +12,7 @@
 //! been in, and gives up at a ceiling rather than following a tree that
 //! generates itself.
 
+use crate::collect::first_absolute;
 use crate::text::{lossy};
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -547,9 +548,6 @@ fn config_at(cx: &mut Ctx, rel: &Path, repo: &str, gitdir_abs: &str) -> Vec<Entr
             e.flag(Flag::EncodingAnomaly);
             e.note("command_hex", hex(&value));
         }
-        for (k, v) in env_assignments(&value) {
-            e.note(&format!("env.{k}"), v);
-        }
         e.command = Some(value);
         e.note("repository", repo);
         e.note("gitdir", gitdir_abs);
@@ -754,24 +752,6 @@ fn logical_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
     out
 }
 
-/// Leading `KEY=VALUE` words, which is where an LD_PRELOAD hides in a value
-/// that is handed to a shell.
-fn env_assignments(command: &[u8]) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for word in command.split(|b: &u8| b.is_ascii_whitespace()).filter(|w| !w.is_empty()) {
-        match word.iter().position(|b| *b == b'=') {
-            Some(0) | None => break,
-            Some(eq) => out.push((lossy(&word[..eq]), lossy(&word[eq + 1..]))),
-        }
-    }
-    out
-}
-
-fn first_absolute(command: &[u8]) -> Option<PathBuf> {
-    let word = command.split(|b: &u8| b.is_ascii_whitespace()).find(|w| !w.is_empty())?;
-    (word.first() == Some(&b'/')).then(|| PathBuf::from(OsStr::from_bytes(word).to_os_string()))
-}
-
 
 
 fn lower(bytes: &[u8]) -> String {
@@ -823,6 +803,15 @@ mod tests {
         let root = Root::at(dir).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Deep)];
         run(&root, &Options { deep: true }, &collectors)
+    }
+
+    /// As `scan_deep`, then enrichment, which is where the environment a
+    /// command hands its program is read.
+    fn scan_deep_enriched(dir: &Path) -> Scan {
+        let root = Root::at(dir).unwrap();
+        let mut s = scan_deep(dir);
+        crate::enrich::enrich(&root, &mut s);
+        s
     }
 
     fn status(s: &Scan) -> &Status {
@@ -1029,7 +1018,7 @@ http://x/y
 	sshCommand = LD_PRELOAD=/tmp/e.so ssh
 "#;
         put(&dir, "srv/app/.git/config", config, 0o644);
-        let s = scan_deep(&dir);
+        let s = scan_deep_enriched(&dir);
         let mut names: Vec<&str> = of_kind(&s, Kind::GitHook).iter().map(|e| e.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(
@@ -1048,7 +1037,7 @@ http://x/y
 
         let textconv = named(&s, "diff.spec.textconv");
         assert_eq!(textconv.command.as_deref(), Some(&b"/usr/local/bin/leak --to http://x/y"[..]));
-        assert_eq!(textconv.target_path, Some(PathBuf::from("/usr/local/bin/leak")));
+        assert_eq!(textconv.target_path, Some(dir.join("usr/local/bin/leak")));
 
         let ssh = named(&s, "core.sshCommand");
         assert_eq!(ssh.raw.get("env.LD_PRELOAD").map(String::as_str), Some("/tmp/e.so"));

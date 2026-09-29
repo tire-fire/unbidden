@@ -14,7 +14,8 @@
 //! them. Both run as root on a package operation, so both are read — the
 //! second through the header parser §7's provenance backend already owns.
 
-use crate::text::{lossy, short_hash, take_word};
+use crate::collect::first_absolute;
+use crate::text::{lossy, short_hash};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
@@ -1538,48 +1539,6 @@ fn set_command(e: &mut Entry, bytes: &[u8]) {
         e.flag(Flag::EncodingAnomaly);
         e.note("command_hex", hex(bytes));
     }
-    for (k, v) in env_assignments(bytes) {
-        e.note(&format!("env.{k}"), v);
-    }
-}
-
-/// Every `NAME=VALUE` word in a command line, wherever it sits. Not only the
-/// leading position: `sh -c 'LD_PRELOAD=/tmp/e.so prog'` hides one in the
-/// middle, and the correlation pass looks at the note rather than at where it
-/// was written.
-fn env_assignments(bytes: &[u8]) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for word in bytes.split(|b: &u8| b.is_ascii_whitespace()) {
-        let word = word.strip_prefix(b"'").or_else(|| word.strip_prefix(b"\"")).unwrap_or(word);
-        let Some(eq) = word.iter().position(|b| *b == b'=') else { continue };
-        let (name, value) = (&word[..eq], &word[eq + 1..]);
-        let named = name.first().is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
-            && name.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_');
-        if named {
-            out.push((lossy(name), lossy(value)));
-        }
-    }
-    out
-}
-
-/// The first word of a command that is an absolute path, skipping any leading
-/// environment assignments so that `LD_PRELOAD=/x /usr/bin/y` resolves to the
-/// program rather than to the preload.
-fn first_absolute(command: &[u8]) -> Option<PathBuf> {
-    let mut rest = command;
-    loop {
-        let (word, tail) = take_word(rest)?;
-        let is_env = word
-            .iter()
-            .position(|b| *b == b'=')
-            .is_some_and(|eq| !word[..eq].is_empty() && word[0] != b'-' && word[0] != b'/');
-        if !is_env {
-            let word = super::shell_word(word);
-            return (word.first() == Some(&b'/'))
-                .then(|| PathBuf::from(OsStr::from_bytes(word).to_os_string()));
-        }
-        rest = tail;
-    }
 }
 
 
@@ -1655,6 +1614,15 @@ mod tests {
         let root = Root::at(root).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(PkgHooks)];
         run(&root, &Options { deep: false }, &collectors)
+    }
+
+    /// As `scan`, then enrichment, which is where the environment a command
+    /// hands its program is read.
+    fn scan_enriched(dir: &Path) -> Scan {
+        let root = Root::at(dir).unwrap();
+        let mut s = scan(dir);
+        crate::enrich::enrich(&root, &mut s);
+        s
     }
 
     fn of_kind(s: &Scan, kind: Kind) -> Vec<&Entry> {
@@ -1736,7 +1704,7 @@ mod tests {
         // Pin priorities execute nothing at all.
         put(&dir, "etc/apt/preferences.d/99pin", b"Package: *\nPin: release a=stable\nPin-Priority: 900\n");
 
-        let s = scan(&dir);
+        let s = scan_enriched(&dir);
         let hooks = of_kind(&s, Kind::PkgHook);
         assert_eq!(
             hooks.len(),
@@ -1757,7 +1725,7 @@ mod tests {
         assert_eq!(preload.raw.get("env.LD_PRELOAD").map(String::as_str), Some("/tmp/e.so"));
         assert_eq!(
             preload.target_path,
-            Some(PathBuf::from("/usr/bin/three")),
+            Some(dir.join("usr/bin/three")),
             "the target is the program, not the preload"
         );
 
@@ -2300,7 +2268,7 @@ mod tests {
               <allow send_destination='net.evil.Helper'/></policy></busconfig>",
         );
 
-        let s = scan(&dir);
+        let s = scan_enriched(&dir);
         assert_eq!(of_kind(&s, Kind::DbusService).len(), 3);
         assert!(
             !s.entries.iter().any(|e| e.source.to_string_lossy().contains("system.d")),
@@ -2326,7 +2294,7 @@ mod tests {
             Some(b"/usr/bin/env LD_PRELOAD=/tmp/e.so /opt/helper --daemon".as_slice())
         );
         assert_eq!(evil.raw.get("env.LD_PRELOAD").map(String::as_str), Some("/tmp/e.so"));
-        assert_eq!(evil.target_path, Some(PathBuf::from("/usr/bin/env")));
+        assert_eq!(evil.target_path, Some(dir.join("opt/helper")), "env is looked through to what it runs");
         assert!(
             evil.raw.get("policy_files").is_some_and(|p| p.ends_with("net.evil.Helper.conf")),
             "the policy governing this name belongs on the entry that executes"

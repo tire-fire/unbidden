@@ -4,9 +4,9 @@
 //! and both are read from a search path whose merged-usr aliases must collapse to a single directory
 //! before anything is emitted (§5).
 
+use crate::collect::first_absolute;
 use crate::text::{lossy, short_hash, take_word};
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -811,11 +811,6 @@ fn distinct_dirs(cx: &mut Ctx, candidates: &[&'static str]) -> Vec<(usize, &'sta
     cx.distinct_dirs(listed).into_iter().map(|(rank, _, _)| (rank, candidates[rank])).collect()
 }
 
-
-fn first_absolute(command: &[u8]) -> Option<PathBuf> {
-    let word = super::shell_word(take_word(command)?.0);
-    (word.first() == Some(&b'/')).then(|| PathBuf::from(OsStr::from_bytes(word).to_os_string()))
-}
 
 
 fn name_bytes(e: &mut Entry, name: &[u8]) {

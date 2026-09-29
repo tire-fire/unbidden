@@ -284,6 +284,11 @@ fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
         let Some(command) = entry.command.clone() else { continue };
         let command = command.as_slice();
         let lines = commands(&String::from_utf8_lossy(command), 0);
+        let mut env = Vec::new();
+        assignments(&lines, 0, &mut env);
+        for (name, value) in env {
+            entry.raw.entry(format!("env.{name}")).or_insert(value);
+        }
         let Some(first) = lines.first().and_then(|c| c.first()) else { continue };
         // systemd's ExecStart= prefixes. Not in a script, where `:` is the
         // no-op builtin and `!` negates a pipeline.
@@ -364,6 +369,67 @@ fn program_path(root: &Root, kind: Kind, program: &str) -> Option<PathBuf> {
         None
     } else {
         resolve_bare_command(root, kind, program.as_bytes())
+    }
+}
+
+/// `NAME=value` as a shell reads an assignment word.
+fn assignment_word(w: &str) -> Option<(String, String)> {
+    let (name, value) = w.split_once('=')?;
+    (!name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then(|| (name.to_string(), value.to_string()))
+}
+
+/// The environment a command line hands the programs it starts: the
+/// assignments in front of a command (`LD_PRELOAD=/x prog`), the operands of
+/// `env` and `sudo`, and the same inside the shell text and argv a wrapper
+/// passes on. A bare assignment with no command after it sets a variable of
+/// the shell's own and is not one of these.
+fn assignments(lines: &[Vec<String>], depth: usize, out: &mut Vec<(String, String)>) {
+    for words in lines {
+        assignments_of(words, depth, out);
+    }
+}
+
+fn assignments_of(words: &[String], depth: usize, out: &mut Vec<(String, String)>) {
+    if depth > MAX_NESTING {
+        return;
+    }
+    let mut at = 0;
+    let mut own = Vec::new();
+    while let Some(w) = words.get(at) {
+        if let Some(kv) = assignment_word(w) {
+            own.push(kv);
+        } else if !LEADING_KEYWORDS.contains(&w.as_str()) {
+            break;
+        }
+        at += 1;
+    }
+    let Some(program) = words.get(at) else { return };
+    out.extend(own);
+    let name = Path::new(program).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let Some(w) = wrapper(&name) else { return };
+    if matches!(w.0, "env" | "sudo") {
+        // Options come first, some with a value of their own; then NAME=value
+        // operands up to the command.
+        let args = &words[at + 1..];
+        let mut i = 0;
+        while let Some(a) = args.get(i) {
+            if w.1.contains(&a.as_str()) {
+                i += 2;
+            } else if a.starts_with('-') {
+                i += 1;
+            } else if let Some(kv) = assignment_word(a) {
+                out.push(kv);
+                i += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    match unwrap(w, &words[at + 1..], depth + 1) {
+        Unwrapped::Argv(next) => assignments_of(&next, depth + 1, out),
+        Unwrapped::Text(text) => assignments(&commands(&text, depth + 1), depth + 1, out),
+        Unwrapped::Nothing => {}
     }
 }
 
@@ -2611,6 +2677,30 @@ mod tests {
         let (b, s) = (entry("opt/big"), entry("opt/small"));
         assert!(b.target_sha256.is_none() && b.raw["digest_skipped"].contains("256 MiB"));
         assert!(s.target_sha256.is_some() && !s.raw.contains_key("digest_skipped"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_environment_a_command_line_hands_its_programs_is_read_from_the_grammar() {
+        let dir = std::env::temp_dir().join(format!("unbidden-cmdenv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        let env_of = |command: &str| {
+            let mut e = Entry::new(Kind::Cron, dir.join("etc/cron.d/x"), "job");
+            e.command = Some(command.as_bytes().to_vec());
+            look_through_wrappers(&root, std::slice::from_mut(&mut e));
+            e.raw.iter().filter_map(|(k, v)| k.strip_prefix("env.").map(|n| (n.to_string(), v.clone()))).collect::<Vec<_>>()
+        };
+        let want = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+        assert_eq!(env_of("LD_PRELOAD=/tmp/e.so /usr/bin/x --flag"), want(&[("LD_PRELOAD", "/tmp/e.so")]));
+        assert_eq!(env_of("/usr/bin/env -i LD_AUDIT=/a.so PATH=/x /usr/bin/prog"), want(&[("LD_AUDIT", "/a.so"), ("PATH", "/x")]));
+        assert_eq!(env_of("/bin/sh -c 'BASH_ENV=/tmp/rc /usr/bin/prog'"), want(&[("BASH_ENV", "/tmp/rc")]));
+        assert_eq!(env_of("sudo -u bob NODE_OPTIONS=--require=/tmp/x.js node app.js"), want(&[("NODE_OPTIONS", "--require=/tmp/x.js")]));
+        // A value that is only an argument is not the program's environment,
+        // and neither is a variable the shell sets for itself.
+        assert!(env_of("/usr/bin/prog LD_PRELOAD=/tmp/e.so").is_empty());
+        assert!(env_of("X=1").is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
