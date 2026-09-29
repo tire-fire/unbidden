@@ -8,13 +8,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde::Serialize;
-
 use crate::entry::Entry;
 use crate::scan::{CollectorStatus, Scan, Status};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "delta", rename_all = "lowercase")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Delta {
     Added,
     Removed,
@@ -121,15 +118,7 @@ impl Coverage {
 struct Trust {
     added: bool,
     removed: bool,
-    changed: bool,
     because: String,
-}
-
-/// Per collector, how far its differences can be trusted, for the ones
-/// whose coverage moved. A collector absent from this map saw the same
-/// things both times.
-pub fn coverage_changes(baseline: &Scan, current: &Scan) -> BTreeMap<String, String> {
-    trust(baseline, current).into_iter().map(|(name, t)| (name, t.because)).collect()
 }
 
 fn trust(baseline: &Scan, current: &Scan) -> BTreeMap<String, Trust> {
@@ -159,7 +148,7 @@ fn trust(baseline: &Scan, current: &Scan) -> BTreeMap<String, Trust> {
         if !cleared.is_empty() {
             because.push_str(&format!("; readable again: {}", cleared.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
         }
-        out.insert(name.clone(), Trust { added: narrowed, removed: widened, changed: false, because });
+        out.insert(name.clone(), Trust { added: narrowed, removed: widened, because });
     }
     out
 }
@@ -201,9 +190,26 @@ fn index(scan: &Scan, which: &str) -> Result<BTreeMap<String, Entry>, String> {
     Ok(out)
 }
 
-pub fn diff(baseline: &Scan, current: &Scan) -> Result<Vec<Diffed>, String> {
+/// Two scans compared: each entry with what became of it, and the collectors
+/// whose coverage moved, with why.
+pub struct Comparison {
+    pub entries: Vec<Diffed>,
+    pub coverage: BTreeMap<String, String>,
+}
+
+pub fn compare(baseline: &Scan, current: &Scan) -> Result<Comparison, String> {
     comparable(baseline, current)?;
     let trust = trust(baseline, current);
+    let coverage = trust.iter().map(|(name, t)| (name.clone(), t.because.clone())).collect();
+    let entries = diff_with(baseline, current, &trust)?;
+    Ok(Comparison { entries, coverage })
+}
+
+pub fn diff(baseline: &Scan, current: &Scan) -> Result<Vec<Diffed>, String> {
+    compare(baseline, current).map(|c| c.entries)
+}
+
+fn diff_with(baseline: &Scan, current: &Scan, trust: &BTreeMap<String, Trust>) -> Result<Vec<Diffed>, String> {
     // A baseline written before entries named their collector cannot say
     // which differences a coverage change touches, so it refuses as every
     // baseline used to.
@@ -225,7 +231,10 @@ pub fn diff(baseline: &Scan, current: &Scan) -> Result<Vec<Diffed>, String> {
         let (trusted, would_be, fields) = match &delta {
             Delta::Added => (t.added, "added", Vec::new()),
             Delta::Removed => (t.removed, "removed", Vec::new()),
-            Delta::Changed { fields } => (t.changed, "changed", fields.clone()),
+            // A collector is in the map only because it saw different things,
+            // and a change to an entry both scans hold is then never believed:
+            // an unreadable drop-in changes what a unit runs.
+            Delta::Changed { fields } => (false, "changed", fields.clone()),
             _ => return delta,
         };
         if trusted { delta } else { Delta::Uncertain { would_be, fields, because: t.because.clone() } }
@@ -565,7 +574,7 @@ mod tests {
         assert!(because.contains("systemd: complete then, partial now") && because.contains("newly unreadable: etc/systemd/system/x.service"), "{because}");
         let Delta::Uncertain { would_be, fields, .. } = delta(&d, "edited.service") else { panic!() };
         assert_eq!((would_be, fields), ("changed", vec!["command"]), "a drop-in it could not read changes what a unit runs");
-        assert_eq!(coverage_changes(&before, &after).len(), 1);
+        assert_eq!(compare(&before, &after).unwrap().coverage.len(), 1);
 
         // The other way round: removals are believed, additions are not.
         let d = diff(&after, &before).unwrap();
@@ -583,7 +592,7 @@ mod tests {
         // The same unreadable paths both times: comparable as ever.
         let a = scan(vec![unit("x.service", b"/a")], partial(&["one"]));
         let b = scan(vec![unit("y.service", b"/a")], partial(&["one"]));
-        assert!(coverage_changes(&a, &b).is_empty());
+        assert!(compare(&a, &b).unwrap().coverage.is_empty());
         assert_eq!(delta(&diff(&a, &b).unwrap(), "y.service"), Delta::Added);
     }
 }

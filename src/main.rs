@@ -150,8 +150,9 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
         triggers: args.triggers.clone(),
         flags: args.flags.clone(),
     };
-    // Machine output is always complete; suppression is the human view's job.
-    let opts = TableOpts { all: args.all || args.json, width: render::terminal_width() };
+    // Machine output is always complete and never reads this: suppression is
+    // the human view's job.
+    let opts = TableOpts { all: args.all, width: render::terminal_width() };
 
     let stdout = io::stdout();
     let mut out = BufWriter::new(stdout.lock());
@@ -159,12 +160,12 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
     let rendered = match &args.against {
         Some(path) => {
             let baseline = load(path)?;
-            let diffs = diff::diff(&baseline, &scan)?;
-            let coverage = diff::coverage_changes(&baseline, &scan);
+            let compared = diff::compare(&baseline, &scan)?;
+            let (diffs, coverage) = (&compared.entries, &compared.coverage);
             if args.json {
-                render::diff_ndjson(&mut out, &scan, &diffs, &coverage, &filters)
+                render::diff_ndjson(&mut out, &scan, diffs, coverage, &filters)
             } else {
-                render::diff_table(&mut out, &scan, &diffs, &coverage, &filters, &opts)
+                render::diff_table(&mut out, &scan, diffs, coverage, &filters, &opts)
             }
         }
         None => {
