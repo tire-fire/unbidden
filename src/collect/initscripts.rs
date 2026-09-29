@@ -953,6 +953,8 @@ fn dispatcher(cx: &mut Ctx) -> Vec<Entry> {
     }
 
     let mut out = Vec::new();
+    // A name in an earlier directory is the one NetworkManager runs, per phase.
+    let mut first_of: BTreeSet<(String, Vec<u8>)> = BTreeSet::new();
     for (phase, _, dir) in distinct_dirs(cx, candidates) {
         for ent in cx.dir(&dir) {
             if ent.is_dir {
@@ -965,7 +967,12 @@ fn dispatcher(cx: &mut Ctx) -> Vec<Entry> {
             // NetworkManager checks S_IXUSR specifically, not any execute bit.
             let exec = exec_mode(cx, &rel) & 0o100 != 0;
             e.note("executable", exec.to_string());
-            let refused = nm_refusal(cx, &rel);
+            let mut refused = nm_refusal(cx, &rel);
+            if let Some(why) = nm_name_refused(ent.name.as_bytes()) {
+                refused.push(why);
+            } else if !first_of.insert((phase.clone(), ent.name.as_bytes().to_vec())) {
+                refused.push("a script of the same name in an earlier directory is run instead");
+            }
             e.enabled = if exec && refused.is_empty() {
                 Enablement::Enabled
             } else {
@@ -978,6 +985,16 @@ fn dispatcher(cx: &mut Ctx) -> Vec<Entry> {
         }
     }
     out
+}
+
+/// The names nm-dispatcher passes over: a hidden file, an editor backup, and a
+/// package manager's leftover copy. The suffixes are the ones in its binary.
+fn nm_name_refused(name: &[u8]) -> Option<&'static str> {
+    let backup = name.first() == Some(&b'.')
+        || name.ends_with(b"~")
+        || [&b".rpmsave"[..], b".rpmorig", b".rpmnew"].iter().any(|s| name.ends_with(s))
+        || name.windows(6).any(|w| w == b".dpkg-");
+    backup.then_some("a hidden, backup or package-manager copy")
 }
 
 /// NetworkManager refuses to run a dispatcher script it does not trust. These
@@ -1780,6 +1797,36 @@ exec /usr/sbin/sshd\n";
         assert_eq!(async_hook.enabled, Enablement::Disabled, "not executable");
 
         assert_eq!(of_kind(&s, Kind::NetworkDispatcher).len(), 4, "subdirectories are not scripts");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn networkmanager_passes_over_backups_and_runs_the_earlier_of_two_same_named_scripts() {
+        let dir = tree("nm-names");
+        let (etc, vendor) = ("etc/NetworkManager/dispatcher.d", "usr/lib/NetworkManager/dispatcher.d");
+        put(&dir, &format!("{etc}/10-local"), b"#!/bin/sh\n", 0o755);
+        put(&dir, &format!("{vendor}/10-local"), b"#!/bin/sh\n", 0o755);
+        put(&dir, &format!("{vendor}/20-only-vendor"), b"#!/bin/sh\n", 0o755);
+        for backup in [".hidden", "30-x~", "30-x.rpmsave", "30-x.dpkg-old"] {
+            put(&dir, &format!("{etc}/{backup}"), b"#!/bin/sh\n", 0o755);
+        }
+        let s = scan(&dir);
+        let scripts = of_kind(&s, Kind::NetworkDispatcher);
+        // The fixture is not root's, so nothing is Enabled here: what each says
+        // NetworkManager passes over it for is what is read.
+        let refused = |name: &str, under: &str| {
+            scripts
+                .iter()
+                .find(|e| e.name == name && e.source.starts_with(dir.join(under)))
+                .and_then(|e| e.raw.get("skipped_by_networkmanager").cloned())
+                .unwrap_or_default()
+        };
+        assert!(!refused("10-local", etc).contains("earlier directory"));
+        assert!(refused("10-local", vendor).contains("same name in an earlier directory"), "the /etc copy is run instead");
+        assert!(!refused("20-only-vendor", vendor).contains("earlier directory"));
+        for backup in [".hidden", "30-x~", "30-x.rpmsave", "30-x.dpkg-old"] {
+            assert!(refused(backup, etc).contains("backup or package-manager copy"), "{backup}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 
