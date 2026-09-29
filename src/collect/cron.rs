@@ -29,7 +29,16 @@ impl Collector for Cron {
         crontab(cx, Path::new("etc/crontab"), Layout::SystemWide, &mut out);
         for ent in cx.dir("etc/cron.d") {
             let rel = Path::new("etc/cron.d").join(&ent.name);
+            let first = out.len();
             crontab(cx, &rel, Layout::SystemWide, &mut out);
+            if let Some(why) = cron_d_skips(flavour, ent.name.as_bytes()) {
+                for e in &mut out[first..] {
+                    if e.enabled == Enablement::Enabled {
+                        e.enabled = Enablement::Disabled;
+                        e.note("not_run", why);
+                    }
+                }
+            }
         }
         if flavour == Flavour::BusyBox {
             // BusyBox's crond opens its crontab directory and nothing else;
@@ -47,7 +56,7 @@ impl Collector for Cron {
         }
 
         match flavour {
-            Flavour::Vixie => {
+            Flavour::Debian | Flavour::Cronie | Flavour::Unknown => {
                 for dir in ["var/spool/cron", "var/spool/cron/crontabs"] {
                     if !first_visit(cx, dir, &mut seen) {
                         continue;
@@ -101,12 +110,37 @@ impl Collector for Cron {
 }
 
 /// Which cron a host has, from what its crond is. BusyBox's reads one
-/// directory by its own rule; everything else supported reads the Vixie
-/// layout: cron on Debian, cronie on Fedora.
+/// directory by its own rule; the others read the Vixie layout, Debian's cron
+/// and Fedora's cronie each with its own rule for what /etc/cron.d may hold.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Flavour {
-    Vixie,
+    /// Debian's cron.
+    Debian,
+    /// cronie, Fedora's.
+    Cronie,
     BusyBox,
+    /// No daemon found to say which.
+    Unknown,
+}
+
+/// Why the daemon does not read a file of this name from /etc/cron.d, if it
+/// does not. Each is what the daemon was seen to do: files named as below
+/// were dropped in /etc/cron.d, each with a job touching a file of its own,
+/// and the daemon run to see which touched theirs.
+fn cron_d_skips(flavour: Flavour, name: &[u8]) -> Option<&'static str> {
+    match flavour {
+        // Only what run-parts would run: letters, digits, `_` and `-`.
+        Flavour::Debian if name.is_empty() || !name.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')) => {
+            Some("Debian's cron reads only names of letters, digits, _ and - from /etc/cron.d")
+        }
+        Flavour::Cronie
+            if name.first().is_some_and(|b| matches!(b, b'.' | b'#'))
+                || [&b"~"[..], b".rpmsave", b".rpmorig", b".rpmnew"].iter().any(|suffix| name.ends_with(suffix)) =>
+        {
+            Some("cronie skips a name that starts with . or #, or ends in ~, .rpmsave, .rpmorig or .rpmnew")
+        }
+        _ => None,
+    }
 }
 
 /// The daemon binaries, in the order a host would have them: /usr/sbin/crond
@@ -118,9 +152,15 @@ fn flavour(cx: &mut Ctx) -> Flavour {
     for p in ["usr/sbin/crond", "sbin/crond", "usr/sbin/cron", "usr/bin/crond"] {
         let Ok(resolved) = cx.root.resolve(Path::new(p)) else { continue };
         let Ok((bytes, _)) = cx.root.read_capped(&resolved, 16 << 20) else { continue };
-        return if bytes.windows(7).any(|w| w == b"BusyBox") { Flavour::BusyBox } else { Flavour::Vixie };
+        return if bytes.windows(7).any(|w| w == b"BusyBox") {
+            Flavour::BusyBox
+        } else if p.ends_with("/cron") {
+            Flavour::Debian
+        } else {
+            Flavour::Cronie
+        };
     }
-    Flavour::Vixie
+    Flavour::Unknown
 }
 
 /// BusyBox crond's crontab directory: /var/spool/cron/crontabs unless its
@@ -938,6 +978,35 @@ mod tests {
             std::os::unix::fs::symlink("/bin/busybox", dir.join(at)).unwrap();
         }
         put(dir, "etc/passwd", b"root:x:0:0:root:/root:/bin/sh\nalice:x:1000:1000::/home/alice:/bin/sh\n");
+    }
+
+    #[test]
+    fn each_cron_reads_from_etc_cron_d_only_the_names_it_was_seen_to() {
+        // The daemon says which cron this is; what follows is what each was
+        // seen to run when files of these names were dropped in.
+        let names = ["plain", "UPPER_ok-1", "dot.sh", ".hidden", "tilde~", "x.conf", "x.rpmsave", "x.rpmorig", "x.rpmnew", "#x", "a,b"];
+        let read = |daemon: &str| -> BTreeMap<String, bool> {
+            let dir = tree(&format!("crond-{}", daemon.replace('/', "-")));
+            put(&dir, daemon, b"ELF");
+            for n in names {
+                put(&dir, &format!("etc/cron.d/{n}"), b"* * * * * root /usr/bin/touch /tmp/x\n");
+            }
+            let s = scan(&dir);
+            std::fs::remove_dir_all(&dir).unwrap();
+            s.entries.iter().map(|e| (e.source.file_name().unwrap().to_string_lossy().into_owned(), e.enabled == Enablement::Enabled)).collect()
+        };
+        let debian = read("usr/sbin/cron");
+        let ran = |m: &BTreeMap<String, bool>| -> Vec<String> { m.iter().filter(|(_, on)| **on).map(|(n, _)| n.clone()).collect() };
+        assert_eq!(ran(&debian), ["UPPER_ok-1", "plain"]);
+        let cronie = read("usr/sbin/crond");
+        assert_eq!(ran(&cronie), ["UPPER_ok-1", "a,b", "dot.sh", "plain", "x.conf"]);
+        // No daemon to say: nothing is claimed about the names.
+        let unknown = tree("crond-unknown");
+        for n in names {
+            put(&unknown, &format!("etc/cron.d/{n}"), b"* * * * * root /usr/bin/touch /tmp/x\n");
+        }
+        assert!(scan(&unknown).entries.iter().all(|e| e.enabled == Enablement::Enabled));
+        std::fs::remove_dir_all(&unknown).unwrap();
     }
 
     #[test]
