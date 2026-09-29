@@ -103,11 +103,11 @@ pub fn suppressed(e: &Entry) -> bool {
     if e.kind == Kind::Inittab && e.raw.contains_key(key::VOUCHED) {
         return target_verified && e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
     }
-    // What a generator, snapd or a vendor preset wrote is derived from
-    // packaged inputs and runs a program that verifies; the product itself is
-    // nobody's file to digest. The rest of what is generated is not in this
-    // set (`Producer::derives_from_packaged_inputs`): a transient unit is the
-    // program's own doing, and stays in view.
+    // What a generator, snapd, a vendor preset or a package's postinst wrote
+    // is derived from packaged inputs and runs a program that verifies; the
+    // product itself is nobody's file to digest. The rest of what is generated
+    // is not in this set (`Producer::derives_from_packaged_inputs`): a
+    // transient unit is the program's own doing, and stays in view.
     let derived = matches!(&e.provenance, crate::entry::Provenance::GeneratedBy { by } if by.derives_from_packaged_inputs());
     // A file whose inode changed after its package installed it was touched
     // by something other than the package manager, however it verifies.

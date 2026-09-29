@@ -5,8 +5,9 @@
 //! One collector because they share their source material's shape:
 //! line-oriented text read at credential time. The parsers work over bytes and
 //! convert to String at the field boundary (the account databases, which are
-//! read as text, are the exception), so a rule carrying invalid UTF-8 survives
-//! as evidence rather than becoming replacement characters.
+//! read as text, are the exception). The conversion is lossy, so a rule
+//! carrying invalid UTF-8 is flagged EncodingAnomaly and its bytes stay in
+//! `command` for whoever needs them.
 
 use crate::entry::key;
 use crate::text::{base64_decode, base64_encode_unpadded, lossy, short_hash};
@@ -150,7 +151,7 @@ const PAM_STD_DIRS: &[&str] = &[
 /// libpam's own size is tens of kilobytes; this is only a ceiling.
 const LIBPAM_CAP: usize = 4 << 20;
 
-/// libpam's module directory on this root. libpam is built with the one
+/// libpam's module directory on this root. libpam is built with the
 /// directory it loads from and carries that path as a string, so it is read
 /// from there: a directory planted with a link to pam_permit.so is no longer
 /// taken for the real one and no longer hides the real pam_unix.so behind it.
@@ -2515,8 +2516,9 @@ mod tests {
         // What libpam was built with, as a string among others.
         put(&d, "usr/lib64/libpam.so.0", b"\0/etc/pam.d\0/usr/lib64/security/\0%s\0".as_slice());
         put(&d, "usr/lib64/security/pam_unix.so", "real");
-        // A directory that comes first in the search, with a link that makes
-        // it look like a module directory and a planted module in front.
+        // A directory that comes first in the search, holding a pam_permit.so
+        // that makes it look like a module directory, and a planted module in
+        // front of the real one.
         put(&d, "lib/x86_64-linux-gnu/security/pam_permit.so", "");
         put(&d, "lib/x86_64-linux-gnu/security/pam_unix.so", "planted");
         let s = scan(&d);

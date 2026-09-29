@@ -201,7 +201,8 @@ fn p11_kit(cx: &mut Ctx, libdirs: &[String], out: &mut Vec<Entry>) {
     }
 }
 
-/// The first string under `key`, at any nesting, in a document that is JSON.
+/// The first string under `key`, at any nesting and in key order (serde_json
+/// keeps maps sorted), in a document that is JSON.
 /// A manifest the loader's own JSON parser would refuse is not loaded, so it
 /// is not reported as if it were.
 fn json_string(text: &[u8], key: &str) -> Option<String> {

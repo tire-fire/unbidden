@@ -6,8 +6,8 @@
 //! with. That is the largest false-positive source in the supported set.
 //!
 //! The verdict takes Unpackaged away, so a file name alone must not earn it.
-//! Two rules keep it honest. It is only ever asked about a path no package
-//! database claims: a file a package ships is checked against the package,
+//! Two rules keep it honest. It is only asked about a path no package
+//! database answered for: a file a package ships is checked against the package,
 //! whatever it is called, so a trojaned `snap-confine` or `cloud-init` binary
 //! still reads as modified. And a snap verdict needs the snap to be installed
 //! and the file to have the shape snapd gives it — `snap.evil.service`

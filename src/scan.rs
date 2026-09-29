@@ -43,7 +43,7 @@ pub struct Ctx<'a> {
 pub enum Read {
     Bytes { bytes: Vec<u8>, truncated: bool },
     /// There, but not a regular file: a FIFO, a device, a directory, or a
-    /// link to one. Never opened, so it cannot block the scan.
+    /// link to one. Never read, and never opened in a way that can block.
     NotRegular,
     /// A link out of its owner's home, to here. Refused by the root (§3); the
     /// policy working, not a path the scan could not reach.
@@ -133,8 +133,8 @@ impl<'a> Ctx<'a> {
             Read::Bytes { .. } | Read::Absent => {}
             // A FIFO planted where a config belongs is a hang waiting for a
             // reader, and a directory or device there is no config either.
-            // The root never opens any of them, and any account can plant
-            // one, so none may demote the collector to Partial (§3).
+            // The root reads none of them, and any account can plant one, so
+            // none may demote the collector to Partial (§3).
             Read::NotRegular => self.truncated.push(format!("{}: not a regular file, not read", rel.display())),
             Read::NotFollowed(target) => self.note_left_home(rel, target),
             Read::Failed(e) => self.note_failed(rel, e),
@@ -424,7 +424,8 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
                             }
                             // Two identical lines are two entries, and a
                             // duplicate id would make a diff refuse the scan.
-                            // Done here, once, rather than in each collector.
+                            // Done here rather than in each collector;
+                            // enrichment does it again for what it adds.
                             crate::entry::dedup_ids(&mut entries);
                             let status = if unreadable.is_empty() {
                                 Status::Complete

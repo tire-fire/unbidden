@@ -859,8 +859,7 @@ mod tests {
     }
 
     fn tree(tag: &str) -> crate::testing::Tree {
-        let p = crate::testing::Tree::new(&format!("kernel-{tag}"));
-        p
+        crate::testing::Tree::new(&format!("kernel-{tag}"))
     }
 
     fn put(root: &Path, rel: &str, bytes: &[u8]) {
@@ -981,7 +980,6 @@ mod tests {
         let after: BTreeSet<String> = of_kind(&scan(&dir), Kind::Udev).iter().map(|e| e.id.clone()).collect();
         assert!(before.is_subset(&after), "entry ids moved when a rule was inserted above them");
 
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1002,7 +1000,6 @@ mod tests {
             rule.source.display()
         );
         assert_eq!(rule.raw.get("rank").map(String::as_str), Some("3"), "rank is the search-path position");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1016,7 +1013,6 @@ mod tests {
         let s = scan(&dir);
         assert_eq!(of_kind(&s, Kind::Udev).len(), 2, "deduplication must key on the inode, not the name");
         assert_eq!(of_kind(&s, Kind::KernelModule).len(), 2);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1047,7 +1043,6 @@ mod tests {
         assert_eq!(by_command(&s, "/vendor/local").enabled, Enablement::Disabled);
         // The flag itself belongs to the enrichment pass, not here.
         assert!(!vendor.has_flag(Flag::ShadowsVendorUnit));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1061,7 +1056,6 @@ mod tests {
             of_kind(&s, Kind::KernelModule).iter().map(|e| e.source.strip_prefix(&dir).unwrap().display().to_string()).collect();
         sources.sort();
         assert_eq!(sources, ["run/modprobe.d/a.conf", "usr/local/lib/modprobe.d/b.conf", "usr/local/lib/modules-load.d/c.conf"]);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1081,7 +1075,6 @@ mod tests {
         assert!(!by("install:b", "usr/lib").raw.contains_key("shadowed_by"), "nothing replaces a file that has no namesake");
         assert_eq!(by("second", "usr/lib").enabled, Enablement::Disabled);
         assert!(!by("first", "etc").raw.contains_key("shadowed_by"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1125,7 +1118,6 @@ mod tests {
         assert_eq!(param.raw.get("params").map(String::as_str), Some("param=1"));
         assert!(s.entries.iter().any(|e| e.name == "vboxdrv"));
         assert!(s.entries.iter().any(|e| e.name == "loop"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1148,7 +1140,6 @@ mod tests {
             }
             other => panic!("the absent loaded-module list must be visible, got {other:?}"),
         }
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1178,7 +1169,6 @@ mod tests {
             "the truncated read must be recorded: {truncated:?}"
         );
         assert!(of_kind(&s, Kind::Udev).len() > 100, "the readable part of the flood still parsed");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1229,6 +1219,5 @@ mod tests {
         let rk = named("request-key.d/evil.conf", "create user debug:*");
         assert_eq!(rk.command.as_deref(), Some(b"/opt/rk %k %d".as_slice()));
         assert_eq!(rk.target_path, Some(PathBuf::from("/opt/rk")));
-        fs::remove_dir_all(&dir).unwrap();
     }
 }

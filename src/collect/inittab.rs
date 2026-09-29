@@ -466,8 +466,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn tree(tag: &str) -> crate::testing::Tree {
-        let p = crate::testing::Tree::new(&format!("inittab-{tag}"));
-        p
+        crate::testing::Tree::new(&format!("inittab-{tag}"))
     }
     fn put(root: &Path, rel: &str, bytes: &[u8]) {
         let p = root.join(rel);
@@ -556,7 +555,6 @@ mod tests {
         assert_eq!(one(&s, "pf").trigger, Trigger::PowerEvent);
         assert_eq!(one(&s, "ca").trigger, Trigger::DeviceEvent);
         assert_eq!(one(&s, "~~").raw["runlevels"], "S");
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -570,7 +568,6 @@ mod tests {
         put(&d, "etc/inittab", &tab);
         let s = scan(&d);
         assert_eq!(s.entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["ok"]);
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -594,7 +591,6 @@ mod tests {
         let s = scan(&d);
         assert_eq!(one(&s, "sv").enabled, Enablement::Disabled, "an older init never opens the directory");
         assert_eq!(one(&s, "ag").enabled, Enablement::Enabled);
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -607,7 +603,6 @@ mod tests {
         let script = one(&s, "initscript");
         assert_eq!((script.enabled, script.target_path.clone()), (Enablement::Enabled, Some(d.join("etc/initscript"))));
         assert_eq!(one(&s, "1").raw["initscript"], d.join("etc/initscript").display().to_string());
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -621,7 +616,6 @@ mod tests {
         let s = scan(&d);
         assert_eq!(one(&s, "1").raw["matches_template"], d.join("usr/share/sysvinit/inittab").display().to_string());
         assert!(!one(&s, "bd").raw.contains_key("matches_template"));
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -646,7 +640,6 @@ mod tests {
         fs::remove_file(d.join("sbin/init")).unwrap();
         let s = scan(&d);
         assert_eq!(one(&s, "ev").enabled, Enablement::Unknown);
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -679,7 +672,6 @@ mod tests {
         assert_eq!(one(&s, "console:/sbin/reboot").trigger, Trigger::DeviceEvent);
         assert_eq!(one(&s, "console:/sbin/openrc shutdown").trigger, Trigger::PowerEvent);
         assert_eq!(one(&s, "console:/sbin/init").trigger, Trigger::Always);
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -694,6 +686,5 @@ mod tests {
         let status = &s.header.collectors.iter().find(|c| c.name == "inittab").unwrap().status;
         assert!(matches!(status, crate::scan::Status::Complete), "{status:?}");
         assert_eq!(s.entries.iter().filter(|e| e.name.starts_with("~~")).count(), 2, "~~ may repeat");
-        fs::remove_dir_all(&d).unwrap();
     }
 }

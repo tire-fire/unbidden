@@ -101,7 +101,7 @@ fn build_tree(dir: &Path) {
     w("etc/modprobe.d/evil.conf", b"install nf_tables /bin/sh -c '/tmp/stage.sh; /sbin/modprobe --ignore-install nf_tables'\n");
 
     w("etc/pam.d/sshd", b"auth       required     pam_unix.so\nsession    optional     pam_exec.so seteuid /usr/local/sbin/notify\n");
-    w("home/alice/.ssh/authorized_keys", b"command=\"/usr/local/bin/wrap, --strict\",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyMaterialHere alice@host\n");
+    w("home/alice/.ssh/authorized_keys", b"command=\"/usr/local/bin/wrap, --strict\",no-pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl alice@host\n");
     w("etc/ssh/sshd_config", b"PermitRootLogin no\nForceCommand /usr/local/bin/shell-wrap\n");
     w("etc/sudoers", b"root ALL=(ALL:ALL) ALL\nalice ALL=(ALL) NOPASSWD: /usr/bin/systemctl\n");
 

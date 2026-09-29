@@ -161,10 +161,11 @@ str_enum!(Integrity {
     Unknown => "unknown",
 });
 
-/// Which service manager a systemd unit belongs to. Units in one scope
-/// shadow each other; units in different scopes never do. The record carries
-/// it as the `scope` note, written by `label` and read back by `from_label`,
-/// so nothing else matches on the spelling.
+/// Which service manager a systemd unit belongs to. Units in one scope shadow
+/// each other, and an account's own units also compete with the shared user
+/// units of the same name; system units are a separate set. The record
+/// carries it as the `scope` note, spelled by `label` and read back by
+/// `from_label`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Scope {
     System,
@@ -198,7 +199,7 @@ impl Scope {
 /// The spellings are the record's contract, pinned by the tests and the golden
 /// record.
 pub mod key {
-    /// The collector knows there is no program to find (a Lua scriptlet, a right, a variable an interpreter reads), so a missing target is no finding.
+    /// There is no program to find (a Lua scriptlet, a right, a variable an interpreter reads), so a missing target is no finding. Set by the collector, and by enrichment where it works that out.
     pub const TARGET_UNVERIFIABLE: &str = "target_unverifiable";
     /// This file replaces others of the same name in later directories.
     pub const SHADOWS: &str = "shadows";
@@ -236,7 +237,7 @@ pub mod key {
     pub const INFERRED_ENABLEMENT: &str = "inferred_enablement";
     /// The inode changed well after its package was installed.
     pub const CHANGED_AFTER_INSTALL: &str = "changed_after_install";
-    /// Whether a repository checks signatures.
+    /// Present, with the reason, only where a repository is not signature-checked.
     pub const SIGNATURE_CHECKING: &str = "signature_checking";
     /// A registry no package can own, written by a trigger.
     pub const REGISTRY_GENERATED: &str = "registry_generated";
@@ -263,9 +264,9 @@ str_enum!(Producer {
 impl Producer {
     /// What the producer writes is derived from packaged inputs (an init
     /// script, the kernel command line, an installed snap, a preset naming a
-    /// template), so an entry it wrote is quiet once its program verifies.
-    /// The others write what some program decided at runtime, which is that
-    /// program's doing and stays in view.
+    /// template, a package's own postinst), so an entry it wrote is quiet once
+    /// its program verifies. The others write what some program decided at
+    /// runtime, which is that program's doing and stays in view.
     pub fn derives_from_packaged_inputs(self) -> bool {
         matches!(self, Producer::SystemdGenerator | Producer::Snapd | Producer::SystemdPreset | Producer::DpkgPostinst)
     }

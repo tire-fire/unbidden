@@ -223,8 +223,8 @@ fn dracut(cx: &mut Ctx, out: &mut Vec<Entry>) {
     for module in sorted_dirs(cx, Path::new("usr/lib/dracut/modules.d")) {
         let name = file_name(&module);
         // A module directory is NN<name>. Split by bytes, not by a byte index
-        // into text: a directory named `9€bad` has no boundary at 2, and the
-        // slice used to panic the whole collector.
+        // into text: a directory named `9€bad` has no boundary at 2, and
+        // slicing there would panic the collector.
         let Some((order, module_name)) = name.split_at_checked(2) else { continue };
         if module_name.is_empty() || !order.bytes().all(|b| b.is_ascii_digit()) {
             continue;

@@ -723,8 +723,9 @@ fn openrc_state(cx: &mut Ctx) -> Option<Openrc> {
             let Ok(meta) = cx.root.stat_follow(dir.join(&ent.name)) else { continue };
             let name = ent.name.to_string_lossy().into_owned();
             // A subdirectory naming another runlevel stacks it. Any other is
-            // a name like the rest: OpenRC's ls_dir has no directory filter and
-            // rc_service_in_runlevel is only an access(2).
+            // a name like the rest: OpenRC's service listing drops only a
+            // dangling entry or a `*.sh` name, and asking whether a service
+            // is in a runlevel is only an access(2).
             if meta.is_dir && names.contains(&name) && name != *level {
                 stacked.push(name);
                 continue;
@@ -1374,8 +1375,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn tree(tag: &str) -> crate::testing::Tree {
-        let p = crate::testing::Tree::new(&format!("init-{tag}"));
-        p
+        crate::testing::Tree::new(&format!("init-{tag}"))
     }
 
     fn put(root: &Path, rel: &str, bytes: &[u8], mode: u32) {
@@ -1484,7 +1484,6 @@ exec /usr/sbin/sshd\n";
             "insserv's cache is not a script"
         );
         assert_eq!(of_kind(&s, Kind::SysvInit).len(), 2, "one entry per script, links folded in");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     const OPENRC_SSHD: &[u8] = b"#!/sbin/openrc-run\ncommand=/usr/sbin/sshd\n";
@@ -1604,7 +1603,6 @@ exec /usr/sbin/sshd\n";
         fs::remove_file(dir.join("etc/runlevels/default/local")).unwrap();
         let s = scan(&dir);
         assert_eq!(one(&s, Kind::RcLocal, "10-agent.start").raw["not_run"], "the local service is in no runlevel");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1622,7 +1620,6 @@ exec /usr/sbin/sshd\n";
         assert_eq!(one(&s, Kind::SysvInit, "ssh").enabled, Enablement::Enabled, "the generator reads rc2.d");
         assert!(of_kind(&s, Kind::OpenrcService).is_empty());
         assert!(of_kind(&s, Kind::RcLocal).is_empty());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1653,14 +1650,12 @@ exec /usr/sbin/sshd\n";
             assert!(e.raw["unread_runlevels"] == "6" || e.raw["unread_runlevels"] == "S");
         }
         assert_eq!(one(&s, Kind::SysvInit, "S99elsewhere").raw["not_run"], "systemd reads only rc1.d to rc5.d");
-        fs::remove_dir_all(&dir).unwrap();
         // The same links under sysvinit run at shutdown and at boot.
         let dir = host("rc-sysvinit", false);
         let s = scan(&dir);
         for name in ["at-shutdown", "at-boot", "in-rc2"] {
             assert_eq!(one(&s, Kind::SysvInit, name).enabled, Enablement::Enabled, "{name}");
         }
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1689,7 +1684,6 @@ exec /usr/sbin/sshd\n";
         assert_eq!(inline.raw["env.BACKDOOR"], "1");
 
         assert_eq!(one(&s, Kind::SysvInit, "ssh").enabled, Enablement::Disabled);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1712,7 +1706,6 @@ exec /usr/sbin/sshd\n";
 
         assert!(s.entries.iter().any(|e| e.name == "S03loop"));
         assert_eq!(one(&s, Kind::SysvInit, "S04root").raw["not_a_regular_file"], "true");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1733,7 +1726,6 @@ exec /usr/sbin/sshd\n";
         assert_eq!(sysv[0].raw["start_runlevels"], "2");
 
         assert_eq!(of_kind(&s, Kind::NetworkDispatcher).len(), 1, "/lib and /usr/lib are one dir");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1774,7 +1766,6 @@ exec /usr/sbin/sshd\n";
         assert_eq!(shutdown.raw["is_symlink"], "true");
         assert_eq!(shutdown.raw["symlink_target"], "/opt/shutdown.sh");
         assert_eq!(shutdown.enabled, Enablement::Enabled, "the link resolves to an executable");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1804,7 +1795,6 @@ exec /usr/sbin/sshd\n";
         let off = one(&s, Kind::Motd, "99-off");
         assert_eq!(off.enabled, Enablement::Disabled);
         assert_eq!(off.raw["env.LD_PRELOAD"], "/tmp/m.so");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1845,7 +1835,6 @@ exec /usr/sbin/sshd\n";
         assert_eq!(async_hook.enabled, Enablement::Disabled, "not executable");
 
         assert_eq!(of_kind(&s, Kind::NetworkDispatcher).len(), 5, "subdirectories are not scripts");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1878,7 +1867,6 @@ exec /usr/sbin/sshd\n";
             assert!(refused(backup, etc).contains("backup or package-manager copy"), "{backup}");
         }
         assert!(!refused("40-x.dpkg-old.sh", etc).contains("backup"), "NetworkManager looks at the last dot only");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1936,7 +1924,6 @@ exec /usr/sbin/sshd\n";
 
         assert!(s.entries.iter().any(|e| e.name == "S"), "a bare S is still an S entry");
         assert!(!s.entries.iter().any(|e| e.name == "README"), "rc runs S* and K* only");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     fn hook<'a>(s: &'a Scan, rel: &str) -> &'a Entry {

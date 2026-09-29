@@ -53,9 +53,9 @@ pub(crate) fn changed_after_install(file: std::time::SystemTime, list: std::time
 
 /// When dpkg wrote the file list of `package`, which is the moment it
 /// unpacked it, and the name of that list. `package` is the name as dpkg's own
-/// metadata files spell it: bare for a package of the native architecture or
-/// of none, `name:arch` for a multiarch one. A bare name that has only the
-/// multiarch spelling on disk finds that one, so a caller holding just a
+/// metadata files spell it: bare for most packages, `name:arch` for a
+/// Multi-Arch: same one (`libc6:amd64`, even on amd64). A bare name that has
+/// only the multiarch spelling on disk finds that one, so a caller holding just a
 /// package name, as a verdict gives it, need not know which it is.
 pub(crate) fn list_written(root: &Root, package: &str) -> Option<(String, std::time::SystemTime)> {
     let when = |name: &str| root.stat(Path::new(INFO).join(name)).ok()?.ctime;
@@ -75,8 +75,9 @@ pub(crate) fn list_written(root: &Root, package: &str) -> Option<(String, std::t
 }
 
 /// Whether `dpkg-statoverride` records a mode for `path` (root-relative).
-/// dpkg records no modes of its own, so an override is the one way a packaged
-/// file's mode differs from what it shipped with, legitimately.
+/// dpkg records no modes of its own, so an override is how an administrator
+/// legitimately changes a packaged file's mode; a few maintainer scripts
+/// chmod files too, which this does not see.
 pub(crate) fn statoverridden(root: &Root, path: &Path) -> bool {
     let want = format!("/{}", path.display());
     root.read_capped(STATOVERRIDE, 1 << 20)

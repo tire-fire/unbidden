@@ -536,7 +536,7 @@ const MONIT_DEPTH: usize = 10;
 
 /// Every include reader below reads a file once per run. A depth limit alone
 /// still lets N files that each include their own directory fan out to
-/// N^depth reads; ten one-line files were enough to time a scan out.
+/// N^depth reads.
 fn monit_read(cx: &mut Ctx, rel: &Path, depth: usize, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<(PathBuf, String, bool)>) {
     if depth > MONIT_DEPTH || !seen.insert(rel.to_path_buf()) {
         return;
@@ -963,8 +963,9 @@ fn collectd_read(
     let Ok(meta) = cx.root.stat_follow(rel) else { return };
     if meta.is_dir {
         let names: Vec<_> = cx.dir(rel).into_iter().map(|e| e.name).filter(|n| !n.as_encoded_bytes().starts_with(b".")).collect();
-        // A directory is listed once: an included directory holding a file
-        // that includes it again lists it again, at every depth.
+        // The recursion into a directory stops on a revisit: an included
+        // directory holding a file that includes it again would otherwise be
+        // read again at every depth. The listing above is repeated, cheaply.
         if !cx.root.dir_identity(rel).is_ok_and(|_| seen.insert(rel.to_path_buf())) {
             return;
         }
@@ -1215,7 +1216,6 @@ mod tests {
         let s = scan(&d);
         assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
         assert_eq!(hits(&s, "/opt/check_x"), 1);
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1236,7 +1236,6 @@ mod tests {
         let status = &s.header.collectors[0].status;
         assert!(matches!(status, crate::scan::Status::Complete), "{status:?}");
         assert!(s.entries.iter().any(|e| e.name == "zabbix:agent2:plugin:Real"));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1269,7 +1268,6 @@ mod tests {
         put(&d, "sbin/audisp-af_unix", b"");
         let s = scan(&d);
         assert_eq!(s.entries[0].command.as_deref(), Some(b"/sbin/audisp-af_unix".as_slice()), "later releases execute it");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1303,7 +1301,6 @@ mod tests {
         put(&d, "etc/incron.allow", b"");
         let s = scan(&d);
         assert!(s.entries.iter().filter(|e| e.principal.as_deref() != Some("root")).all(|e| e.enabled == Enablement::Disabled), "an empty allow file admits nobody");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1331,7 +1328,6 @@ mod tests {
         assert_eq!(names(&d), ["facter:f"], "external-dir replaces the defaults");
         put(&d, "etc/facter/facter.conf", b"global {\n  no-external-facts = true\n}\n");
         assert!(scan(&d).entries.iter().all(|e| e.enabled == Enablement::Disabled));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1363,7 +1359,6 @@ mod tests {
         assert!(s.entries[0].source.ends_with("etc/munin/plugin-conf.d/zz"), "a command is judged by the file that sets it");
         assert!(s.entries[3].source.ends_with("usr/share/munin/plugins/df_"), "a linked plugin is judged by what it links to");
         assert_eq!(s.entries[3].raw["plugin"], "/etc/munin/plugins/df");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1392,7 +1387,6 @@ mod tests {
                 ("monit:nginx:stop", "www", "/usr/sbin/service nginx stop"),
             ]
         );
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1423,7 +1417,6 @@ mod tests {
             ]
         );
         assert!(s.entries.iter().filter(|e| e.name.starts_with("zabbix:agentd")).all(|e| e.principal.as_deref() == Some("zbx")));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1435,7 +1428,6 @@ mod tests {
         let run = s.entries.iter().find(|e| e.name == "zabbix:agentd:system.run").unwrap();
         assert_eq!(run.enabled, Enablement::Disabled);
         assert!(run.raw.contains_key("not_run"));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1459,7 +1451,6 @@ mod tests {
             ]
         );
         assert!(s.entries.iter().all(|e| e.raw.contains_key("arguments") && e.principal.as_deref() == Some("nagios")));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1480,7 +1471,6 @@ mod tests {
             got,
             [("salt:beacon", "/opt/b --quiet", Enablement::Enabled), ("salt:paused", "/tmp/x", Enablement::Disabled), ("salt:states", "-", Enablement::Enabled)]
         );
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1529,6 +1519,5 @@ mod tests {
         assert_eq!(s.entries[0].command.as_deref(), Some(b"/opt/poll -v".as_slice()));
         assert_eq!(s.entries[4].target_path.as_deref(), Some(Path::new("/opt/py/spy.py")));
         assert!(s.entries[3].raw.contains_key("target_unverifiable"));
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

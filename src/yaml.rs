@@ -522,7 +522,8 @@ fn python_int(s: &str, radix: u32) -> Option<Option<i128>> {
         _ => None,
     };
     let digits = match prefix {
-        // `get`, not an index: `0x€1` has no character boundary at 2.
+        // `get`, not an index: a multibyte character can straddle byte 2
+        // (`0€`), and slicing there panics.
         Some(p) if body.len() > 2 && body.get(..2).is_some_and(|h| h.eq_ignore_ascii_case(p)) => &body[2..],
         _ => body,
     };

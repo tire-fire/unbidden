@@ -33,8 +33,7 @@ const MAX_DEPTH: usize = 10;
 
 /// Substitutions one value may make, however deep. A depth limit alone lets
 /// references multiply: ten levels of ten references each is 10^10
-/// substitutions from an 816-byte jail.conf, and hung a scan for minutes.
-/// A real action has a handful; past the budget the rest stays as written.
+/// substitutions from an 816-byte jail.conf. A real action has a handful; past the budget the rest stays as written.
 const SUBSTITUTIONS: usize = 4096;
 
 /// Section, then key, then the value and the file that set it.

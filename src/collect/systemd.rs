@@ -744,7 +744,7 @@ fn manager_environment(cx: &mut Ctx) -> Vec<Entry> {
                 }
                 if let Some(a) = &account {
                     e.principal = Some(a.clone());
-                    e.note(key::SCOPE, "the account's own user manager");
+                    e.note(key::SCOPE, Scope::Home(a.clone()).label());
                 }
                 for (k, v) in split_env(&d.value) {
                     e.note(&format!("env.{k}"), v);
@@ -1115,7 +1115,7 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
         }
     }
     // The command an entry stands for is its ExecStart, and where there is
-    // none, the first of the others that runs: a drop-in that adds only an
+    // none, the first other Exec line: a drop-in that adds only an
     // ExecStartPre= is the commonest way to add a command to a vendor unit,
     // and it has to carry a target like any other. The rest of a unit's Exec
     // lines are on the entry as notes; each entry has one command, and a
@@ -1404,8 +1404,7 @@ mod tests {
     use crate::scan::{Options, Scan, Status};
 
     fn tree(tag: &str) -> crate::testing::Tree {
-        let p = crate::testing::Tree::new(&format!("systemd-{tag}"));
-        p
+        crate::testing::Tree::new(&format!("systemd-{tag}"))
     }
 
     fn write(dir: &Path, rel: &str, body: &[u8]) {
@@ -1456,7 +1455,6 @@ mod tests {
         assert_eq!(rc_local.raw["condition_fails"], "ConditionFileIsExecutable=/etc/rc.local", "present but not executable");
         assert!(!one(&s, "held.service").raw.contains_key("condition_fails"), "a negated absent path, a directory and a present file all hold");
         assert!(!one(&s, "reset.service").raw.contains_key("condition_fails"), "an empty assignment clears the list");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1488,7 +1486,6 @@ mod tests {
         assert_eq!(one(&s, "plain-and-trigger.service").raw["condition_fails"], "ConditionPathExists=/nowhere");
         assert!(!one(&s, "reset-all.service").raw.contains_key("condition_fails"));
         assert_eq!(one(&s, "reset-not-asserts.service").raw["condition_fails"], "AssertPathExists=/nowhere");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1510,7 +1507,6 @@ mod tests {
         let status = &s.header.collectors[0].status;
         assert!(matches!(status, crate::scan::Status::Complete), "a link out of a home is a limit, not a failure: {status:?}");
         assert!(s.header.collectors[0].truncated.iter().any(|t| t.contains("alice") && t.contains("not followed")));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1531,7 +1527,6 @@ mod tests {
         assert_eq!(one(&s, "mine.service").raw["env.LD_PRELOAD"], "/tmp/x.so");
         assert!(!one(&s, "dots.service").raw.keys().any(|k| k.starts_with("env.")), "`..` out of the home is refused too");
         assert_eq!(one(&s, "admin.service").raw["env.password"], "ROOTSECRET", "an administrator's unit reads what it names");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1568,7 +1563,6 @@ mod tests {
         let beacon = one(&s, "sleep:50-beacon");
         assert_eq!((beacon.trigger, beacon.principal.as_deref()), (Trigger::PowerEvent, Some("root")));
         assert_eq!(beacon.target_path, Some(dir.join("usr/lib/systemd/system-sleep/50-beacon")));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1595,7 +1589,7 @@ mod tests {
         assert_eq!(by("DefaultEnvironment:E=1").enabled, Enablement::Enabled);
         assert_eq!(by("DefaultEnvironment:PERL5OPT=-Mhook").raw["scope"], "user");
         let mine = by("DefaultEnvironment:LD_PRELOAD=/tmp/u.so");
-        assert_eq!((mine.principal.as_deref(), mine.raw["scope"].as_str()), (Some("alice"), "the account's own user manager"));
+        assert_eq!((mine.principal.as_deref(), mine.raw["scope"].as_str()), (Some("alice"), "user:alice"));
         assert_eq!(by("ManagerEnvironment:NODE_OPTIONS=-r/tmp/n").principal.as_deref(), Some("alice"), "the account's drop-ins too");
         assert_eq!(hooks.len(), 7, "a commented line and another section are not settings");
 
@@ -1608,7 +1602,6 @@ mod tests {
         write(&dir, "usr/lib/systemd/libsystemd-shared-257.9-1.fc42.so", b"");
         let s = scan(&dir);
         assert_eq!(s.entries.iter().find(|e| e.name == "DefaultEnvironment:VENDOR=1").unwrap().enabled, Enablement::Enabled);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1624,7 +1617,6 @@ mod tests {
         assert_eq!(e.source, dir.join("usr/lib/systemd/system/vendor.service"));
         assert_eq!(e.command.as_deref(), Some(&b"/usr/sbin/sshd -D"[..]));
         assert_eq!(e.target_path, Some(PathBuf::from("/usr/sbin/sshd")));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1636,7 +1628,6 @@ mod tests {
         let s = scan(&dir);
         assert_eq!(named(&s, "old.service").len(), 1);
         assert_eq!(named(&s, "new.service").len(), 1);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1655,7 +1646,6 @@ mod tests {
 
         assert_eq!(one(&s, "present.service").enabled, Enablement::Disabled, "presence is not enablement");
         assert_eq!(one(&s, "plumbing.service").enabled, Enablement::Static, "no [Install] is static");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1678,7 +1668,6 @@ mod tests {
         assert_eq!(ssh.enabled, Enablement::Enabled, "an alias enables the unit it names");
         one(&s, "innocent.service");
         one(&s, "autovt@.service");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1693,7 +1682,6 @@ mod tests {
         let e = one(&s, "telemetry.service");
         assert_eq!(e.enabled, Enablement::Masked);
         assert_eq!(e.raw["symlink_target"], "/dev/null");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1705,7 +1693,6 @@ mod tests {
         let by_path: BTreeMap<bool, &Entry> = named(&s, "telemetry.service").into_iter().map(|e| (e.source.starts_with(dir.join("etc")), e)).collect();
         assert_eq!(by_path[&true].enabled, Enablement::Masked);
         assert_eq!(by_path[&true].raw["masked_by"], "an empty file");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1731,7 +1718,6 @@ mod tests {
         assert!(!vendor.raw.contains_key("shadows"));
         // The flag itself belongs to the enrichment pass.
         assert!(all.iter().all(|e| !e.has_flag(Flag::ShadowsVendorUnit)));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1762,7 +1748,6 @@ mod tests {
         let local = find("c.service", "usr/local/lib/systemd/system/c.service");
         assert!(local.raw["shadows"].ends_with("usr/lib/systemd/system/c.service"));
         assert_eq!(local.command.as_deref(), Some(&b"/opt/c"[..]));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1794,7 +1779,6 @@ mod tests {
         assert!(bob.raw["shadows"].ends_with("usr/lib/systemd/user/pipewire.service"));
         let admin = at("etc/systemd/user/pipewire.service");
         assert!(admin.raw["shadowed_by"].contains("home/alice"), "{:?}", admin.raw);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1813,7 +1797,6 @@ mod tests {
         assert_eq!(e.source, dir.join("etc/systemd/user/pipewire.service"));
         assert_eq!(e.id, crate::entry::entry_id(Kind::SystemdUnit, Path::new("etc/systemd/user/pipewire.service"), "pipewire.service"));
         assert!(!e.has_flag(Flag::WorldWritable));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1836,7 +1819,6 @@ mod tests {
             assert!(!one(&s, name).has_flag(Flag::NonStandardLocation), "{name}");
         }
         assert!(one(&s, "rogue.service").has_flag(Flag::NonStandardLocation));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1861,7 +1843,6 @@ mod tests {
         assert_eq!(e.enabled, Enablement::NotApplicable);
         // The parent is still reported, unchanged.
         assert_eq!(one(&s, "cups.service").command.as_deref(), Some(&b"/usr/sbin/sshd -D"[..]));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1897,7 +1878,6 @@ mod tests {
         assert_eq!(sym.raw["instance"], "one");
         assert_eq!(sym.command.as_deref(), Some(&b"/tmp/x %i"[..]));
         assert_eq!(one(&s, "pwn@.service").raw["template"], "true");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1946,7 +1926,6 @@ mod tests {
 
         assert!(named(&s, "notaunit.txt").is_empty());
         assert!(named(&s, ".service").is_empty(), "a bare suffix is not a unit name");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1996,7 +1975,6 @@ mod tests {
         assert_eq!(u.raw["env.LD_PRELOAD"], "/home/alice/.cache/hook.so");
         // ~/.config/systemd/user is the documented location for user units.
         assert!(!u.has_flag(Flag::HiddenPath));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2013,7 +1991,6 @@ mod tests {
         assert_eq!(sys.raw["generator_type"], "environment");
         assert_eq!(sys.raw["scope"], "system");
         assert_eq!(one(&s, "20-x").raw["scope"], "user");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2045,7 +2022,6 @@ mod tests {
         let vendor = one(&s, "C /root/.profile");
         assert_eq!(vendor.enabled, Enablement::Disabled, "tmpfiles never reads the replaced file");
         assert!(vendor.raw["shadowed_by"].ends_with("etc/tmpfiles.d/same.conf"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2080,6 +2056,5 @@ mod tests {
         assert_eq!(replaced.enabled, Enablement::Disabled);
         assert!(replaced.raw["shadowed_by"].ends_with("etc/systemd/system-preset/10-x.preset"));
         assert!(named(&s, "disable *").is_empty(), "disable lines run nothing");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

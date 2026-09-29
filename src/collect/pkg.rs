@@ -331,9 +331,9 @@ const HOOK_KEYS: &[&str] = &[
     "apt::update::post-invoke-stats",
 ];
 
-/// Files one apt run may pull in through `#include`, however they chain. A
-/// real configuration has a few; the limit is for one that includes itself
-/// through a dozen names.
+/// Files one scan reads for apt: apt.conf, every conf.d fragment and what
+/// `#include` pulls in, however they chain. A real configuration has a few
+/// dozen at most; past the limit an include is recorded as not followed.
 const APT_INCLUDE_FILES: usize = 64;
 
 /// Whether a canonical key names a program apt runs: a hook it hands to the
@@ -396,7 +396,10 @@ fn apt(cx: &mut Ctx) -> Vec<Entry> {
             e.target_path = Some(PathBuf::from(OsStr::from_bytes(&target)));
             let at_root = Path::new(OsStr::from_bytes(&target)).strip_prefix("/").map(Path::to_path_buf);
             match at_root {
-                Ok(inc) if skipped.is_none() && visited.len() < APT_INCLUDE_FILES && visited.insert(inc.clone()) => files.push((inc, None)),
+                Ok(inc) if skipped.is_none() && visited.len() >= APT_INCLUDE_FILES && !visited.contains(&inc) => {
+                    e.note("not_followed", format!("{APT_INCLUDE_FILES} files are already read; the rest of the includes are not followed"));
+                }
+                Ok(inc) if skipped.is_none() && visited.insert(inc.clone()) => files.push((inc, None)),
                 Ok(_) => {}
                 // apt opens a relative name from its own working directory,
                 // which nothing on disk records.
@@ -646,9 +649,10 @@ use crate::provenance::dpkg::changed_after_install;
 
 /// Every maintainer script on the host, several hundred of them, all packaged.
 /// They are emitted rather than filtered because the filter belongs downstream:
-/// §8 suppresses a packaged, intact script by default, and a script that is
-/// *not* packaged or not intact in this directory is one of the loudest
-/// findings the tool can produce. Filtering here would delete that signal.
+/// §8 hides a script as the package manager's own machinery, and shows one
+/// that is not a package's or was changed after its package was installed,
+/// which are among the loudest findings the tool can produce. Filtering here
+/// would delete that signal.
 fn dpkg_scripts(cx: &mut Ctx) -> Vec<Entry> {
     let listing = cx.dir(DPKG_INFO);
     let with_triggers: BTreeSet<Vec<u8>> = listing
@@ -1111,9 +1115,11 @@ fn rpm_scriptlets(cx: &mut Ctx) -> (Vec<Entry>, &'static str) {
             }
         }
     };
-    // Several kernels are installed side by side under one package name. A
-    // counter on the repeats would move whenever one is added or removed and
-    // read as every other's scriptlet changing; the version does not move.
+    // Several kernels are installed side by side under one package name. Once
+    // there are two, each name carries its version, which changes nothing
+    // when a third is added or one removed; a counter on the repeats would
+    // move whenever one came or went and read as every other's scriptlet
+    // changing.
     let mut installed: BTreeMap<String, usize> = BTreeMap::new();
     for s in &scriptlets {
         *installed.entry(base_name(s)).or_default() += 1;
@@ -1565,8 +1571,7 @@ mod tests {
     use std::fs;
 
     fn tree(tag: &str) -> crate::testing::Tree {
-        let p = crate::testing::Tree::new(&format!("pkg-{tag}"));
-        p
+        crate::testing::Tree::new(&format!("pkg-{tag}"))
     }
 
     fn put(root: &Path, rel: &str, bytes: &[u8]) {
@@ -1662,7 +1667,6 @@ mod tests {
         let e = one(&s, |e| e.kind == Kind::PkgHook);
         assert_eq!(e.enabled, Enablement::Disabled);
         assert!(e.raw["not_run"].contains("scalar"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1717,7 +1721,6 @@ mod tests {
         let ignored = one(&s, |e| e.source.to_string_lossy().ends_with("99evil.sh"));
         assert_eq!(ignored.enabled, Enablement::Disabled, "apt never reads a .sh fragment");
         assert!(ignored.raw.contains_key("not_read_by_apt"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1753,7 +1756,6 @@ mod tests {
         );
         let dpkg = one(&s, |e| e.raw["key"] == "dir::bin::dpkg");
         assert_eq!(dpkg.target_path, Some(PathBuf::from("/opt/evil/dpkg")));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1770,7 +1772,20 @@ mod tests {
         assert!(rel.raw.contains_key("not_followed"));
         // The cycle back to the first file ends: its include is one entry per file.
         assert_eq!(of_kind(&s, Kind::PkgHook).iter().filter(|e| e.raw.get("key").is_some_and(|k| k == "#include")).count(), 3);
-        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn past_the_file_limit_an_include_says_it_was_not_followed() {
+        let dir = tree("include-limit");
+        for n in 0..APT_INCLUDE_FILES {
+            put(&dir, &format!("etc/apt/apt.conf.d/50f{n:03}"), b"// nothing\n");
+        }
+        put(&dir, "etc/apt/apt.conf.d/99inc", b"#include \"/srv/late.conf\";\n");
+        put(&dir, "srv/late.conf", b"DPkg::Post-Invoke {\"/srv/hook\";};\n");
+        let s = scan(&dir);
+        let inc = one(&s, |e| e.target_path == Some(PathBuf::from("/srv/late.conf")));
+        assert!(inc.raw["not_followed"].contains("already read"), "{:?}", inc.raw);
+        assert!(s.entries.iter().all(|e| e.command.as_deref() != Some(b"/srv/hook".as_slice())));
     }
 
     #[test]
@@ -1843,7 +1858,6 @@ mod tests {
             of_kind(&s, Kind::PkgHook).len() > 100,
             "the readable part of the flood still parsed"
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1874,7 +1888,6 @@ mod tests {
             Some("interest /usr/share/fonts"),
             "a file trigger is why a postinst runs when nobody installed anything"
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1936,7 +1949,6 @@ mod tests {
         put(&dir, "etc/dnf/dnf.conf", b"[main]\ngpgcheck=1\nplugins=0\n");
         let s = scan(&dir);
         assert_eq!(one(&s, |e| e.name == "dnf-plugin:copr").enabled, Enablement::Disabled);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1969,7 +1981,6 @@ mod tests {
         assert_eq!(kmod.raw["not_run"], "no trigger script for it in the scripts archive");
         assert_eq!(kmod.source, dir.join("lib/apk/db/triggers"));
         assert!(one(&s, |e| e.name == "busybox:post-install").raw.get("fires_on").is_none());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2037,7 +2048,6 @@ mod tests {
         let orphan = one(&s, |e| e.name == "plugin:orphan.so");
         assert_eq!(orphan.enabled, Enablement::Unknown);
         assert!(orphan.has_flag(Flag::DegradedEnablement));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Headers as rpm writes them: the body tags are plain strings, and so is
@@ -2085,7 +2095,7 @@ mod tests {
     }
 
     #[test]
-    fn a_second_installed_kernel_does_not_rename_the_first_ones_scriptlets() {
+    fn installed_kernels_are_told_apart_by_version_not_by_count() {
         use crate::provenance::rpm::tests::{HeaderBuilder, write_rpmdb};
         let kernel = |version: &str| {
             let mut h = HeaderBuilder::default();
@@ -2184,7 +2194,6 @@ mod tests {
         let plugin = one(&s, |e| e.name == "__transaction_selinux");
         let caveat = plugin.raw.get("caveat").map(String::as_str).unwrap_or_default();
         assert!(caveat.contains("reported as their own entries"), "stale caveat: {caveat}");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2197,7 +2206,6 @@ mod tests {
             plugin.raw.get("caveat").is_some_and(|c| c.contains("no rpmdb")),
             "an unread database must not read as an empty one"
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2214,7 +2222,6 @@ mod tests {
         let s = scan(&dir);
         let post = one(&s, |e| e.name == "systemd.x86_64:%post");
         assert_eq!(post.source, dir.join("usr/lib/sysimage/rpm/rpmdb.sqlite"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2287,7 +2294,6 @@ mod tests {
         assert_eq!(inert.enabled, Enablement::NotApplicable);
         assert_eq!(inert.command, None);
         assert!(inert.raw.contains_key("parse"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2309,7 +2315,6 @@ mod tests {
             "the canonical path is kept, got {}",
             found[0].source.display()
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2331,7 +2336,6 @@ mod tests {
             2,
             "deduplication must key on the inode, not on the name"
         );
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -2365,7 +2369,6 @@ mod tests {
 
         let huge = one(&s, |e| e.name == "org.huge.service");
         assert_eq!(huge.command.as_deref(), Some(b"/bin/huge".as_slice()));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// OsString::from_vec without pulling the trait into the module proper.
@@ -2483,14 +2486,12 @@ mod tests {
         assert_eq!(evil.enabled, Enablement::Enabled);
         assert_eq!(evil.target_path, Some(dir.join("usr/lib/python3.12/site-packages/dnf-plugins/evil.py")));
         assert_eq!(s.entries.iter().filter(|e| e.raw.get("plugin").is_some_and(|p| p == "copr")).count(), 1, "a plugin with a conf is not reported twice");
-        fs::remove_dir_all(&dir).unwrap();
 
         // dnf5 loads no python: nothing here is imported.
         let dir = tree("dnf5-noconf");
         put(&dir, "usr/bin/dnf", b"");
         put(&dir, "usr/lib/python3.12/site-packages/dnf-plugins/evil.py", b"");
         assert!(scan(&dir).entries.iter().all(|e| e.name != "dnf-plugin:evil"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

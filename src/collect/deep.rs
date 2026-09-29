@@ -792,8 +792,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn tree(tag: &str) -> crate::testing::Tree {
-        let p = crate::testing::Tree::new(&format!("deep-{tag}"));
-        p
+        crate::testing::Tree::new(&format!("deep-{tag}"))
     }
 
     fn put(root: &Path, rel: &str, bytes: &[u8], mode: u32) {
@@ -848,7 +847,6 @@ mod tests {
         let s = run(&root, &Options { deep: false }, &collectors);
         assert!(s.entries.is_empty());
         assert!(matches!(status(&s), Status::Skipped { .. }), "{:?}", status(&s));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -888,7 +886,6 @@ mod tests {
         let both = named(&s, "both");
         assert!(both.raw.contains_key("setuid") && both.raw.contains_key("setgid"));
         assert_eq!(status(&s), &Status::Complete);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -945,7 +942,6 @@ mod tests {
         let s = scan_deep(&dir);
         assert!(of_kind(&s, Kind::FileCapability).is_empty());
         assert_eq!(status(&s), &Status::Complete, "ENODATA is an answer, not a failure");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -966,7 +962,6 @@ mod tests {
         assert_eq!(hook.target_path, Some(dir.join("srv/app/.git/hooks/post-checkout")));
         assert_eq!(hook.raw.get("repository").map(String::as_str), Some(dir.join("srv/app").to_str().unwrap()));
         assert_eq!(hook.raw.get("interpreter").map(String::as_str), Some("/bin/sh"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1011,7 +1006,6 @@ mod tests {
             !s.header.collectors.iter().any(|c| matches!(c.status, Status::Failed { .. })),
             "the collector must not need --deep"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1058,7 +1052,6 @@ http://x/y
 
         let ssh = named(&s, "core.sshCommand");
         assert_eq!(ssh.raw.get("env.LD_PRELOAD").map(String::as_str), Some("/tmp/e.so"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1084,7 +1077,6 @@ http://x/y
         let hook = named(&s, "post-merge");
         assert_eq!(hook.raw.get("repository").map(String::as_str), Some(dir.join("srv/app/sub").to_str().unwrap()));
         assert_eq!(hook.raw.get("gitdir").map(String::as_str), Some(dir.join("srv/app/.git/modules/sub").to_str().unwrap()));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1102,7 +1094,6 @@ http://x/y
         let s = scan_deep(&dir);
         assert_eq!(of_kind(&s, Kind::SuidBinary).len(), 1, "the walk finished and found what is past the loops");
         assert_eq!(named(&s, "tool").source, dir.join("home/u/deep/tool"));
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1171,7 +1162,6 @@ http://x/y
         // The hook with no shebang and no valid UTF-8 is still a hook.
         assert_eq!(named(&s, "x").kind, Kind::GitHook);
         assert!(!named(&s, "x").raw.contains_key("interpreter"));
-        fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn template_hooks_land_in_every_new_repository() {

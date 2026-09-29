@@ -18,8 +18,8 @@ use unbidden::root::Root;
 use unbidden::scan::{self, Collector, Options, Status};
 
 /// The scan root, built once per process and reused. `Root` holds an open
-/// directory fd and a write-once home list, so a second one per iteration
-/// would buy nothing but syscalls.
+/// directory fd and the homes read at construction, so a second one per
+/// iteration would buy nothing but syscalls.
 static ROOT: OnceLock<(PathBuf, Root)> = OnceLock::new();
 
 /// Plants `data` at `rel` and runs `collector` over it.

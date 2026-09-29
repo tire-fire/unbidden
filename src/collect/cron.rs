@@ -149,9 +149,9 @@ fn cron_d_skips(flavour: Flavour, name: &[u8]) -> Option<&'static str> {
 
 /// The daemon binaries, in the order a host would have them: /usr/sbin/crond
 /// is BusyBox's link on Alpine and cronie's on Fedora, /usr/sbin/cron is
-/// Debian's. Read whole rather than through the collector's capped reads: a
-/// binary is not configuration, and a read of it that hit its cap is not a
-/// limited read of anything the operator should hear about.
+/// Debian's. Read directly, up to 16 MiB, rather than through the collector's
+/// capped reads: a binary is not configuration, and a read of it that hit its
+/// cap is not a limited read of anything the operator should hear about.
 fn flavour(cx: &mut Ctx) -> Flavour {
     for p in ["usr/sbin/crond", "sbin/crond", "usr/sbin/cron", "usr/bin/crond"] {
         let Ok(resolved) = cx.root.resolve(Path::new(p)) else { continue };
@@ -879,8 +879,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn tree(tag: &str) -> crate::testing::Tree {
-        let dir = crate::testing::Tree::new(&format!("cron-{tag}"));
-        dir
+        crate::testing::Tree::new(&format!("cron-{tag}"))
     }
 
     fn put(dir: &Path, rel: &str, body: &[u8]) {
@@ -943,7 +942,6 @@ mod tests {
         // An anacron job that runs it counts too.
         put(&dir, "etc/anacrontab", b"7 10 cron.weekly nice run-parts /etc/cron.weekly\n");
         assert_eq!(scan_named(&dir, "weekly", "job"), Enablement::Enabled);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn scan_named(dir: &Path, period: &str, name: &str) -> Enablement {
@@ -977,7 +975,6 @@ mod tests {
             put(&unknown, &format!("etc/cron.d/{n}"), b"* * * * * root /usr/bin/touch /tmp/x\n");
         }
         assert!(scan(&unknown).entries.iter().all(|e| e.enabled == Enablement::Enabled));
-        std::fs::remove_dir_all(&unknown).unwrap();
     }
 
     #[test]
@@ -1035,7 +1032,6 @@ mod tests {
         assert!(!named(&s, "backup.sh").raw["not_run"].contains("names"), "BusyBox's run-parts allows a dot");
         assert_eq!(named(&s, ".hidden").enabled, Enablement::Disabled);
         assert_eq!(named(&s, "orphan").enabled, Enablement::Disabled);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1054,7 +1050,6 @@ mod tests {
         let backup = named(&s, "backup.sh");
         assert_eq!((backup.enabled, backup.raw["not_run"].as_str()), (Enablement::Disabled, "run-parts runs only names of letters, digits, _ and -"), "Debian's run-parts here");
         assert_eq!(named(&s, "orphan").raw["not_run"], "no loaded crontab line runs run-parts on this directory");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1073,7 +1068,6 @@ mod tests {
         assert!(!says("ok-1_2").contains("names of"));
         assert_eq!(says(".x"), "run-parts runs only names of letters, digits, _, - and dots after the first character");
         assert!(s.header.collectors[0].truncated.is_empty(), "reading the binary is not a limited read: {:?}", s.header.collectors[0].truncated);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1109,7 +1103,6 @@ mod tests {
         assert_eq!(text(escaped), "echo 100\\% done", "a backslash-escaped % does not end the command");
         assert_eq!(escaped.raw["stdin"], "mail body");
 
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1125,7 +1118,6 @@ mod tests {
         for id in &before {
             assert!(after.contains(id), "a line moved down the file and lost its identity");
         }
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1136,7 +1128,6 @@ mod tests {
         assert_eq!(s.entries.len(), 2);
         assert_ne!(s.entries[0].id, s.entries[1].id, "a duplicate id would silently drop one of them");
         assert!(s.entries.iter().any(|e| e.raw.get("duplicate_line").map(String::as_str) == Some("2")));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1182,7 +1173,6 @@ mod tests {
             !matches!(status, Status::Failed { .. }),
             "hostile input must not kill the collector: {status:?}"
         );
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1216,7 +1206,6 @@ mod tests {
         assert_eq!(daily.principal.as_deref(), Some("root"));
         assert_eq!(daily.raw["env.START_HOURS_RANGE"], "3-22");
         assert_eq!(named(&s, "clean").target_path, Some(PathBuf::from("/tmp/x")));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1238,7 +1227,6 @@ mod tests {
         let body = text(e);
         assert!(body.starts_with("${SHELL:-/bin/sh}"), "the body starts below the generated header: {body:?}");
         assert!(body.contains("/usr/bin/curl http://x/y | sh"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1259,6 +1247,5 @@ mod tests {
         let s = scan(&dir);
         assert_eq!(named(&s, "backup.sh").enabled, Enablement::Enabled, "Fedora's script does");
         assert_eq!(named(&s, "rotate").raw["not_run"], "named in jobs.deny");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1072,7 +1072,6 @@ mod tests {
         assert_eq!(state("absent.desktop"), Enablement::Disabled);
         assert_eq!(state("plain.desktop"), Enablement::Disabled);
         assert_eq!(state("bare.desktop"), Enablement::Enabled, "a bare name is the session's PATH to look up");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A dconf database in the real on-disk format, written by gvdb itself.
@@ -1143,7 +1142,7 @@ mod tests {
 
     #[test]
     fn a_looping_user_database_costs_the_scan_nothing_but_a_limit() {
-        // Queried, this file overflowed the stack and killed the process.
+        // Queried without a guard, this file overflows the stack.
         let d = tree("gvdb-loop");
         put(&d, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/sh\n");
         put(&d, "home/alice/.config/dconf/user", &looping_db());
@@ -1178,7 +1177,6 @@ mod tests {
         assert_eq!(e[0].command.as_deref(), Some(b"/usr/bin/spice-vdagent".as_slice()));
         assert_eq!(e[0].target_path, Some(dir.join("usr/bin/spice-vdagent")));
         assert_eq!(status, Status::Complete);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1208,7 +1206,6 @@ mod tests {
         // ~/.config/autostart is where per-user autostart is supposed to
         // live, so being under a dot-directory says nothing about it.
         assert!(!user.has_flag(Flag::HiddenPath));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1228,7 +1225,6 @@ mod tests {
         assert!(e[0].has_flag(Flag::EncodingAnomaly));
         assert!(e[0].raw.contains_key("exec_hex"));
         assert_eq!(e[0].enabled, Enablement::Enabled);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1255,7 +1251,6 @@ mod tests {
         assert_eq!(e[0].raw.get("shell_version").map(String::as_str), Some("45"));
         assert!(!e[0].has_flag(Flag::DegradedEnablement));
         assert_eq!(status, Status::Complete);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1292,7 +1287,6 @@ mod tests {
         // The schema default is user-independent, so the accounts it covers
         // are not worth listing — the source note already says so.
         assert!(e[0].raw.get("enabled_for").is_none());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1328,7 +1322,6 @@ mod tests {
         assert_eq!(desklet.len(), 1);
         assert_eq!(desklet[0].enabled, Enablement::Enabled, "system desklet, enabled by alice");
         assert_eq!(desklet[0].principal, None);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1365,7 +1358,6 @@ mod tests {
         let (entries, status) = run(&dir);
         assert_eq!(by_name(&entries, Kind::DesktopExtension, "x@y.z").len(), 1);
         assert!(matches!(status, Status::Complete), "{status:?}");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1389,7 +1381,6 @@ mod tests {
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].enabled, Enablement::Enabled);
         assert_eq!(e[0].raw.get("enablement_source").map(String::as_str), Some("system-db:local"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1456,7 +1447,6 @@ mod tests {
         let (entries, _) = run(&dir);
         assert_eq!(answer(&entries, "localpick@x"), (Enablement::Enabled, Some("system-db:local".into())));
         assert_eq!(answer(&entries, "userpick@x").0, Enablement::Disabled);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1468,7 +1458,6 @@ mod tests {
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].enabled, Enablement::Unknown);
         assert!(e[0].has_flag(Flag::DegradedEnablement));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1506,7 +1495,6 @@ mod tests {
 
         let quotes = by_name(&entries, Kind::XdgAutostart, "quotes.desktop");
         assert_eq!(quotes[0].target_path, Some(dir.join("opt/my app/run")));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1526,7 +1514,6 @@ mod tests {
             Some(dir.join("usr/share/cinnamon/applets/menu@cinnamon.org/5.4/applet.js"))
         );
         assert_eq!(e[0].raw.get("metadata_uuid_mismatch").map(String::as_str), Some("other@x"));
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1546,7 +1533,6 @@ mod tests {
         assert_eq!(session.raw.get("overrides"), Some(&system.source.to_string_lossy().into_owned()));
         assert_eq!(system.raw.get("overridden_by"), Some(&session.source.to_string_lossy().into_owned()));
         assert_eq!(by_name(&entries, Kind::XdgAutostart, "lx.desktop")[0].raw["desktop_session"], "Lubuntu");
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1578,7 +1564,6 @@ mod tests {
         assert!(!entries.iter().any(|e| e.name == "beacon.sh~"), "Plasma skips a backup name");
         assert_eq!(get("wipe").raw["runs"], "at logout");
         assert_eq!(get("inert").enabled, Enablement::Disabled);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
     #[test]
     fn file_manager_python_extensions_are_read_by_suffix() {

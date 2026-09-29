@@ -76,9 +76,11 @@ pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
 /// operation in the tool.
 ///
 /// The package databases answer first, for every path. A runtime producer is
-/// only ever asked about a path no package claims: the GeneratedBy verdict
+/// only asked about a path no database answered for: the GeneratedBy verdict
 /// takes Unpackaged away, and a file a package ships must be checked against
-/// that package whatever it happens to be called.
+/// that package whatever it happens to be called. A database that could not be
+/// read whole answers for less, so a producer then judges by location and
+/// evidence alone, and what neither claims is Unknown rather than Unpackaged.
 pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Resolution {
     resolve_with(root, wanted, &[("dpkg", dpkg::resolve), ("rpm", rpm::resolve), ("apk", apk::resolve)])
 }
@@ -268,9 +270,9 @@ mod tests {
 
     #[test]
     fn a_packaged_file_is_checked_against_its_package_whatever_it_is_called() {
-        // snap-confine is setuid root and shipped by the snapd package. A
-        // name rule that ran first used to call it snapd's and skip the
-        // integrity check, so a trojaned copy read as nothing at all.
+        // snap-confine is setuid root and shipped by the snapd package. A name
+        // rule that ran first would call it snapd's and skip the integrity
+        // check, so a trojaned copy would read as nothing at all.
         let dir = crate::testing::Tree::new("prov-order");
         for d in ["usr/lib/snapd", "var/lib/dpkg/info", "etc/systemd/system"] {
             std::fs::create_dir_all(dir.join(d)).unwrap();

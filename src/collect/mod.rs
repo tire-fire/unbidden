@@ -78,8 +78,9 @@ pub(crate) fn include_rel(base: &Path, spec: &[u8]) -> PathBuf {
     }
 }
 
-/// The files a glob in the last path component matches, sorted as glob(3)
-/// returns them; a path with no glob is itself.
+/// The files a glob in the last path component matches, sorted bytewise;
+/// a path with no glob is itself. Unlike glob(3), `*` also matches a leading
+/// dot and directories are not matched.
 pub(crate) fn expand_glob(cx: &mut Ctx, rel: &Path) -> Vec<PathBuf> {
     let name = rel.file_name().map(|n| n.as_encoded_bytes().to_vec()).unwrap_or_default();
     if !name.contains(&b'*') && !name.contains(&b'?') {
@@ -117,8 +118,9 @@ impl RunParts {
     }
 }
 
-/// Read whole and directly: a binary is not configuration, and a capped read
-/// of one is not a limited read the operator should hear about.
+/// Read directly, up to 16 MiB, as a sniff and not as configuration: a capped
+/// read of a binary is not a limited read the operator should hear about, and
+/// a larger one is taken for debianutils'.
 pub(crate) fn run_parts_flavour(cx: &mut Ctx) -> RunParts {
     for p in ["usr/bin/run-parts", "bin/run-parts"] {
         let Ok(resolved) = cx.root.resolve(Path::new(p)) else { continue };
@@ -140,8 +142,9 @@ pub(crate) fn run_parts_flavour(cx: &mut Ctx) -> RunParts {
 /// dotfile, one ending in `~` or `,`, or `.cfsaved`, `.rpmsave`, `.rpmorig`,
 /// `.rpmnew`, `.swp` or `,v`, and honours `jobs.deny` and `jobs.allow` in the
 /// directory. BusyBox's allows a dot too, anywhere but first, so there
-/// `backup.sh` does run. All three then need the execute bit, checked by
-/// the caller.
+/// `backup.sh` does run. The script flavour is only this much of Fedora's: its
+/// whitelist file and /etc/sysconfig/run-parts are not read. Each then needs
+/// the execute bit, checked by the caller.
 pub(crate) fn run_parts_skips(cx: &mut Ctx, flavour: RunParts, dir: &Path, name: &[u8]) -> Option<&'static str> {
     match flavour {
         RunParts::Debian => {
@@ -280,8 +283,8 @@ fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(String, Pat
     }
 }
 
-/// The files in `dirs` in the order systemd and polkit read them, by file
-/// name, each with the file that replaces it: a same-named file in an
+/// The files in `dirs` in the order systemd, polkit, kmod and kernel-install
+/// read them, by file name, each with the file that replaces it: a same-named file in an
 /// earlier directory is read instead, and a link to /dev/null there masks it.
 pub(crate) fn replaceable(cx: &mut Ctx, dirs: &[&str], suffix: &str) -> Vec<(PathBuf, Option<PathBuf>)> {
     let mut seen: BTreeSet<(u64, u64)> = BTreeSet::new();

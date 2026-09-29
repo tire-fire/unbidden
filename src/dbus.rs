@@ -160,7 +160,8 @@ fn until_deadline<T: Send + 'static>(
         let _ = tx.send(());
     });
     let _ = rx.recv_timeout(deadline);
-    // A panic in `f` poisons the slot but leaves what was merged before it.
+    // A panic in `f` while it holds the slot poisons it but leaves what was
+    // merged before; taking the value works either way.
     let mut held = slot.lock().unwrap_or_else(PoisonError::into_inner);
     held.take()
 }

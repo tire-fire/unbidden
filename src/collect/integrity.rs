@@ -127,7 +127,6 @@ mod tests {
         assert_eq!(ids_a.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["/usr/bin/ls", "/usr/lib/libc.so.6"]);
         assert_eq!(ids_a, ids_b);
         std::fs::remove_dir_all(&a).unwrap();
-        std::fs::remove_dir_all(&b).unwrap();
     }
 
     #[test]
@@ -142,6 +141,5 @@ mod tests {
         got.sort();
         assert_eq!(got, [Path::new("usr/bin/ls"), Path::new("usr/lib/libc.so.6")], "a trojaned program and a patched library; not an intact program, an edited conffile or a data file");
         assert_eq!(s.entries[0].raw["package"], "coreutils");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 }

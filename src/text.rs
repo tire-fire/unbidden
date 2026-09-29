@@ -24,8 +24,8 @@ pub fn take_word(s: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((&s[..end], s[end..].trim_ascii_start()))
 }
 
-/// A shell-style glob with `*` and `?`, as sudoers includes and systemd
-/// preset patterns use it.
+/// A shell-style glob with `*` and `?`, as sshd's `Include`, ld.so.conf,
+/// systemd presets and apk's protected paths use it.
 pub fn glob_match(pat: &[u8], s: &[u8]) -> bool {
     let (mut p, mut i) = (0, 0);
     let (mut star, mut mark) = (usize::MAX, 0);

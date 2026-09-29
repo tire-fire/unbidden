@@ -426,8 +426,9 @@ fn profile(
     // A profile that is not a regular file, a dangling link, or a link out
     // of its owner's home (`~/.bashrc -> /etc/shadow`) is reported as what it
     // is and not read. Which of them it is, is the root's answer to the one
-    // read; the scan records each as a limit, never a failure, since any
-    // user could otherwise use them to make every baseline incomparable.
+    // read. The scan records the first and the last as limits, never a
+    // failure, since any user could otherwise use them to make every baseline
+    // incomparable; a dangling link is simply absent.
     let outcome = cx.read_outcome(rel, READ_CAP);
     cx.record(rel, READ_CAP, &outcome);
     let bytes = match outcome {
@@ -506,7 +507,7 @@ fn preload(cx: &mut Ctx, out: &mut Vec<Entry>) {
         e.target_path = Some(PathBuf::from(OsString::from_vec(lib)));
         e.trigger = Trigger::Always;
         // glibc loads a library listed here into every dynamically linked
-        // process on the system; there is no state in which it is not.
+        // process on the system.
         e.enabled = Enablement::Enabled;
         if ignored {
             e.enabled = Enablement::Disabled;
@@ -1463,7 +1464,6 @@ mod tests {
         assert!(xprofile.raw["session"].contains("Wayland"));
         put(&d, "etc/X11/Xsession.options.d/local.conf", b"allow-user-xsession\n");
         assert_eq!(state(&run(&d), "home/alice/.xsession", &d), Enablement::NotApplicable);
-        std::fs::remove_dir_all(&d).unwrap();
 
         // Fedora.
         let d = tmpdir("xsession-fed");
@@ -1478,7 +1478,6 @@ mod tests {
         assert!(!s.entries.iter().any(|e| e.source == d.join("etc/X11/xinit/xinitrc.d/.hidden")));
         assert_eq!(state(&s, "home/alice/.xsession", &d), Enablement::Disabled, "not executable");
         assert_eq!(state(&s, "home/alice/.Xclients", &d), Enablement::NotApplicable, "the executable one is used");
-        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1498,7 +1497,6 @@ mod tests {
         assert_eq!(env.len(), 2, "only *.sh is sourced");
         let agent = env.iter().find(|e| e.principal.as_deref() == Some("alice")).unwrap();
         assert_eq!(agent.raw["env.LD_PRELOAD"], "/home/alice/.x.so");
-        fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
@@ -1534,6 +1532,5 @@ mod tests {
         assert!(has(&s, "home/alice/.config/fish/conf.d/x.fish"));
         let vendor = s.entries.iter().find(|e| e.source == d.join("usr/share/fish/vendor_conf.d/a.fish")).unwrap();
         assert_eq!(vendor.enabled, Enablement::Disabled, "/etc's a.fish comes first");
-        fs::remove_dir_all(&d).unwrap();
     }
 }

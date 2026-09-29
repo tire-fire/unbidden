@@ -882,11 +882,11 @@
         "target-missing",
         "unpackaged"
       ],
-      "id": "922fb705b1bacab893ac34da76cea026406fb1855eb6356e481ebfd07365f5d1",
+      "id": "b244f4c95ca4325dea69abbeebdece057debc3ed6e719788ccb3f676caffff2f",
       "kind": "ssh_authorized_key",
       "mode": 420,
       "mtime": "<normalised>",
-      "name": "SHA256:SO9rqwQU1l2xqVFxuGrhDfkJ0Zkfu30msE77NwgaXFI",
+      "name": "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",
       "owner_uid": "<normalised>",
       "principal": "alice",
       "provenance": {

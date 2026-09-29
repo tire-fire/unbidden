@@ -680,8 +680,7 @@ mod tests {
         std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
 
         // No scan has run and none is needed: the root knows its homes from
-        // the moment it exists. `explain --from` never scans, and once read
-        // through a root that had not been told.
+        // the moment it exists, which is what `explain --from` relies on.
         let root = Root::at(&dir).unwrap();
         assert_eq!(
             root.escaping_link(Path::new("home/alice/.bashrc")),
@@ -705,8 +704,8 @@ mod tests {
 
     #[test]
     fn a_linked_directory_out_of_a_home_cannot_be_listed_stated_or_walked() {
-        // Only file opens applied the home rule, so a directory link was
-        // enough to list what is under /root, resolve into it, and read the
+        // The home rule covers directories as well as files: a directory link
+        // must not list what is under /root, resolve into it, or show the
         // link names inside it.
         let dir = tmpdir("dir-escape");
         std::fs::create_dir_all(dir.join("home/alice")).unwrap();
@@ -737,8 +736,8 @@ mod tests {
 
     #[test]
     fn a_fifo_or_directory_is_refused_by_the_open_itself() {
-        // Every caller used to stat before opening, and the ones that did not
-        // (`explain`, provenance) hung on a FIFO. The root now decides.
+        // The root decides, so a caller that never stats first (`explain`,
+        // provenance) cannot hang on a FIFO.
         let dir = tmpdir("not-regular");
         std::fs::create_dir_all(dir.join("etc/dir")).unwrap();
         std::fs::write(dir.join("etc/file"), b"ok").unwrap();
@@ -757,9 +756,9 @@ mod tests {
 
     #[test]
     fn a_home_escape_is_caught_however_the_link_is_spelled() {
-        // The first version compared the link's text against the home, so a
-        // relative `..` target, a second hop, or a linked directory partway
-        // down the path all read straight through.
+        // The whole chain is judged, not the link's text: a relative `..`
+        // target, a second hop, or a linked directory partway down the path
+        // all leave the home.
         let dir = tmpdir("chains");
         std::fs::create_dir_all(dir.join("home/alice/dotfiles")).unwrap();
         std::fs::create_dir_all(dir.join("etc")).unwrap();

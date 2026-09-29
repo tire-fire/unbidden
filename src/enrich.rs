@@ -68,10 +68,10 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
         apply_location(root, entry);
     });
 
-    // Authoritative enablement goes on after provenance, so a generated
-    // unit can be re-attributed from Unpackaged to its generator. A user
-    // manager answering on a socket in that user's own runtime directory is
-    // exactly as hostile as a file they wrote.
+    // Authoritative enablement goes on after provenance and touches only
+    // enablement: which files a generator wrote is provenance's, decided by
+    // path. A user manager answering on a socket in that user's own runtime
+    // directory is exactly as hostile as a file they wrote.
     let entries = &mut scan.entries;
     let header = &mut scan.header;
     stage(&mut failed, "systemd enablement", || {
@@ -99,10 +99,9 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
     per_entry(&mut failed, "encoding", &mut scan.entries, apply_encoding);
 
     scan.entries.sort_by(|a, b| (a.kind, &a.source, &a.name).cmp(&(b.kind, &b.source, &b.name)));
-    // Collectors keep their own ids apart; the entries synthesised above are
-    // named after what a file says, which its author chooses. After the sort,
-    // so which of two colliding entries keeps the plain id does not depend on
-    // the order they were found in.
+    // The entries synthesised above are named after what a file says, which
+    // its author chooses, so two can collide with each other or with a
+    // collector's. After the sort, so the suffixes follow the entries' order.
     crate::entry::dedup_ids(&mut scan.entries);
     scan.header.enrichment_failures.extend(failed);
 }
@@ -268,10 +267,11 @@ fn made_from(root: &Root, carrier: &Entry, kind: Kind, name: &str, declared: boo
     e
 }
 
-/// Replaces a wrapper as an entry's target with what the wrapper runs, and
-/// returns one entry per further program where the command line starts more
-/// than one. Shell text is not a single program: `sh -c 'true; /tmp/evil'`
-/// starts two, and taking the first would let coreutils vouch for the second.
+/// Replaces a wrapper as an entry's target with what the wrapper runs. Where
+/// the command line starts more than one program the target is left as it
+/// was and every program, the first included, becomes an entry of its own.
+/// Shell text is not a single program: `sh -c 'true; /tmp/evil'` starts two,
+/// and taking the first would let coreutils vouch for the second.
 fn look_through_wrappers(root: &Root, entries: &mut [Entry]) -> Vec<Entry> {
     let mut out = Vec::new();
     // Per declaring entry: two cron lines that each start /tmp/evil are two
@@ -538,7 +538,7 @@ fn unwrap_switch_user(name: &str, args: &[String]) -> Unwrapped {
         match a {
             "--" => {
                 i += 1;
-                // runuser -u user -- command
+                // `runuser user -- command`; the `-u` spelling returns below.
                 return if user_seen && name == "runuser" { rest_as_argv(&args[i..]) } else { Unwrapped::Nothing };
             }
             "-c" | "--command" => return args.get(i + 1).map_or(Unwrapped::Nothing, |t| Unwrapped::Text(t.clone())),
@@ -846,9 +846,9 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
         return;
     }
 
-    // A path this pass was not asked about keeps whatever an earlier pass
-    // decided. Writing Unknown over a resolved verdict would make a later,
-    // narrower pass undo the work of the first one.
+    // A path the answers do not cover keeps the provenance the entry
+    // already has: writing Unknown over it would discard a verdict that
+    // was decided elsewhere.
     if let Some(verdict) = answers.get(&source_rel).cloned() {
         // Only for an entry whose subject is its target. A link that is the
         // entry's own source — an alias in /etc/systemd/system — is itself
@@ -868,16 +868,15 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
         entry.provenance = verdict;
     }
 
-    // The target is a separate file with a separate verdict, and an entry
-    // whose backing file is packaged can still point at something that is
-    // not — which is the whole shape of a hijacked ExecStart.
-    // The script a followed program was read out of: vendor text when it is
-    // packaged and intact, and then a program it names and does not find is
-    // the vendor's optional hand-off rather than an orphan.
+    // The script a followed program was read out of, and whether it is
+    // packaged and intact, is recorded for the operator; nothing acts on it.
     if let Some(from) = entry.raw.get("chain_from").cloned() {
         let verified = answers.get(&root.rel(Path::new(&from))).is_some_and(Provenance::is_verified);
         entry.note("chain_from_provenance", if verified { "intact" } else { "unverified" });
     }
+    // The target is a separate file with a separate verdict, and an entry
+    // whose backing file is packaged can still point at something that is
+    // not — which is the whole shape of a hijacked ExecStart.
     if let Some(target) = entry.target_path.clone() {
         let target_rel = root.rel(&target);
         if target_rel != source_rel && !guarded {
@@ -911,8 +910,8 @@ fn apply_provenance(root: &Root, entry: &mut Entry, answers: &provenance::Answer
                 Some(Provenance::Unknown) => entry.set_target_verdict(TargetVerdict::Unknown),
                 // Every target is asked about, so no answer means the lookup
                 // failed. Left unrecorded, the suppression rule would read the
-                // silence as a verified target and hide the entry. A later,
-                // narrower pass that was not asked keeps the earlier verdict.
+                // silence as a verified target and hide the entry. A verdict
+                // the entry already carries is kept.
                 None if entry.target_verdict().is_none() => entry.set_target_verdict(TargetVerdict::Unanswered),
                 None => {}
             }
@@ -1009,9 +1008,7 @@ fn apply_target(root: &Root, entry: &mut Entry) {
             // A collector that already knows there is no path to find says
             // so, and is believed: a udev rule naming a systemd unit, or one
             // whose action runs inside udev itself, has no file to resolve.
-            if entry.raw.get("key").is_some_and(|k| k.contains("{builtin}")) {
-                entry.note(key::TARGET_UNVERIFIABLE, "runs inside udev, not a program");
-            } else if entry.command.is_some() && !entry.raw.contains_key(key::TARGET_UNVERIFIABLE) {
+            if entry.command.is_some() && !entry.raw.contains_key(key::TARGET_UNVERIFIABLE) {
                 entry.flag(Flag::TargetUnresolvable);
             }
             root.rel(&entry.source)
@@ -1237,10 +1234,11 @@ fn encoded_run(command: &[u8]) -> Option<(usize, usize, &'static str)> {
     best
 }
 
-/// The second half of §8's EncodingAnomaly — the first being the non-UTF-8
-/// bytes each collector already reports. It lives here rather than in the
-/// collectors so that one threshold, derived from one measurement, governs
-/// every mechanism class.
+/// §8's EncodingAnomaly for what an entry holds as bytes: a command, target or
+/// source that is not text, and an encoded run inside a command. It lives here
+/// rather than in the collectors so that one threshold, derived from one
+/// measurement, governs every mechanism class. Collectors also flag the
+/// non-UTF-8 fields they parse themselves.
 ///
 /// `Kind::SshAuthorizedKey` is deliberately not exempt. Its key material
 /// never reaches `command`: the collector puts the blob's fingerprint in the
@@ -1826,17 +1824,17 @@ fn handed_off(head: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
     out
 }
 
+/// How far back from a program's name a guard for it is looked for: longer
+/// than any `[ -x … ] &&`, `command -v` or `os.path.exists(` idiom. A guard
+/// further away, on a very long line, is not seen.
+const GUARD_WINDOW: usize = 512;
+
 /// How `text` tests for `path` before running it, if it does: a shell or
 /// perl file test (`[ -x /bin/plymouth ] && /bin/plymouth`, `exec "/x"
 /// if -x "/x"`), `command -v`, `which` or `type`, or Python's
 /// `os.path.exists`, `os.path.isfile`, `os.access` and `shutil.which`. A
 /// program a script runs only after finding it is not an orphan when it
 /// is absent; the script is written for hosts without it.
-/// How far back from a program's name a guard for it is looked for. Longer
-/// than any `[ -x … ] &&`, `command -v` or `os.path.exists(` idiom, and the
-/// three lines an environment-variable `if` may span.
-const GUARD_WINDOW: usize = 512;
-
 fn guarded_by_test(text: &[u8], path: &[u8]) -> Option<String> {
     const TESTS: [&str; 5] = ["-x", "-e", "-f", "-s", "-r"];
     const CALLS: [&str; 6] = ["command -v", "which", "type", "os.path.exists(", "os.path.isfile(", "os.access("];
@@ -1853,8 +1851,8 @@ fn guarded_by_test(text: &[u8], path: &[u8]) -> Option<String> {
             continue;
         }
         // Only the text just before the path can be a guard for it, and a
-        // prefix built per occurrence made this quadratic: a user unit
-        // naming one path sixty thousand times stalled a root scan for 13 s.
+        // prefix built per occurrence made this quadratic: a unit naming one
+        // path tens of thousands of times stalled a root scan.
         let before = String::from_utf8_lossy(&text[at.saturating_sub(GUARD_WINDOW)..at]).into_owned();
         // A hand-off inside an `if` on an environment variable — debconf's
         // dpkg-preconfigure execs cdebconf's only when DEBCONF_USE_CDEBCONF
@@ -2486,7 +2484,7 @@ mod tests {
 
     #[test]
     fn looking_for_a_guard_is_linear_in_the_text() {
-        // The same path sixty thousand times, none guarded: what a user unit
+        // The same path many thousand times, none guarded: what a user unit
         // can hand a root scan.
         let text = "/x ".repeat(120_000);
         let started = std::time::Instant::now();
@@ -2715,7 +2713,7 @@ mod tests {
         assert!(more.iter().all(|m| m.raw["chain"] == "script" && m.raw["declared_by_entry"] == e.id));
         assert_eq!(more[0].target_path, Some(root.abs("tmp/evil")));
 
-        // Text the entry does not say is a shell's is left alone, as before.
+        // Text the entry does not say is a shell's is left alone.
         let mut e = mk(false);
         assert!(look_through_wrappers(&root, std::slice::from_mut(&mut e)).is_empty());
     }
