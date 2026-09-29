@@ -56,7 +56,10 @@ impl Collector for Integrity {
         let mut out = Vec::new();
         for (rel, prov) in resolution.answers {
             let Provenance::Packaged { package, version, integrity: Verdict::Modified } = prov else { continue };
-            let mut e = cx.entry(Kind::PackageFile, &rel, cx.root.abs(&rel).display().to_string());
+            // Named by its path within the root, not as reported: the mount
+            // prefix would give one file two ids, and the same host scanned live
+            // and as an image could never be diffed.
+            let mut e = cx.entry(Kind::PackageFile, &rel, format!("/{}", rel.display()));
             e.trigger = Trigger::Always;
             e.enabled = Enablement::NotApplicable;
             e.target_path = Some(cx.root.abs(&rel));
@@ -83,10 +86,11 @@ mod tests {
         crate::entry::hex(&h.finalize())
     }
 
-    #[test]
-    fn a_packaged_program_that_differs_from_its_manifest_is_reported() {
+    /// A host with a trojaned `ls`, a patched libc, an intact `cat`, an edited
+    /// conffile and a changed data file, all of one package.
+    fn host(tag: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let d = std::env::temp_dir().join(format!("unbidden-integrity-{}", std::process::id()));
+        let d = std::env::temp_dir().join(format!("unbidden-integrity-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let put = |rel: &str, body: &[u8], mode: u32| {
             let p = d.join(rel);
@@ -106,6 +110,30 @@ mod tests {
             format!("{}  usr/bin/ls\n{}  usr/bin/cat\n{}  usr/lib/libc.so.6\n{}  usr/share/doc/README\n", md5_of(b"ls"), md5_of(b"cat"), md5_of(b"libc"), md5_of(b"docs")).as_bytes(),
             0o644,
         );
+        d
+    }
+
+    #[test]
+    fn the_same_host_at_two_mount_points_has_the_same_ids() {
+        let scan = |d: &Path| {
+            let root = Root::at(d).unwrap();
+            let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Integrity)];
+            let s = crate::scan::run(&root, &Options { deep: true }, &collectors);
+            let mut ids: Vec<(String, String)> = s.entries.iter().map(|e| (e.name.clone(), e.id.clone())).collect();
+            ids.sort();
+            ids
+        };
+        let (a, b) = (host("mount-a"), host("mount-b"));
+        let (ids_a, ids_b) = (scan(&a), scan(&b));
+        assert_eq!(ids_a.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), ["/usr/bin/ls", "/usr/lib/libc.so.6"]);
+        assert_eq!(ids_a, ids_b);
+        std::fs::remove_dir_all(&a).unwrap();
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    #[test]
+    fn a_packaged_program_that_differs_from_its_manifest_is_reported() {
+        let d = host("reported");
         let root = Root::at(&d).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Integrity)];
         let shallow = crate::scan::run(&root, &Options { deep: false }, &collectors);
