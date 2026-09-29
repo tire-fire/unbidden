@@ -77,8 +77,8 @@
 //! runs `cmd` through `/bin/sh -c`, as `User` (zabbix) unless `AllowRoot`,
 //! whenever the server asks for `key`. `AllowKey=system.run[...]` (and the
 //! older `EnableRemoteCommands=1`) lets the server send any command to run;
-//! a `DenyKey` for it earlier in the file refuses it. Agent 2 starts every
-//! `Plugins.<name>.System.Path` as an external plugin.
+//! a `DenyKey` earlier in the file whose pattern matches it refuses it.
+//! Agent 2 starts every `Plugins.<name>.System.Path` as an external plugin.
 //!
 //! NRPE 4.1 (nrpe.c): /etc/nagios/nrpe.cfg, lines of `name=value`, `#`
 //! comments; `include` and `include_file` read a file, `include_dir` every
@@ -417,7 +417,6 @@ fn munin(cx: &mut Ctx, out: &mut Vec<Entry>) {
         }
     }
     let plain = |n: &str| !n.is_empty() && n.chars().all(|c| c.is_alphanumeric() || "-_@.:".contains(c));
-    // Section name to its settings, later files and lines replacing earlier.
     // Section name to its settings and the file each came from, later files
     // and lines replacing earlier.
     let mut sections: std::collections::BTreeMap<String, std::collections::BTreeMap<String, (String, PathBuf)>> = Default::default();
@@ -676,7 +675,13 @@ fn zabbix(cx: &mut Ctx, out: &mut Vec<Entry>) {
         let user = last("User").unwrap_or_else(|| "zabbix".into());
         let allow_root = last("AllowRoot").is_some_and(|v| v == "1");
         let dir = last("UserParameterDir");
-        let mut denied = false;
+        // Rules are tried in order and the first match decides (measured on
+        // zabbix_agentd 7.4): a DenyKey refuses an AllowKey only where its
+        // pattern matches the allowed key, so `DenyKey=system.run[rm *]` ahead
+        // of `AllowKey=system.run[*]` still leaves the server free to run
+        // anything else.
+        let mut denies: Vec<&str> = Vec::new();
+        let refused = |denies: &[&str], allowed: &str| denies.iter().any(|d| crate::text::glob_match(d.as_bytes(), allowed.as_bytes()));
         for (rel, k, v) in &lines {
             let mut e = match k.as_str() {
                 "UserParameter" => {
@@ -691,11 +696,11 @@ fn zabbix(cx: &mut Ctx, out: &mut Vec<Entry>) {
                     e
                 }
                 "DenyKey" if v.starts_with("system.run") => {
-                    denied = true;
+                    denies.push(v.trim());
                     continue;
                 }
-                "AllowKey" if v.starts_with("system.run") => remote(cx, rel, agent, v, denied),
-                "EnableRemoteCommands" if v == "1" => remote(cx, rel, agent, v, denied),
+                "AllowKey" if v.starts_with("system.run") => remote(cx, rel, agent, v, refused(&denies, v.trim())),
+                "EnableRemoteCommands" if v == "1" => remote(cx, rel, agent, v, refused(&denies, "system.run[*]")),
                 // `Plugins.System.Path` passes both an affix test and is too
                 // short to hold a name between them, so the two are stripped
                 // in turn, never by adding their lengths up.
@@ -738,7 +743,7 @@ fn remote(cx: &mut Ctx, rel: &Path, agent: &str, value: &str, denied: bool) -> E
     e.note(key::TARGET_UNVERIFIABLE, "whatever command the Zabbix server sends");
     if denied {
         e.enabled = Enablement::Disabled;
-        e.note("not_run", "an earlier DenyKey refuses system.run");
+        e.note("not_run", "an earlier DenyKey refuses this key");
     }
     e
 }
@@ -1413,10 +1418,23 @@ mod tests {
                 ("zabbix:agent2:plugin:Beacon", "/opt/beacon", Enablement::Disabled),
                 ("zabbix:agent2:plugin:Rel", "rel", Enablement::Disabled),
                 ("zabbix:agentd:mysql.ping[*]", "  mysqladmin -u$1 ping | grep -c alive", Enablement::Enabled),
-                ("zabbix:agentd:system.run", "-", Enablement::Disabled),
+                // A DenyKey for one command leaves the rest allowed.
+                ("zabbix:agentd:system.run", "-", Enablement::Enabled),
             ]
         );
         assert!(s.entries.iter().filter(|e| e.name.starts_with("zabbix:agentd")).all(|e| e.principal.as_deref() == Some("zbx")));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn zabbix_deny_key_refuses_only_what_it_matches() {
+        let d = fixture("zabbix-deny");
+        put(&d, "usr/sbin/zabbix_agentd", b"");
+        put(&d, "etc/zabbix/zabbix_agentd.conf", b"DenyKey=system.run[*]\nAllowKey=system.run[*]\n");
+        let s = scan(&d);
+        let run = s.entries.iter().find(|e| e.name == "zabbix:agentd:system.run").unwrap();
+        assert_eq!(run.enabled, Enablement::Disabled);
+        assert!(run.raw.contains_key("not_run"));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
