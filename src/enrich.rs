@@ -928,8 +928,12 @@ fn apply_target(root: &Root, entry: &mut Entry) {
     };
 
     if entry.target_sha256.is_none() {
-        if let Some(d) = provenance::digests(root, &hashed) {
-            entry.target_sha256 = Some(d.sha256);
+        match provenance::digests(root, &hashed) {
+            Some(d) => entry.target_sha256 = Some(d.sha256),
+            None if root.stat_follow(&hashed).is_ok_and(|m| m.is_file && m.size > provenance::HASH_SIZE_LIMIT) => {
+                entry.note("digest_skipped", format!("the file is larger than {} MiB", provenance::HASH_SIZE_LIMIT >> 20));
+            }
+            None => {}
         }
     }
     // A zero-byte file holds no mechanism: /etc/environment as most hosts
@@ -2584,6 +2588,29 @@ mod tests {
         e.target_path = Some(dir.join("bin/sh"));
         assert_eq!(look_through_wrappers(&root, std::slice::from_mut(&mut e)).len(), 2);
         assert!(!e.raw.contains_key("commands_listed"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_target_too_large_to_hash_says_so_rather_than_reporting_nothing() {
+        let dir = std::env::temp_dir().join(format!("unbidden-bigtarget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("opt")).unwrap();
+        // Sparse: the length is the whole cost.
+        let big = std::fs::File::create(dir.join("opt/big")).unwrap();
+        big.set_len(provenance::HASH_SIZE_LIMIT + 1).unwrap();
+        std::fs::write(dir.join("opt/small"), b"x").unwrap();
+        let root = Root::at(&dir).unwrap();
+        let entry = |target: &str| {
+            let mut e = Entry::new(Kind::SystemdUnit, dir.join("etc/x.service"), "x.service");
+            e.command = Some(dir.join(target).display().to_string().into_bytes());
+            e.target_path = Some(dir.join(target));
+            apply_target(&root, &mut e);
+            e
+        };
+        let (b, s) = (entry("opt/big"), entry("opt/small"));
+        assert!(b.target_sha256.is_none() && b.raw["digest_skipped"].contains("256 MiB"));
+        assert!(s.target_sha256.is_some() && !s.raw.contains_key("digest_skipped"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

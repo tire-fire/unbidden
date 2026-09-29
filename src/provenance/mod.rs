@@ -183,7 +183,8 @@ pub struct FileDigests {
 }
 
 /// A file large enough that hashing it is not worth an incident responder's
-/// wall clock. Reported as an unknown digest rather than silently skipped.
+/// wall clock. Its digest is null, and the entry it is the target of carries a
+/// `digest_skipped` note saying why.
 pub const HASH_SIZE_LIMIT: u64 = 256 << 20;
 
 /// One read, three digests: the reported sha256 of §4, the md5 that dpkg
