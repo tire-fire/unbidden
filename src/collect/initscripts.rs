@@ -13,7 +13,7 @@
 //! treating presence in init.d as enablement is the defect this avoids.
 
 use crate::entry::key;
-use crate::text::{normalize};
+use crate::text::normalize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
@@ -947,7 +947,7 @@ fn lsb_header(e: &mut Entry, bytes: &[u8]) {
 /// (its own strings say so): with debianutils' run-parts that is the LSB name
 /// rule, not the plain one.
 fn motd(cx: &mut Ctx, flavour: super::RunParts) -> Vec<Entry> {
-    let flavour = if flavour == super::RunParts::Debian { super::RunParts::DebianLsb } else { flavour };
+    let flavour = flavour.lsbsysinit();
     let mut out = Vec::new();
     for f in super::run_parts_dir(cx, flavour, Path::new(MOTD_DIR)) {
         let mut e = script_entry(cx, Kind::Motd, &f.rel, &f.name, Trigger::Login);
@@ -1333,8 +1333,8 @@ fn dhcpcd_hooks(cx: &mut Ctx) -> Vec<Entry> {
     out
 }
 
-/// `nohook` names from dhcpcd.conf: those before the first `interface` or
-/// `ssid` block apply everywhere, the rest only to their block.
+/// `nohook` names from dhcpcd.conf: those before the first `interface`,
+/// `ssid` or `profile` block apply everywhere, the rest only to their block.
 fn nohooks(cx: &mut Ctx) -> (Vec<String>, Vec<String>) {
     let (mut global, mut scoped) = (Vec::new(), Vec::new());
     let Some(bytes) = cx.read_capped("etc/dhcpcd.conf", SCRIPT_CAP) else { return (global, scoped) };

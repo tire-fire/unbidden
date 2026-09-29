@@ -10,11 +10,11 @@
 //! runs through /bin/sh. ZFS's zed (zed_conf.c, 2.2): files in
 //! /etc/zfs/zed.d not starting `.`, regular, owned by root, executable by
 //! their owner and writable by neither group nor other. smartd (Debian's
-//! smartd-runner): what run-parts selects in /etc/smartmontools/run.d, on a
-//! disk warning. update-ca-certificates: what run-parts selects in
-//! /etc/ca-certificates/update.d, on every certificate change. apport: the
-//! Python in /usr/share/apport/general-hooks, loaded for every crash report,
-//! and in package-hooks, for a crash in that package.
+//! smartd-runner): what `run-parts --lsbsysinit` selects in
+//! /etc/smartmontools/run.d, on a disk warning. update-ca-certificates: what
+//! run-parts selects in /etc/ca-certificates/update.d, on every certificate
+//! change. apport: the Python in /usr/share/apport/general-hooks, loaded for
+//! every crash report, and in package-hooks, for a crash in that package.
 //!
 //! molly-guard: what run-parts selects in /etc/molly-guard/run.d, before a
 //! shutdown or reboot command goes ahead. netfilter-persistent: what
@@ -77,13 +77,17 @@ impl Collector for Events {
             zed(cx, &mut out);
         }
         let flavour = super::run_parts_flavour(cx);
-        for (dir, tool, trigger, installed) in [
-            ("etc/smartmontools/run.d", "smartd", Trigger::DeviceEvent, "usr/sbin/smartd"),
-            ("etc/ca-certificates/update.d", "update-ca-certificates", Trigger::PackageOp, "usr/sbin/update-ca-certificates"),
-            ("etc/molly-guard/run.d", "molly-guard", Trigger::PowerEvent, "usr/lib/molly-guard/molly-guard"),
-            ("usr/share/netfilter-persistent/plugins.d", "netfilter-persistent", Trigger::Boot, "usr/sbin/netfilter-persistent"),
+        // smartd-runner alone passes --lsbsysinit; the others run plain
+        // run-parts (checked in Debian 13's update-ca-certificates,
+        // molly-guard and netfilter-persistent).
+        for (dir, tool, trigger, installed, lsb) in [
+            ("etc/smartmontools/run.d", "smartd", Trigger::DeviceEvent, "usr/sbin/smartd", true),
+            ("etc/ca-certificates/update.d", "update-ca-certificates", Trigger::PackageOp, "usr/sbin/update-ca-certificates", false),
+            ("etc/molly-guard/run.d", "molly-guard", Trigger::PowerEvent, "usr/lib/molly-guard/molly-guard", false),
+            ("usr/share/netfilter-persistent/plugins.d", "netfilter-persistent", Trigger::Boot, "usr/sbin/netfilter-persistent", false),
         ] {
             if cx.root.exists(installed) {
+                let flavour = if lsb { flavour.lsbsysinit() } else { flavour };
                 run_parts(cx, &mut out, Path::new(dir), tool, trigger, flavour);
             }
         }
@@ -103,7 +107,7 @@ impl Collector for Events {
         }
         clamav(cx, &mut out);
         if cx.root.exists("usr/sbin/spamd") || cx.root.exists("usr/bin/spamassassin") {
-            spamassassin(cx, &mut out);
+            spamassassin(cx, &mut out, flavour);
         }
         kea(cx, &mut out);
         if cx.root.exists("usr/bin/x2goruncommand") {
@@ -263,7 +267,7 @@ fn clamav(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
-fn spamassassin(cx: &mut Ctx, out: &mut Vec<Entry>) {
+fn spamassassin(cx: &mut Ctx, out: &mut Vec<Entry>, flavour: super::RunParts) {
     let dir = Path::new("etc/spamassassin");
     for rel in sorted(cx, dir) {
         let name = file_name(&rel);
@@ -288,31 +292,10 @@ fn spamassassin(cx: &mut Ctx, out: &mut Vec<Entry>) {
             out.push(e);
         }
     }
-    // run-parts --lsbsysinit: LANANA, LSB hierarchical, or Debian cron
-    // names, and no dpkg leftovers.
+    // The daily job hands the directory to `run-parts --lsbsysinit`
+    // (spamassassin-maint), which is the shared LSB name rule.
     if cx.root.exists("usr/bin/sa-update") {
-        let lanana = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
-        let lsb = |n: &str| {
-            let n = n.strip_prefix('_').unwrap_or(n);
-            n.rsplit_once('-').is_some_and(|(head, last)| {
-                lanana(last) && head.split('-').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.'))
-            })
-        };
-        let cron = |n: &str| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-        for rel in sorted(cx, &dir.join("sa-update-hooks.d")) {
-            let name = file_name(&rel);
-            let cruft = [".dpkg-old", ".dpkg-dist", ".dpkg-new", ".dpkg-tmp"].iter().any(|c| name.ends_with(c));
-            if !(lanana(&name) || lsb(&name) || cron(&name)) || cruft {
-                continue;
-            }
-            let mut e = entry(cx, &rel, format!("sa-update:{name}"), "sa-update", Trigger::Schedule);
-            e.target_path = Some(cx.root.abs(&rel));
-            if e.mode & 0o111 == 0 {
-                e.enabled = Enablement::Disabled;
-                e.note("not_run", "not executable");
-            }
-            out.push(e);
-        }
+        run_parts(cx, out, &dir.join("sa-update-hooks.d"), "sa-update", Trigger::Schedule, flavour.lsbsysinit());
     }
 }
 
@@ -916,6 +899,24 @@ mod tests {
                 ("spamassassin:Mail::SpamAssassin::Plugin::SPF", None),
             ]
         );
+    }
+
+    #[test]
+    fn smartd_and_sa_update_directories_are_run_with_lsbsysinit() {
+        let d = crate::testing::Tree::new("lsbsysinit");
+        put(&d, "usr/sbin/smartd", b"", 0o755);
+        put(&d, "usr/bin/sa-update", b"", 0o755);
+        put(&d, "usr/bin/spamassassin", b"", 0o755);
+        put(&d, "etc/smartmontools/run.d/10.mail-report", b"#!/bin/sh\n", 0o755);
+        put(&d, "etc/smartmontools/run.d/Plain", b"#!/bin/sh\n", 0o755);
+        put(&d, "etc/spamassassin/sa-update-hooks.d/Upper", b"#!/bin/sh\n", 0o755);
+        put(&d, "etc/spamassassin/sa-update-hooks.d/20-hook", b"#!/bin/sh\n", 0o755);
+        let s = scan(&d);
+        let state = |name: &str| s.entries.iter().find(|e| e.name == name).map(|e| e.enabled);
+        assert_eq!(state("smartd:10.mail-report"), Some(Enablement::Enabled), "a dot in the name is LSB's");
+        assert_eq!(state("smartd:Plain"), Some(Enablement::Disabled), "lower case only under --lsbsysinit");
+        assert_eq!(state("sa-update:20-hook"), Some(Enablement::Enabled));
+        assert_eq!(state("sa-update:Upper"), Some(Enablement::Disabled));
     }
 
     #[test]

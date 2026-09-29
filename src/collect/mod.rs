@@ -1,8 +1,8 @@
 //! Collectors, one module per group of mechanism classes.
 //!
 //! Grouping is by shared source material, not by kind: the cron collector
-//! reads six spool layouts and emits two kinds, and splitting it would mean
-//! parsing crontab syntax twice.
+//! reads system crontabs, run-parts directories, user spools and at jobs and
+//! emits two kinds, and splitting it would mean parsing crontab syntax twice.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
@@ -107,6 +107,14 @@ pub(crate) enum RunParts {
     DebianLsb,
     Script,
     BusyBox,
+}
+
+impl RunParts {
+    /// The same run-parts given `--lsbsysinit`. Only debianutils' has the
+    /// option, so the other flavours are unchanged.
+    pub(crate) fn lsbsysinit(self) -> RunParts {
+        if self == RunParts::Debian { RunParts::DebianLsb } else { self }
+    }
 }
 
 /// Read whole and directly: a binary is not configuration, and a capped read
