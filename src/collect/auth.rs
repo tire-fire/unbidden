@@ -904,13 +904,18 @@ struct KeyFiles {
 fn ssh(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
     let mut keys = KeyFiles::default();
-    sshd_config_file(cx, out, Path::new("etc/ssh/sshd_config"), None, 1, &mut seen, &mut keys);
+    sshd_config_file(cx, out, Path::new("etc/ssh/sshd_config"), None, 1, true, &mut seen, &mut keys);
+    // What the main file's Include lines did not reach, sshd does not read.
+    // It is reported, off, and gives no answer to where keys are kept: a file
+    // named `x.conf.disabled` must not be able to move every account's keys.
     for ent in cx.dir("etc/ssh/sshd_config.d") {
         if ent.is_dir {
             continue;
         }
         let rel = Path::new("etc/ssh/sshd_config.d").join(&ent.name);
-        sshd_config_file(cx, out, &rel, None, 0, &mut seen, &mut keys);
+        if !seen.contains(&rel) {
+            sshd_config_file(cx, out, &rel, None, 0, false, &mut seen, &mut keys);
+        }
     }
 
     login_script(cx, out, Path::new("etc/ssh/sshrc"), "sshrc", None);
@@ -1125,6 +1130,7 @@ fn sshd_config_file(
     rel: &Path,
     outer_match: Option<&str>,
     depth: u32,
+    live: bool,
     seen: &mut BTreeSet<PathBuf>,
     keys: &mut KeyFiles,
 ) {
@@ -1163,7 +1169,10 @@ fn sshd_config_file(
         };
         let mut e = cx.entry(Kind::SshAuthorizedKey, rel, name);
         e.trigger = Trigger::Login;
-        e.enabled = Enablement::Enabled;
+        e.enabled = if live { Enablement::Enabled } else { Enablement::Disabled };
+        if !live {
+            e.note("not_included", "no Include line reaches this file");
+        }
         e.note("ssh_mechanism", "sshd_config");
         e.note("directive", canonical);
         e.note("match", scope);
@@ -1184,6 +1193,7 @@ fn sshd_config_file(
                 let v = lossy(value);
                 e.note("value", v.clone());
                 match &current {
+                    _ if !live => {}
                     Some(m) => keys.scoped.push((m.clone(), v)),
                     None if keys.global.is_none() => keys.global = Some(v),
                     None => {
@@ -1213,12 +1223,12 @@ fn sshd_config_file(
 
         // ponytail: Include is followed exactly one level; a second level
         // needs a cycle guard and a depth budget nobody has asked for.
-        if canonical == "Include" && depth > 0 {
+        if canonical == "Include" && depth > 0 && live {
             let here = current.clone();
             for spec in words(value) {
                 let rel = include_rel(Path::new("etc/ssh"), spec);
                 for target in expand_glob(cx, &rel) {
-                    sshd_config_file(cx, out, &target, here.as_deref(), depth - 1, seen, keys);
+                    sshd_config_file(cx, out, &target, here.as_deref(), depth - 1, true, seen, keys);
                 }
             }
         }
@@ -2764,6 +2774,27 @@ mod tests {
         // glob did not match it; either way it is reported exactly once.
         let ignored = s.entries.iter().filter(|e| e.command.as_deref() == Some(&b"/bin/ignored-by-glob"[..])).count();
         assert_eq!(ignored, 1);
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_drop_in_no_include_reaches_cannot_move_where_sshd_reads_keys() {
+        let d = tree("sshd-inert");
+        put(&d, "etc/ssh/sshd_config", "Include /etc/ssh/sshd_config.d/*.conf\n");
+        put(&d, "etc/ssh/sshd_config.d/50-real.conf", "PermitUserEnvironment yes\n");
+        put(&d, "etc/ssh/sshd_config.d/evil.conf.disabled", "AuthorizedKeysFile /var/tmp/nobody\nInclude /etc/ssh/other\n");
+        put(&d, "home/alice/.ssh/authorized_keys", "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5 alice@box\n");
+        let s = scan(&d);
+
+        let moved = named(&s, "AuthorizedKeysFile");
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].enabled, Enablement::Disabled);
+        assert!(moved[0].raw.contains_key("not_included"));
+        assert_eq!(named(&s, "PermitUserEnvironment")[0].enabled, Enablement::Enabled);
+        let key = s.entries.iter().find(|e| e.raw.get("ssh_mechanism").map(String::as_str) == Some("authorized-key")).unwrap();
+        assert_eq!(key.enabled, Enablement::Enabled, "the default key file is still the one sshd reads");
+        let inert_include = named(&s, "Include").into_iter().find(|e| e.target_path == Some(PathBuf::from("/etc/ssh/other"))).unwrap();
+        assert_eq!(inert_include.enabled, Enablement::Disabled, "and what it names is not followed");
         std::fs::remove_dir_all(&d).unwrap();
     }
 
