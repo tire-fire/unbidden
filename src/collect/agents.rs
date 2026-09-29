@@ -93,6 +93,7 @@
 //! cmd.script the arguments are the command; any other function's payload
 //! is the module's own or comes from the master, and is not read.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::entry::{Enablement, Entry, Kind, Trigger};
@@ -537,8 +538,11 @@ fn monit_tokens(bytes: &[u8]) -> Vec<(String, bool)> {
 
 const MONIT_DEPTH: usize = 10;
 
-fn monit_read(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(PathBuf, String, bool)>) {
-    if depth > MONIT_DEPTH {
+/// Every include reader below reads a file once per run. A depth limit alone
+/// still lets N files that each include their own directory fan out to
+/// N^depth reads; ten one-line files were enough to time a scan out.
+fn monit_read(cx: &mut Ctx, rel: &Path, depth: usize, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<(PathBuf, String, bool)>) {
+    if depth > MONIT_DEPTH || !seen.insert(rel.to_path_buf()) {
         return;
     }
     let Some(bytes) = cx.read_capped(rel, CAP) else { return };
@@ -550,7 +554,7 @@ fn monit_read(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(PathBuf, St
                 if target.as_os_str().as_encoded_bytes().ends_with(b"~") || cx.root.stat_follow(&target).is_ok_and(|m| m.is_dir) {
                     continue;
                 }
-                monit_read(cx, &target, depth + 1, out);
+                monit_read(cx, &target, depth + 1, seen, out);
             }
             continue;
         }
@@ -561,8 +565,9 @@ fn monit_read(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(PathBuf, St
 fn monit(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let installed = cx.root.exists("usr/bin/monit");
     let mut toks = Vec::new();
+    let mut seen = BTreeSet::new();
     for main in ["etc/monit/monitrc", "etc/monitrc"] {
-        monit_read(cx, Path::new(main), 0, &mut toks);
+        monit_read(cx, Path::new(main), 0, &mut seen, &mut toks);
     }
     let word = |i: usize| toks.get(i).filter(|t| !t.2).map(|t| t.1.to_ascii_lowercase());
     let mut service = String::new();
@@ -621,9 +626,10 @@ fn eq_lines(
     rel: &Path,
     depth: usize,
     include: &dyn Fn(&mut Ctx, &Path, &str, &str) -> Option<Vec<PathBuf>>,
+    seen: &mut BTreeSet<PathBuf>,
     out: &mut Vec<(PathBuf, String, String)>,
 ) {
-    if depth > 10 {
+    if depth > 10 || !seen.insert(rel.to_path_buf()) {
         return;
     }
     let Some(bytes) = cx.read_capped(rel, CAP) else { return };
@@ -637,7 +643,7 @@ fn eq_lines(
         match include(cx, rel, k, v) {
             Some(targets) => {
                 for t in targets {
-                    eq_lines(cx, &t, depth + 1, include, out);
+                    eq_lines(cx, &t, depth + 1, include, seen, out);
                 }
             }
             None => out.push((rel.to_path_buf(), k.to_string(), v.to_string())),
@@ -668,7 +674,7 @@ fn zabbix(cx: &mut Ctx, out: &mut Vec<Entry>) {
     for (agent, conf, bin) in [("agentd", "etc/zabbix/zabbix_agentd.conf", "usr/sbin/zabbix_agentd"), ("agent2", "etc/zabbix/zabbix_agent2.conf", "usr/sbin/zabbix_agent2")] {
         let installed = cx.root.exists(bin);
         let mut lines = Vec::new();
-        eq_lines(cx, Path::new(conf), 0, &zabbix_include, &mut lines);
+        eq_lines(cx, Path::new(conf), 0, &zabbix_include, &mut BTreeSet::new(), &mut lines);
         let last = |k: &str| lines.iter().rev().find(|l| l.1 == k).map(|l| l.2.clone());
         let user = last("User").unwrap_or_else(|| "zabbix".into());
         let allow_root = last("AllowRoot").is_some_and(|v| v == "1");
@@ -743,8 +749,10 @@ fn remote(cx: &mut Ctx, rel: &Path, agent: &str, value: &str, denied: bool) -> E
 /// What an NRPE include names: `include_dir` recursively, its regular
 /// `*.cfg` files and its subdirectories not starting `.`.
 fn nrpe_include(cx: &mut Ctx, _from: &Path, key: &str, value: &str) -> Option<Vec<PathBuf>> {
-    fn walk(cx: &mut Ctx, dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-        if depth > 10 {
+    fn walk(cx: &mut Ctx, dir: &Path, depth: usize, seen: &mut BTreeSet<(u64, u64)>, out: &mut Vec<PathBuf>) {
+        // A directory linked back into itself, once per name, is a tree of
+        // N^depth walks.
+        if depth > 10 || !cx.root.dir_identity(dir).is_ok_and(|id| seen.insert(id)) {
             return;
         }
         let mut names: Vec<_> = cx.dir(dir).into_iter().map(|e| e.name).collect();
@@ -754,7 +762,7 @@ fn nrpe_include(cx: &mut Ctx, _from: &Path, key: &str, value: &str) -> Option<Ve
             let name = n.as_encoded_bytes();
             match cx.root.stat_follow(&p) {
                 Ok(m) if m.is_file && name.len() > 4 && name.ends_with(b".cfg") => out.push(p),
-                Ok(m) if m.is_dir && !name.starts_with(b".") => walk(cx, &p, depth + 1, out),
+                Ok(m) if m.is_dir && !name.starts_with(b".") => walk(cx, &p, depth + 1, seen, out),
                 _ => {}
             }
         }
@@ -764,7 +772,7 @@ fn nrpe_include(cx: &mut Ctx, _from: &Path, key: &str, value: &str) -> Option<Ve
         "include" | "include_file" => Some(vec![rel]),
         "include_dir" => {
             let mut out = Vec::new();
-            walk(cx, &rel, 0, &mut out);
+            walk(cx, &rel, 0, &mut BTreeSet::new(), &mut out);
             Some(out)
         }
         _ => None,
@@ -774,7 +782,7 @@ fn nrpe_include(cx: &mut Ctx, _from: &Path, key: &str, value: &str) -> Option<Ve
 fn nrpe(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let installed = cx.root.exists("usr/sbin/nrpe");
     let mut lines = Vec::new();
-    eq_lines(cx, Path::new("etc/nagios/nrpe.cfg"), 0, &nrpe_include, &mut lines);
+    eq_lines(cx, Path::new("etc/nagios/nrpe.cfg"), 0, &nrpe_include, &mut BTreeSet::new(), &mut lines);
     let last = |k: &str| lines.iter().rev().find(|l| l.1 == k).map(|l| l.2.clone());
     let user = last("nrpe_user").unwrap_or_else(|| "nagios".into());
     let prefix = last("command_prefix");
@@ -940,7 +948,14 @@ const COLLECTD_DEPTH: usize = 8;
 
 /// A configuration file's statements, each top-level Include replaced by
 /// what it names, and the file each statement came from.
-fn collectd_read(cx: &mut Ctx, rel: &Path, filter: Option<&str>, depth: usize, out: &mut Vec<(PathBuf, Stmt)>) {
+fn collectd_read(
+    cx: &mut Ctx,
+    rel: &Path,
+    filter: Option<&str>,
+    depth: usize,
+    seen: &mut BTreeSet<PathBuf>,
+    out: &mut Vec<(PathBuf, Stmt)>,
+) {
     if depth >= COLLECTD_DEPTH {
         return;
     }
@@ -948,13 +963,23 @@ fn collectd_read(cx: &mut Ctx, rel: &Path, filter: Option<&str>, depth: usize, o
     if meta.is_dir {
         let mut names: Vec<_> = cx.dir(rel).into_iter().map(|e| e.name).filter(|n| !n.as_encoded_bytes().starts_with(b".")).collect();
         names.sort();
+        // A directory is listed once: an included directory holding a file
+        // that includes it again lists it again, at every depth.
+        if !cx.root.dir_identity(rel).is_ok_and(|_| seen.insert(rel.to_path_buf())) {
+            return;
+        }
         for n in names {
-            collectd_read(cx, &rel.join(n), filter, depth, out);
+            collectd_read(cx, &rel.join(n), filter, depth, seen, out);
         }
         return;
     }
     let name = rel.file_name().map(|n| n.as_encoded_bytes().to_vec()).unwrap_or_default();
     if filter.is_some_and(|f| !super::glob_match(f.as_bytes(), &name)) {
+        return;
+    }
+    // Only a file the filter admitted counts as read: the same file may be
+    // named again under a filter that does admit it.
+    if !seen.insert(rel.to_path_buf()) {
         return;
     }
     let Some(bytes) = cx.read_capped(rel, CAP) else { return };
@@ -980,7 +1005,7 @@ fn collectd_read(cx: &mut Ctx, rel: &Path, filter: Option<&str>, depth: usize, o
         if let Some((path, inner_filter)) = include {
             let Some(path) = path else { continue };
             for target in super::expand_glob(cx, &super::include_rel(Path::new("etc"), path.as_bytes())) {
-                collectd_read(cx, &target, inner_filter.as_deref(), depth + 1, out);
+                collectd_read(cx, &target, inner_filter.as_deref(), depth + 1, seen, out);
             }
             continue;
         }
@@ -996,8 +1021,9 @@ fn collectd_read(cx: &mut Ctx, rel: &Path, filter: Option<&str>, depth: usize, o
 fn collectd(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let installed = cx.root.exists("usr/sbin/collectd");
     let mut stmts = Vec::new();
+    let mut seen = BTreeSet::new();
     for main in ["etc/collectd/collectd.conf", "etc/collectd.conf"] {
-        collectd_read(cx, Path::new(main), None, 0, &mut stmts);
+        collectd_read(cx, Path::new(main), None, 0, &mut seen, &mut stmts);
     }
     let mut loaded = std::collections::BTreeSet::new();
     let mut autoload = false;
@@ -1137,6 +1163,61 @@ mod tests {
         let d = std::env::temp_dir().join(format!("unbidden-agents-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// How many entries name `needle` in their own name or command.
+    fn hits(s: &Scan, needle: &str) -> usize {
+        s.entries.iter().filter(|e| e.name.contains(needle) || e.command.as_deref().is_some_and(|c| String::from_utf8_lossy(c).contains(needle))).count()
+    }
+
+    /// Ten files that each include the directory they sit in: without a
+    /// visited set, every include reads all ten again, ten levels down.
+    fn self_including(tag: &str, conf: &str, dir: &str, main: &str, body: impl Fn(usize) -> String) -> Scan {
+        let d = fixture(tag);
+        put(&d, conf, main.as_bytes());
+        for i in 0..10 {
+            put(&d, &format!("{dir}/f{i}.conf"), body(i).as_bytes());
+        }
+        let started = std::time::Instant::now();
+        let s = scan(&d);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "{tag} took {:?}", started.elapsed());
+        let status = &s.header.collectors[0].status;
+        assert!(matches!(status, crate::scan::Status::Complete), "{tag}: {status:?}");
+        std::fs::remove_dir_all(&d).unwrap();
+        s
+    }
+
+    #[test]
+    fn includes_that_include_their_own_directory_are_read_once() {
+        let s = self_including("inc-monit", "etc/monit/monitrc", "etc/monit/conf.d", "include /etc/monit/conf.d/*\n", |i| {
+            format!("include /etc/monit/conf.d/*\ncheck process p{i} matching x\n  start program = \"/opt/p{i}\"\n")
+        });
+        assert_eq!(hits(&s, "/opt/p3"), 1, "read once, not once per path to it");
+
+        let s = self_including("inc-zabbix", "etc/zabbix/zabbix_agentd.conf", "etc/zabbix/d", "Include=/etc/zabbix/d/*.conf\n", |i| {
+            format!("Include=/etc/zabbix/d/*.conf\nUserParameter=k{i},/opt/z{i}\n")
+        });
+        assert_eq!(hits(&s, "/opt/z3"), 1);
+
+        let s = self_including("inc-collectd", "etc/collectd/collectd.conf", "etc/collectd/c.d", "Include \"/etc/collectd/c.d/*.conf\"\n", |i| {
+            format!("Include \"/etc/collectd/c.d/*.conf\"\nLoadPlugin exec\n<Plugin exec>\n  Exec \"nobody\" \"/opt/c{i}\"\n</Plugin>\n")
+        });
+        assert_eq!(hits(&s, "/opt/c3"), 1);
+    }
+
+    #[test]
+    fn an_nrpe_include_dir_with_links_back_into_itself_is_walked_once() {
+        let d = fixture("inc-nrpe");
+        put(&d, "etc/nagios/nrpe.cfg", b"include_dir=/etc/nagios/d\n");
+        put(&d, "etc/nagios/d/real.cfg", b"command[check_x]=/opt/check_x\n");
+        for i in 0..10 {
+            std::os::unix::fs::symlink(".", d.join(format!("etc/nagios/d/loop{i}"))).unwrap();
+        }
+        let started = std::time::Instant::now();
+        let s = scan(&d);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
+        assert_eq!(hits(&s, "/opt/check_x"), 1);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
