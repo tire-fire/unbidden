@@ -206,7 +206,7 @@ fn digest(value: &[u8]) -> Option<(Alg, String)> {
     }
     let [encoding, alg, rest @ ..] = value else { return None };
     let decode = |chunk: &[u8]| match encoding {
-        b'Q' => crate::text::base64_decode(chunk, crate::text::Padding::Required),
+        b'Q' => crate::text::base64_decode(chunk),
         b'X' => unhex(chunk),
         _ => None,
     };

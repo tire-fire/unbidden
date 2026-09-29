@@ -87,9 +87,10 @@ fn conf_name(name: &str) -> bool {
 }
 
 /// The shell fragments mkinitramfs sources, as root, into its own shell at
-/// every build, and whose variables reach every hook: initramfs.conf, then
-/// conf.d (a name in /etc replacing the same name under /usr/share), then the
-/// packages' conf-hooks.d.
+/// every build: initramfs.conf, then conf.d (a name in /etc replacing the same
+/// name under /usr/share), then the packages' conf-hooks.d. Hooks are separate
+/// processes, so only the variables mkinitramfs exports reach them (MODULES,
+/// BUSYBOX, RESUME and a few more); the file itself runs as root either way.
 fn initramfs_tools_conf(cx: &mut Ctx, out: &mut Vec<Entry>, installed: bool) {
     let mut files: Vec<(PathBuf, String, Option<&'static str>)> = Vec::new();
     files.push((PathBuf::from("etc/initramfs-tools/initramfs.conf"), "initramfs.conf".into(), None));
@@ -113,7 +114,7 @@ fn initramfs_tools_conf(cx: &mut Ctx, out: &mut Vec<Entry>, installed: bool) {
             continue;
         }
         let mut e = entry(cx, &rel, format!("initramfs-tools:conf:{label}"), "mkinitramfs", Trigger::PackageOp, installed);
-        e.note("runs_when", "every initramfs build: sourced as shell, its variables exported to every hook");
+        e.note("runs_when", "every initramfs build: sourced as shell by mkinitramfs, as root");
         if label.starts_with("conf.d/") && !conf_name(&file_name(&rel)) {
             e.enabled = Enablement::Disabled;
             e.note("not_read", "mkinitramfs sources only names of letters, digits, ., _ and -, not .dpkg-* leftovers");

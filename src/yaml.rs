@@ -19,11 +19,12 @@ use crate::pyyaml::{Event, Parser};
 /// frames count against the same limit. A lower bound would refuse a file
 /// cloud-init loads, and every command in it would go unread.
 pub const MAX_DEPTH: usize = 512;
-/// A node takes at least two bytes of text (`a,`), so this is the most a file
-/// the collectors read whole can hold, and PyYAML loads it: a budget below
-/// that would refuse a file cloud-init loads and leave every command in it
-/// unread. What an alias copies is charged against it too.
-pub const MAX_NODES: usize = crate::root::READ_CAP / 2 + 16;
+/// A flow mapping of bare keys makes two nodes out of two bytes (`{a,b}` is
+/// `a: null, b: null`), so a node can take one byte of text and this is the
+/// most a file the collectors read whole can hold. PyYAML loads it, and a
+/// budget below that would refuse a file cloud-init loads and leave every
+/// command in it unread. What an alias copies is charged against it too.
+pub const MAX_NODES: usize = crate::root::READ_CAP + 16;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -764,10 +765,13 @@ mod tests {
 
     #[test]
     fn every_file_the_collectors_read_whole_fits_the_budget() {
-        // Two bytes a node, the densest text there is, up to the read cap.
+        // A byte a node, the densest text there is, up to the read cap: a
+        // flow mapping of bare keys is a key and a null for every two bytes.
         let items = (crate::root::READ_CAP - 16) / 2;
-        let doc = format!("[{}]", "a,".repeat(items));
+        let doc = format!("{{{}}}", "a,".repeat(items));
         assert!(doc.len() <= crate::root::READ_CAP);
+        assert!(parse(&doc).is_ok(), "refused a file within the read cap");
+        let doc = format!("[{}]", "a,".repeat(items));
         match parse(&doc) {
             Ok(Some(Value::Seq(v))) => assert_eq!(v.len(), items),
             other => panic!("refused a file within the read cap: {:?}", other.err()),

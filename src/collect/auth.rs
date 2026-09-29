@@ -9,7 +9,7 @@
 //! as evidence rather than becoming replacement characters.
 
 use crate::entry::key;
-use crate::text::{Padding, base64_decode, base64_encode_unpadded, lossy, short_hash};
+use crate::text::{base64_decode, base64_encode_unpadded, lossy, short_hash};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -821,7 +821,7 @@ fn parse_options(s: &[u8]) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
 /// the same value `ssh-keygen -lf` prints, so an operator can match it against
 /// a key inventory directly.
 fn fingerprint(blob: &[u8]) -> (String, bool) {
-    match base64_decode(blob, Padding::Optional) {
+    match base64_decode(blob) {
         Some(raw) if !raw.is_empty() => {
             use sha2::{Digest, Sha256};
             (format!("SHA256:{}", base64_encode_unpadded(&Sha256::digest(&raw))), true)
@@ -1303,9 +1303,11 @@ fn is_alias_name(s: &str) -> bool {
 }
 
 /// Members one expansion may visit. Depth is bounded, but nesting multiplies
-/// breadth: forty levels of two references each is 2^40 members, and `visudo`
-/// accepts it, so a 930-byte sudoers hung a scan for minutes. A legitimate
-/// list has a handful. Past the budget the rest stays as written.
+/// breadth: forty levels of two references each is 2^40 members, so a
+/// sudoers of about a kilobyte hung a scan for minutes. `visudo -c` pays the
+/// same exponential cost (over a minute at 28 levels), so sudo itself does
+/// not usefully load such a file. A legitimate list has a handful. Past the
+/// budget the rest stays as written.
 const SUDO_EXPANSION_BUDGET: usize = 2048;
 
 /// A comma-separated list with each alias of `kind` replaced by its
@@ -3289,8 +3291,8 @@ PKCS11Provider /opt/a.so extra
     }
     #[test]
     fn nested_aliases_that_multiply_are_cut_off_not_expanded() {
-        // Forty levels, two references each, no cycle: visudo accepts it,
-        // and expanding it is 2^40 members.
+        // Forty levels, two references each, no cycle: expanding it is 2^40
+        // members.
         let mut sudoers = String::new();
         for i in (0..40).rev() {
             let next = if i == 39 { "/bin/true".to_string() } else { format!("C{}, C{}", i + 1, i + 1) };

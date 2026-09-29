@@ -867,8 +867,9 @@ fn dnf_plugins(cx: &mut Ctx) -> Vec<Entry> {
 /// dnf (the python one) imports every `*.py` in its plugin directory, and
 /// importing runs the module's top level as root: a plugin's `.conf` decides
 /// only whether its class is then instantiated. A module dropped there with no
-/// conf at all runs all the same, so each one no conf entry has claimed is
-/// reported here, off only if dnf's plugins are.
+/// conf at all runs all the same, and so does one whose conf says `enabled=0`
+/// (measured on Fedora 44). So each module no enabled conf entry has claimed
+/// is reported here, off only if dnf's plugins are.
 fn dnf_modules_without_conf(cx: &mut Ctx, out: &mut Vec<Entry>, pythons: Option<Vec<PathBuf>>) {
     // A host with no dnf at all never has its interpreter directories read.
     if pythons.is_none() && !cx.root.exists("usr/bin/dnf") && !cx.root.exists("usr/bin/dnf-3") {
@@ -881,7 +882,10 @@ fn dnf_modules_without_conf(cx: &mut Ctx, out: &mut Vec<Entry>, pythons: Option<
         return;
     }
     let off = cx.read("etc/dnf/dnf.conf").and_then(|b| ini_lookup(&b, "main", "plugins")).and_then(|v| as_bool(&v)) == Some(false);
-    let claimed: BTreeSet<PathBuf> = out.iter().filter_map(|e| e.target_path.clone()).collect();
+    // A conf that leaves its plugin off does not stop the module importing.
+    let claimed: BTreeSet<PathBuf> =
+        out.iter().filter(|e| e.enabled == Enablement::Enabled).filter_map(|e| e.target_path.clone()).collect();
+    let confs: BTreeSet<PathBuf> = out.iter().filter_map(|e| e.target_path.clone()).collect();
     for python in &pythons {
         let dir = python.join("site-packages/dnf-plugins");
         for ent in cx.dir(&dir) {
@@ -893,7 +897,10 @@ fn dnf_modules_without_conf(cx: &mut Ctx, out: &mut Vec<Entry>, pythons: Option<
                 continue;
             }
             let plugin = lossy(&ent.name.as_bytes()[..ent.name.as_bytes().len() - 3]);
-            let mut e = cx.entry(Kind::PkgHook, &rel, format!("dnf-plugin:{plugin}"));
+            // The module of a plugin whose conf leaves it off is a second
+            // entry beside that conf's, so it carries its own name.
+            let label = if confs.contains(&cx.root.abs(&rel)) { "dnf-plugin-module" } else { "dnf-plugin" };
+            let mut e = cx.entry(Kind::PkgHook, &rel, format!("{label}:{plugin}"));
             name_from_os(&mut e, &ent.name);
             e.trigger = Trigger::PackageOp;
             e.principal = Some("root".to_string());
@@ -2467,7 +2474,11 @@ mod tests {
         put(&dir, "usr/lib/python3.12/site-packages/dnf-plugins/copr.py", b"import dnf\n");
         put(&dir, "etc/dnf/plugins/copr.conf", b"[main]\nenabled=1\n");
         put(&dir, "usr/lib/python3.12/site-packages/dnf-plugins/evil.py", b"import os\nos.system('/tmp/x')\n");
+        put(&dir, "usr/lib/python3.12/site-packages/dnf-plugins/off.py", b"import os\nos.system('/tmp/y')\n");
+        put(&dir, "etc/dnf/plugins/off.conf", b"[main]\nenabled=0\n");
         let s = scan(&dir);
+        let off = one(&s, |e| e.name == "dnf-plugin-module:off");
+        assert_eq!(off.enabled, Enablement::Enabled, "the module is imported whatever its conf says");
         let evil = one(&s, |e| e.name == "dnf-plugin:evil");
         assert_eq!(evil.enabled, Enablement::Enabled);
         assert_eq!(evil.target_path, Some(dir.join("usr/lib/python3.12/site-packages/dnf-plugins/evil.py")));

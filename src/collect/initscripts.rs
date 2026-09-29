@@ -1109,7 +1109,7 @@ fn script_facts(cx: &mut Ctx, e: &mut Entry, rel: &Path) {
         }
     }
     for (k, v) in env {
-        e.note(&format!("env.{k}"), v.join(", "));
+        e.note(&format!("env.{k}"), v.join("\n"));
     }
 }
 
@@ -1425,6 +1425,18 @@ export PATH=\"/usr/sbin:/usr/bin\"\n\
 if [ \"$x\" = y ]; then :; fi\n\
 test a=b\n\
 exec /usr/sbin/sshd\n";
+
+    #[test]
+    fn a_preload_assigned_twice_yields_both_libraries_with_no_stray_punctuation() {
+        let dir = tree("preload-twice");
+        put(&dir, "etc/init.d/twice", b"#!/bin/sh\nLD_PRELOAD=/tmp/a.so\nLD_PRELOAD=/tmp/b.so\nexec /bin/true\n", 0o755);
+        let root = Root::at(&dir).unwrap();
+        let mut s = scan(&dir);
+        crate::enrich::enrich(&root, &mut s);
+        let mut libs: Vec<String> = s.entries.iter().filter(|e| e.kind == Kind::LdPreload).map(|e| e.name.clone()).collect();
+        libs.sort();
+        assert_eq!(libs, ["/tmp/a.so", "/tmp/b.so"]);
+    }
 
     #[test]
     fn presence_in_init_d_is_not_enablement() {
