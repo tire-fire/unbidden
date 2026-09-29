@@ -437,6 +437,9 @@ fn apt(cx: &mut Ctx) -> Vec<Entry> {
 /// it is reported, as Disabled, because nothing runs it.
 fn apt_skips(name: &OsStr) -> Option<String> {
     let bytes = name.as_bytes();
+    if bytes.first() == Some(&b'.') {
+        return Some("apt skips a name that starts with a dot".to_string());
+    }
     if !bytes
         .iter()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
@@ -1765,6 +1768,8 @@ mod tests {
         );
         // A fragment apt will not read: still evidence, but it runs nothing.
         put(&dir, "etc/apt/apt.conf.d/99evil.sh", br#"DPkg::Post-Invoke {"/tmp/payload";};"#);
+        // A dot-first name is skipped whatever follows it, `.conf` included.
+        put(&dir, "etc/apt/apt.conf.d/.conf", br#"DPkg::Post-Invoke {"/tmp/dotfile";};"#);
         // Pin priorities execute nothing at all.
         put(&dir, "etc/apt/preferences.d/99pin", b"Package: *\nPin: release a=stable\nPin-Priority: 900\n");
 
@@ -1772,7 +1777,7 @@ mod tests {
         let hooks = of_kind(&s, Kind::PkgHook);
         assert_eq!(
             hooks.len(),
-            6,
+            7,
             "one entry per command string, and a two-command block is two: {:?}",
             hooks.iter().map(|e| &e.name).collect::<Vec<_>>()
         );
@@ -1793,6 +1798,8 @@ mod tests {
             "the target is the program, not the preload"
         );
 
+        let dotfile = one(&s, |e| e.source.to_string_lossy().ends_with("/.conf"));
+        assert_eq!(dotfile.enabled, Enablement::Disabled, "apt reads no dotfile");
         let ignored = one(&s, |e| e.source.to_string_lossy().ends_with("99evil.sh"));
         assert_eq!(ignored.enabled, Enablement::Disabled, "apt never reads a .sh fragment");
         assert!(ignored.raw.contains_key("not_read_by_apt"));
