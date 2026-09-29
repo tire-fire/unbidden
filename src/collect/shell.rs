@@ -212,16 +212,14 @@ fn x_session(cx: &mut Ctx, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<Entry>) {
         }
     };
     let xsession_d = Path::new("etc/X11/Xsession.d");
-    let mut names: Vec<_> = cx.dir(xsession_d).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
-    names.sort();
+    let names: Vec<_> = cx.dir(xsession_d).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
     for name in names {
         let why = super::run_parts_skips(cx, super::RunParts::Debian, xsession_d, name.as_encoded_bytes());
         add(cx, &xsession_d.join(&name), None, "/etc/X11/Xsession", why, out);
     }
     let xinitrc_d = Path::new("etc/X11/xinit/xinitrc.d");
-    let mut names: Vec<_> =
+    let names: Vec<_> =
         cx.dir(xinitrc_d).into_iter().filter(|e| !e.is_dir && !e.name.as_encoded_bytes().starts_with(b".")).map(|e| e.name).collect();
-    names.sort();
     for name in names {
         add(cx, &xinitrc_d.join(&name), None, "/etc/X11/xinit/xinitrc-common", None, out);
     }
@@ -287,8 +285,7 @@ fn other_shells(cx: &mut Ctx, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<Entry>
     let mut files: Vec<(PathBuf, Option<&User>, Syntax, &str)> = Vec::new();
     let users = cx.users;
     let sorted = |cx: &mut Ctx, dir: &Path, keep: &dyn Fn(&[u8]) -> bool| -> Vec<PathBuf> {
-        let mut names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir && keep(e.name.as_encoded_bytes())).map(|e| e.name).collect();
-        names.sort();
+        let names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir && keep(e.name.as_encoded_bytes())).map(|e| e.name).collect();
         names.into_iter().map(|n| dir.join(n)).collect()
     };
 
@@ -377,9 +374,8 @@ fn plasma_env(cx: &mut Ctx, seen: &mut BTreeSet<PathBuf>, out: &mut Vec<Entry>) 
     let users = cx.users;
     dirs.extend(users.iter().map(|u| (u.in_home(".config/plasma-workspace/env"), Some(u))));
     for (dir, user) in dirs {
-        let mut names: Vec<_> =
+        let names: Vec<_> =
             cx.dir(&dir).into_iter().filter(|e| !e.is_dir && e.name.as_encoded_bytes().ends_with(b".sh")).map(|e| e.name).collect();
-        names.sort();
         for n in names {
             let at = out.len();
             profile(cx, &dir.join(n), user, Syntax::Shell, seen, out);

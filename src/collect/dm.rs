@@ -94,8 +94,7 @@ fn gdm(cx: &mut Ctx, out: &mut Vec<Entry>, active: Option<&str>) {
     for conf in ["etc/gdm3", "etc/gdm"] {
         for (dir, trigger) in GDM_DIRS {
             let d = Path::new(conf).join(dir);
-            let mut ents = cx.dir(&d);
-            ents.sort_by(|a, b| a.name.cmp(&b.name));
+            let ents = cx.dir(&d);
             for ent in ents {
                 let rel = d.join(&ent.name);
                 let Ok(meta) = cx.root.stat_follow(&rel) else { continue };
@@ -150,9 +149,8 @@ fn ini(bytes: &[u8]) -> Vec<(String, String, String)> {
 
 /// The files of a `.conf` directory, sorted.
 fn conf_dir(cx: &mut Ctx, dir: &str) -> Vec<PathBuf> {
-    let mut names: Vec<_> =
+    let names: Vec<_> =
         cx.dir(dir).into_iter().filter(|e| !e.is_dir && e.name.as_encoded_bytes().ends_with(b".conf")).map(|e| e.name).collect();
-    names.sort();
     names.into_iter().map(|n| Path::new(dir).join(n)).collect()
 }
 

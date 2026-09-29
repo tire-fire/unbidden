@@ -73,8 +73,7 @@ impl Collector for Cron {
                     if cx.first_visit(&dir, &mut seen).is_none() {
                         continue;
                     }
-                    let mut names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
-                    names.sort();
+                    let names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
                     for name in names {
                         let rel = Path::new(&dir).join(&name);
                         let user = name.to_string_lossy().into_owned();

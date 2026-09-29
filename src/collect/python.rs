@@ -95,8 +95,7 @@ fn versions(cx: &mut Ctx) -> Vec<String> {
 }
 
 fn site_dir(cx: &mut Ctx, out: &mut Vec<Entry>, dir: &Path, user: Option<&str>, site: bool) {
-    let mut names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
-    names.sort();
+    let names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
     for name in names {
         let Some(n) = name.to_str() else { continue };
         let rel = dir.join(&name);

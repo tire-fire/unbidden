@@ -255,8 +255,7 @@ fn ppp(cx: &mut Ctx, flavour: super::RunParts) -> Vec<Entry> {
 fn wireguard(cx: &mut Ctx) -> Vec<Entry> {
     let mut out = Vec::new();
     let dir = Path::new("etc/wireguard");
-    let mut ents = cx.dir(dir);
-    ents.sort_by(|a, b| a.name.cmp(&b.name));
+    let ents = cx.dir(dir);
     for ent in ents {
         let Some(iface) = ent.name.to_str().and_then(|n| n.strip_suffix(".conf")).map(str::to_string) else { continue };
         let rel = dir.join(&ent.name);
@@ -358,9 +357,8 @@ fn openvpn(cx: &mut Ctx) -> Vec<Entry> {
     for (dir, unit, cli_security) in
         [("etc/openvpn", "openvpn@", true), ("etc/openvpn/client", "openvpn-client@", false), ("etc/openvpn/server", "openvpn-server@", false)]
     {
-        let mut names: Vec<_> =
+        let names: Vec<_> =
             cx.dir(dir).into_iter().filter(|e| !e.is_dir && e.name.as_encoded_bytes().ends_with(b".conf")).map(|e| e.name).collect();
-        names.sort();
         for name in names {
             let rel = Path::new(dir).join(&name);
             let Some(bytes) = cx.read_capped(&rel, 256 * 1024) else { continue };
@@ -845,8 +843,7 @@ fn openrc_extras(cx: &mut Ctx, rc: &Openrc, scripts: &BTreeSet<Vec<u8>>, conf_d:
             out.push(sourced(cx, &rel, "rc.conf".to_string(), "every service, before its conf.d"));
         }
         let dir = PathBuf::from(prefix).join("rc.conf.d");
-        let mut names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir && e.name.as_bytes().ends_with(b".conf")).map(|e| e.name).collect();
-        names.sort();
+        let names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir && e.name.as_bytes().ends_with(b".conf")).map(|e| e.name).collect();
         for name in names {
             let rel = dir.join(&name);
             out.push(sourced(cx, &rel, format!("rc.conf.d/{}", name.to_string_lossy()), "every service, before its conf.d"));
@@ -863,8 +860,7 @@ fn openrc_extras(cx: &mut Ctx, rc: &Openrc, scripts: &BTreeSet<Vec<u8>>, conf_d:
     let local_prefix = OPENRC_PREFIXES.iter().find(|p| cx.root.stat_follow(format!("{p}/init.d/local")).is_ok_and(|m| m.is_file));
     for prefix in OPENRC_PREFIXES {
         let dir = PathBuf::from(prefix).join("local.d");
-        let mut names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
-        names.sort();
+        let names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
         for name in names {
             let raw = name.as_bytes();
             let stops = raw.ends_with(b".stop");

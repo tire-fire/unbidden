@@ -595,6 +595,20 @@ pub fn is_hidden_path(p: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_directory_is_listed_in_name_order_so_no_collector_has_to_sort_it() {
+        let dir = std::env::temp_dir().join(format!("unbidden-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["zeta", "alpha", "Beta", "10-x", "9-y", "_u"] {
+            std::fs::write(dir.join(n), b"").unwrap();
+        }
+        let root = Root::at(&dir).unwrap();
+        let names: Vec<String> = root.read_dir(".").unwrap().into_iter().map(|e| e.name.to_string_lossy().into_owned()).collect();
+        assert_eq!(names, ["10-x", "9-y", "Beta", "_u", "alpha", "zeta"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     use super::*;
     use std::io::Write;
 

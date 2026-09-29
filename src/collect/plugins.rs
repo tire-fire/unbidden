@@ -86,8 +86,7 @@ fn library_dirs(cx: &mut Ctx) -> Vec<String> {
 }
 
 fn sorted(cx: &mut Ctx, dir: &Path) -> Vec<PathBuf> {
-    let mut names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
-    names.sort();
+    let names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
     names.into_iter().map(|n| dir.join(n)).collect()
 }
 

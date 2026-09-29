@@ -638,8 +638,7 @@ fn power_hooks(cx: &mut Ctx) -> Vec<Entry> {
         if cx.first_visit(dir, &mut seen).is_none() {
             continue;
         }
-        let mut ents = cx.dir(dir);
-        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        let ents = cx.dir(dir);
         for ent in ents {
             if ent.is_dir || hidden_or_backup(&ent.name) {
                 continue;
@@ -721,8 +720,7 @@ fn manager_environment(cx: &mut Ctx) -> Vec<Entry> {
             for u in cx.users {
                 files.push((u.in_home(".config/systemd/user.conf"), None, Some(u.name.clone())));
                 let dir = u.in_home(".config/systemd/user.conf.d");
-                let mut names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir && e.name.to_string_lossy().ends_with(".conf")).map(|e| e.name).collect();
-                names.sort();
+                let names: Vec<_> = cx.dir(&dir).into_iter().filter(|e| !e.is_dir && e.name.to_string_lossy().ends_with(".conf")).map(|e| e.name).collect();
                 files.extend(names.into_iter().map(|n| (dir.join(n), None, Some(u.name.clone()))));
             }
         }

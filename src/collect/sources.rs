@@ -359,9 +359,8 @@ fn armored_body(text: &str) -> String {
 
 fn dnf(cx: &mut Ctx, out: &mut Vec<Entry>, keys: &mut BTreeSet<PathBuf>) {
     for dir in ["etc/yum.repos.d", "etc/distro.repos.d", "usr/share/dnf5/repos.d"] {
-        let mut names: Vec<_> =
+        let names: Vec<_> =
             cx.dir(dir).into_iter().filter(|e| !e.is_dir && e.name.as_encoded_bytes().ends_with(b".repo")).map(|e| e.name).collect();
-        names.sort();
         for n in names {
             let rel = Path::new(dir).join(n);
             let Some(bytes) = cx.read_capped(&rel, CAP) else { continue };

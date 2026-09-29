@@ -132,8 +132,7 @@ fn plugin_name(key: &str) -> Option<&str> {
 }
 
 fn sorted(cx: &mut Ctx, dir: &Path) -> Vec<PathBuf> {
-    let mut names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
-    names.sort();
+    let names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
     names.into_iter().map(|n| dir.join(n)).collect()
 }
 
@@ -263,8 +262,7 @@ fn incron(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let (allow, deny) = (listed(cx, &allow_rel), listed(cx, &deny_rel));
     let accounts: Vec<String> = cx.users.iter().filter(|u| u.source == "passwd").map(|u| u.name.clone()).collect();
     for (dir, user_tables) in [(system, false), (spool, true)] {
-        let mut names: Vec<_> = cx.dir(Path::new(&dir)).into_iter().map(|e| e.name).collect();
-        names.sort();
+        let names: Vec<_> = cx.dir(Path::new(&dir)).into_iter().map(|e| e.name).collect();
         for n in names {
             let rel = Path::new(&dir).join(&n);
             let name = n.to_string_lossy().into_owned();
@@ -361,8 +359,7 @@ fn facter(cx: &mut Ctx, out: &mut Vec<Entry>) {
         break;
     }
     for dir in dirs {
-        let mut names: Vec<_> = cx.dir(Path::new(&dir)).into_iter().map(|e| e.name).collect();
-        names.sort();
+        let names: Vec<_> = cx.dir(Path::new(&dir)).into_iter().map(|e| e.name).collect();
         for n in names {
             let name = n.to_string_lossy().into_owned();
             let ext = name.rsplit_once('.').map(|(_, x)| x).unwrap_or_default();
@@ -754,8 +751,7 @@ fn nrpe_include(cx: &mut Ctx, _from: &Path, key: &str, value: &str) -> Option<Ve
         if depth > 10 || !cx.root.dir_identity(dir).is_ok_and(|id| seen.insert(id)) {
             return;
         }
-        let mut names: Vec<_> = cx.dir(dir).into_iter().map(|e| e.name).collect();
-        names.sort();
+        let names: Vec<_> = cx.dir(dir).into_iter().map(|e| e.name).collect();
         for n in names {
             let p = dir.join(&n);
             let name = n.as_encoded_bytes();
@@ -960,8 +956,7 @@ fn collectd_read(
     }
     let Ok(meta) = cx.root.stat_follow(rel) else { return };
     if meta.is_dir {
-        let mut names: Vec<_> = cx.dir(rel).into_iter().map(|e| e.name).filter(|n| !n.as_encoded_bytes().starts_with(b".")).collect();
-        names.sort();
+        let names: Vec<_> = cx.dir(rel).into_iter().map(|e| e.name).filter(|n| !n.as_encoded_bytes().starts_with(b".")).collect();
         // A directory is listed once: an included directory holding a file
         // that includes it again lists it again, at every depth.
         if !cx.root.dir_identity(rel).is_ok_and(|_| seen.insert(rel.to_path_buf())) {

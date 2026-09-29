@@ -422,8 +422,7 @@ fn template_hooks(cx: &mut Ctx, configs: &[Entry]) -> Vec<Entry> {
     let mut out = Vec::new();
     for (dir, why) in dirs {
         let hooks = dir.join("hooks");
-        let mut names: Vec<_> = cx.dir(&hooks).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
-        names.sort();
+        let names: Vec<_> = cx.dir(&hooks).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
         for n in names {
             let name = n.to_string_lossy().into_owned();
             if name.ends_with(".sample") {

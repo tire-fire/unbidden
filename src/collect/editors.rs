@@ -153,8 +153,7 @@ fn emacs(cx: &mut Ctx, out: &mut Vec<Entry>) {
     };
     let fedora = |n: &str| n.ends_with(".el") || n.ends_with(".elc");
     for (dir, accept) in [("etc/emacs/site-start.d", &debian as &dyn Fn(&str) -> bool), ("usr/share/emacs/site-lisp/site-start.d", &fedora)] {
-        let mut names: Vec<_> = cx.dir(Path::new(dir)).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
-        names.sort();
+        let names: Vec<_> = cx.dir(Path::new(dir)).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
         for n in names {
             let name = n.to_string_lossy().into_owned();
             if !accept(&name) {

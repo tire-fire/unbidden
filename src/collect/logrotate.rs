@@ -55,8 +55,7 @@ fn taboo(name: &[u8]) -> bool {
 fn include(cx: &mut Ctx, rel: &Path, depth: usize, seen: &mut std::collections::BTreeSet<PathBuf>, out: &mut Vec<Entry>) {
     match cx.root.stat_follow(rel) {
         Ok(m) if m.is_dir => {
-            let mut names: Vec<_> = cx.dir(rel).into_iter().filter(|e| !e.is_dir && !taboo(e.name.as_encoded_bytes())).map(|e| e.name).collect();
-            names.sort();
+            let names: Vec<_> = cx.dir(rel).into_iter().filter(|e| !e.is_dir && !taboo(e.name.as_encoded_bytes())).map(|e| e.name).collect();
             for n in names {
                 read(cx, &rel.join(n), depth, seen, out);
             }

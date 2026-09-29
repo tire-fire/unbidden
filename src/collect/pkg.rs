@@ -182,8 +182,7 @@ fn hook_dirs(cx: &mut Ctx) -> Vec<Entry> {
             "needrestart" => cx.root.exists("usr/sbin/needrestart"),
             _ => cx.root.exists("usr/bin/etckeeper") || cx.root.exists("usr/sbin/etckeeper"),
         };
-        let mut ents = cx.dir(&dir);
-        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        let ents = cx.dir(&dir);
         for ent in ents {
             let rel = dir.join(&ent.name);
             if !cx.root.stat_follow(&rel).is_ok_and(|m| m.is_file) {
@@ -222,8 +221,7 @@ fn hook_dirs(cx: &mut Ctx) -> Vec<Entry> {
 fn alternatives(cx: &mut Ctx) -> Vec<Entry> {
     let mut out = Vec::new();
     for dir in ["var/lib/dpkg/alternatives", "var/lib/alternatives"] {
-        let mut ents = cx.dir(dir);
-        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        let ents = cx.dir(dir);
         for ent in ents {
             let rel = Path::new(dir).join(&ent.name);
             let Some(bytes) = cx.read_capped(&rel, 256 * 1024) else { continue };
@@ -730,8 +728,7 @@ const PLUGIN_DIRS: &[(&str, &str, &str)] = &[
 /// per matching package where the filter is set.
 fn libdnf5_actions(cx: &mut Ctx) -> Vec<Entry> {
     let dir = Path::new("etc/dnf/libdnf5-plugins/actions.d");
-    let mut names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir && e.name.as_bytes().ends_with(b".actions")).map(|e| e.name).collect();
-    names.sort();
+    let names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir && e.name.as_bytes().ends_with(b".actions")).map(|e| e.name).collect();
     if names.is_empty() {
         return Vec::new();
     }

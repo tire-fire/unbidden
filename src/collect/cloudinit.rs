@@ -124,12 +124,11 @@ fn sources(cx: &mut Ctx) -> Vec<Source> {
         Some(_) => PathBuf::new(),
         None => PathBuf::from("etc/cloud/cloud.cfg.d"),
     };
-    let mut names: Vec<_> = if confd.as_os_str().is_empty() {
+    let names: Vec<_> = if confd.as_os_str().is_empty() {
         Vec::new()
     } else {
         cx.dir(&confd).into_iter().filter(|e| !e.is_dir && e.name.as_encoded_bytes().ends_with(b".cfg")).map(|e| e.name).collect()
     };
-    names.sort();
     rels.extend(names.into_iter().rev().map(|n| confd.join(n)));
 
     let mut out: Vec<Source> = rels.iter().filter_map(|r| load(cx, r)).collect();
@@ -332,8 +331,7 @@ const SCRIPT_DIRS: [(&str, &str, &str); 5] = [
 fn scripts(cx: &mut Ctx, out: &mut Vec<Entry>, modules: &Modules, gate: &Gate) {
     for (dir, module, default) in SCRIPT_DIRS {
         let run = runs(cx, modules, module, default);
-        let mut ents = cx.dir(dir);
-        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        let ents = cx.dir(dir);
         for ent in ents {
             let rel = Path::new(dir).join(&ent.name);
             let Ok(meta) = cx.root.stat_follow(&rel) else { continue };
@@ -379,8 +377,7 @@ fn hooks(cx: &mut Ctx, out: &mut Vec<Entry>, gate: &Gate) {
         ("var/lib/cloud/instance/boothooks", "boothook", "written from user data and run on every boot"),
     ];
     for (dir, what, how) in DIRS {
-        let mut ents = cx.dir(dir);
-        ents.sort_by(|a, b| a.name.cmp(&b.name));
+        let ents = cx.dir(dir);
         for ent in ents {
             let name = ent.name.to_string_lossy().into_owned();
             let rel = Path::new(dir).join(&ent.name);

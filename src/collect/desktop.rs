@@ -76,8 +76,7 @@ fn file_manager_extensions(cx: &mut Ctx) -> Vec<Entry> {
             if !seen.insert(dir.clone()) {
                 continue;
             }
-            let mut names: Vec<OsString> = cx.dir(&dir).into_iter().map(|e| e.name).filter(|n| n.as_encoded_bytes().ends_with(b".py")).collect();
-            names.sort();
+            let names: Vec<OsString> = cx.dir(&dir).into_iter().map(|e| e.name).filter(|n| n.as_encoded_bytes().ends_with(b".py")).collect();
             for name in names {
                 let rel = dir.join(&name);
                 let stem = name.to_string_lossy().trim_end_matches(".py").to_string();
@@ -205,8 +204,7 @@ fn autostart(cx: &mut Ctx) -> Vec<Entry> {
     // user when the daemon starts, before any X11 client can.
     let gsd = cx.root.exists("usr/libexec/gsd-xsettings");
     let dir = Path::new("etc/xdg/Xwayland-session.d");
-    let mut names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
-    names.sort();
+    let names: Vec<_> = cx.dir(dir).into_iter().filter(|e| !e.is_dir).map(|e| e.name).collect();
     for name in names {
         let rel = dir.join(&name);
         let Ok(meta) = cx.root.stat_follow(&rel) else { continue };

@@ -183,8 +183,7 @@ pub(crate) struct RunPartsFile {
 /// executable runs nothing. Such a name is still reported, off: a script that
 /// was there and is not is evidence.
 pub(crate) fn run_parts_dir(cx: &mut Ctx, flavour: RunParts, dir: &Path) -> Vec<RunPartsFile> {
-    let mut ents = cx.dir(dir);
-    ents.sort_by(|a, b| a.name.cmp(&b.name));
+    let ents = cx.dir(dir);
     let mut out = Vec::new();
     for ent in ents {
         if ent.is_dir {
