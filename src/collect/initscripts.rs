@@ -55,14 +55,14 @@ impl Collector for InitScripts {
     fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
         let mut out = rc_local(cx);
         out.extend(sysv(cx));
-        out.extend(motd(cx));
+        let run_parts = super::run_parts_flavour(cx);
+        out.extend(motd(cx, run_parts));
         out.extend(dispatcher(cx));
         out.extend(dhclient_hooks(cx));
         out.extend(dhcpcd_hooks(cx));
         out.extend(crypttab(cx));
         out.extend(networkd_dispatcher(cx));
-        // The run-parts binary is read once for the three that use it.
-        let run_parts = super::run_parts_flavour(cx);
+        // The run-parts binary is read once for all that use it.
         out.extend(ifupdown(cx, run_parts));
         out.extend(ppp(cx, run_parts));
         out.extend(wireguard(cx));
@@ -921,17 +921,20 @@ fn lsb_header(e: &mut Entry, bytes: &[u8]) {
 
 // ---------------------------------------------------------------- MOTD ----
 
-fn motd(cx: &mut Ctx) -> Vec<Entry> {
+/// update-motd.d is run by pam_motd at every login as `run-parts --lsbsysinit`
+/// (its own strings say so): with debianutils' run-parts that is the LSB name
+/// rule, not the plain one.
+fn motd(cx: &mut Ctx, flavour: super::RunParts) -> Vec<Entry> {
+    let flavour = if flavour == super::RunParts::Debian { super::RunParts::DebianLsb } else { flavour };
     let mut out = Vec::new();
-    for ent in cx.dir(MOTD_DIR) {
-        if ent.is_dir {
-            continue;
+    for f in super::run_parts_dir(cx, flavour, Path::new(MOTD_DIR)) {
+        let mut e = script_entry(cx, Kind::Motd, &f.rel, &f.name, Trigger::Login);
+        e.enabled = Enablement::Enabled;
+        e.note("executable", (exec_mode(cx, &f.rel) != 0).to_string());
+        if let Some(why) = f.not_run {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", why);
         }
-        let rel = Path::new(MOTD_DIR).join(&ent.name);
-        let mut e = script_entry(cx, Kind::Motd, &rel, &ent.name, Trigger::Login);
-        let exec = exec_mode(cx, &rel) != 0;
-        e.enabled = if exec { Enablement::Enabled } else { Enablement::Disabled };
-        e.note("executable", exec.to_string());
         out.push(e);
     }
     out
@@ -1716,6 +1719,9 @@ exec /usr/sbin/sshd\n";
         let dir = tree("motd");
         put(&dir, "etc/update-motd.d/10-help-text", b"#!/bin/sh\necho hi\n", 0o755);
         put(&dir, "etc/update-motd.d/99-off", b"#!/bin/sh\nLD_PRELOAD=/tmp/m.so\n", 0o644);
+        // Executable, but not a name run-parts --lsbsysinit runs.
+        put(&dir, "etc/update-motd.d/50-landscape-sysinfo.sh", b"#!/bin/sh\n", 0o755);
+        put(&dir, "etc/update-motd.d/60-Upper", b"#!/bin/sh\n", 0o755);
 
         let s = scan(&dir);
         assert!(matches!(status(&s), Status::Complete), "{:?}", status(&s));
@@ -1727,6 +1733,11 @@ exec /usr/sbin/sshd\n";
         assert_eq!(live.command, None);
         assert_eq!(live.target_path, Some(dir.join("etc/update-motd.d/10-help-text")));
 
+        for name in ["50-landscape-sysinfo.sh", "60-Upper"] {
+            let e = one(&s, Kind::Motd, name);
+            assert_eq!(e.enabled, Enablement::Disabled, "{name}");
+            assert!(e.raw["not_run"].contains("--lsbsysinit"), "{name}: {}", e.raw["not_run"]);
+        }
         let off = one(&s, Kind::Motd, "99-off");
         assert_eq!(off.enabled, Enablement::Disabled);
         assert_eq!(off.raw["env.LD_PRELOAD"], "/tmp/m.so");

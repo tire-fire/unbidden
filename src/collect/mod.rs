@@ -108,6 +108,9 @@ pub(crate) fn expand_glob(cx: &mut Ctx, rel: &Path) -> Vec<PathBuf> {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum RunParts {
     Debian,
+    /// debianutils' run-parts given `--lsbsysinit`, as pam_motd runs it over
+    /// update-motd.d: LSB's namespaces instead of letters, digits, `_` and `-`.
+    DebianLsb,
     Script,
     BusyBox,
 }
@@ -142,6 +145,9 @@ pub(crate) fn run_parts_skips(cx: &mut Ctx, flavour: RunParts, dir: &Path, name:
         RunParts::Debian => {
             let ok = !name.is_empty() && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-');
             (!ok).then_some("run-parts runs only names of letters, digits, _ and -")
+        }
+        RunParts::DebianLsb => {
+            (!lsb_name(name)).then_some("run-parts --lsbsysinit runs only lower-case names in LSB's namespaces")
         }
         RunParts::BusyBox => {
             let ok = !name.is_empty()
@@ -200,6 +206,29 @@ pub(crate) fn run_parts_dir(cx: &mut Ctx, flavour: RunParts, dir: &Path) -> Vec<
         out.push(RunPartsFile { rel, name: ent.name, not_run });
     }
     out
+}
+
+/// The names debianutils' `run-parts --lsbsysinit` accepts, worked out from
+/// what the real binary ran over a table of names: a lower-case letter or
+/// digit then any of those, `_` and `-`; or hyphen-separated parts of
+/// lower-case letters, digits, `_` and `.`, the last of only letters and
+/// digits. Whatever the rule, names with a `.dpkg-` in them, a `~`, or a
+/// package-manager or editor suffix are dropped first.
+fn lsb_name(name: &[u8]) -> bool {
+    const SKIP_SUFFIX: [&[u8]; 6] = [b"~", b".rpmsave", b".rpmorig", b".rpmnew", b".swp", b",v"];
+    if name.windows(6).any(|w| w == b".dpkg-") || SKIP_SUFFIX.iter().any(|s| name.ends_with(s)) || name.ends_with(b".cfsaved") {
+        return false;
+    }
+    let lower = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    if name.first().is_some_and(lower) && name.iter().all(|b| lower(b) || matches!(b, b'_' | b'-')) {
+        return true;
+    }
+    let mut parts = name.split(|b| *b == b'-').collect::<Vec<_>>();
+    let Some(last) = parts.pop() else { return false };
+    !parts.is_empty()
+        && parts.iter().all(|p| !p.is_empty() && p.iter().all(|b| lower(b) || matches!(b, b'_' | b'.')))
+        && !last.is_empty()
+        && last.iter().all(lower)
 }
 
 /// The directories ldconfig puts in the loader's cache, read from
@@ -314,6 +343,21 @@ pub fn all() -> Vec<Box<dyn Collector>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every name here was run through `run-parts --test --lsbsysinit` of the
+    /// debianutils on Ubuntu 24.04, in a directory of executable files, and
+    /// is listed as that binary answered.
+    #[test]
+    fn the_lsb_name_rule_matches_what_run_parts_did() {
+        let accepted = "00-header 10-help-text 10-x.y-z 1-a 1_-a a a- a-1 a_1-b_2 a1-b2 _a-b a--b a-b a_b ab1 _a.b-c a.b-c a_b-c a-b-c-d a-b.c-d";
+        let rejected = "A _a a-B a.b a-b.c -a 10-x. 50-landscape-sysinfo.sh x.dpkg-old x~ A-b .a";
+        for n in accepted.split(' ') {
+            assert!(lsb_name(n.as_bytes()), "{n} is run");
+        }
+        for n in rejected.split(' ') {
+            assert!(!lsb_name(n.as_bytes()), "{n} is not run");
+        }
+    }
 
     #[test]
     fn glob_matching_is_not_a_prefix_check() {
