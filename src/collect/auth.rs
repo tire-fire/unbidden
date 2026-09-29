@@ -163,10 +163,40 @@ const PAM_STD_DIRS: &[&str] = &[
     "usr/lib/security",
 ];
 
-/// libpam's module directory on this root: the first standard one holding
-/// pam_permit.so, which every PAM installation ships.
-fn pam_module_dir(cx: &Ctx) -> Option<&'static str> {
+/// libpam's own size is tens of kilobytes; this is only a ceiling.
+const LIBPAM_CAP: usize = 4 << 20;
+
+/// libpam's module directory on this root. libpam is built with the one
+/// directory it loads from and carries that path as a string, so it is read
+/// from there: a directory planted with a link to pam_permit.so is no longer
+/// taken for the real one and no longer hides the real pam_unix.so behind it.
+/// Where libpam cannot be read, or names none of the standard directories,
+/// the first standard one holding pam_permit.so (which every PAM installation
+/// ships) is the best available guess.
+fn pam_module_dir(cx: &mut Ctx) -> Option<&'static str> {
+    for d in PAM_STD_DIRS {
+        // libpam sits beside the `security` directory it loads from.
+        let Some(lib) = Path::new(d).parent().map(|p| p.join("libpam.so.0")) else { continue };
+        if !cx.root.exists(&lib) {
+            continue;
+        }
+        let Some(bytes) = cx.read_capped(&lib, LIBPAM_CAP) else { continue };
+        if let Some(named) = PAM_STD_DIRS.iter().copied().find(|d| holds_path(&bytes, d)) {
+            return Some(named);
+        }
+    }
     PAM_STD_DIRS.iter().copied().find(|d| cx.root.exists(Path::new(d).join("pam_permit.so")))
+}
+
+/// Whether `bytes` holds `/<dir>` as a string of its own, ending at a NUL or
+/// a `/`. Anchoring both ends keeps `/usr/lib/security` from being found
+/// inside `/opt/usr/lib/security2`.
+fn holds_path(bytes: &[u8], dir: &str) -> bool {
+    let needle = format!("/{dir}");
+    let needle = needle.as_bytes();
+    bytes.windows(needle.len() + 1).enumerate().any(|(i, w)| {
+        w.starts_with(needle) && matches!(w[needle.len()], 0 | b'/') && (i == 0 || bytes[i - 1] == 0)
+    })
 }
 
 fn pam_type(t: &[u8]) -> Option<&'static str> {
@@ -382,6 +412,27 @@ fn nss(cx: &mut Ctx, out: &mut Vec<Entry>) {
 /// directory only when /etc/pam.d has no file of that name.
 const PAM_DIRS: [&str; 2] = ["etc/pam.d", "usr/lib/pam.d"];
 
+/// A line that pulls in another stack. A bare name is a file in a stack
+/// directory, which is enumerated in its own right; a path is a file libpam
+/// reads from wherever it is, so that becomes the entry's target.
+fn pam_include(cx: &mut Ctx, rel: &Path, service: &str, keyword: &str, stack: &[u8], shadowed_by: &Option<String>, shadows: &Option<String>) -> Entry {
+    let mut e = cx.entry(Kind::Pam, rel, format!("{service}:{keyword}:{}", lossy(stack)));
+    e.trigger = Trigger::Auth;
+    e.enabled = if shadowed_by.is_some() { Enablement::Disabled } else { Enablement::Enabled };
+    if let Some(by) = shadowed_by {
+        e.note("shadowed_by", by.clone());
+    }
+    if let Some(paths) = shadows {
+        e.note("shadows", paths.clone());
+    }
+    e.note("service", service);
+    e.note("include", lossy(stack));
+    if stack.contains(&b'/') {
+        e.target_path = Some(bpath(stack));
+    }
+    e
+}
+
 fn pam(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let module_dir = pam_module_dir(cx);
     let mut files = vec![(PathBuf::from("etc/pam.conf"), None)];
@@ -421,6 +472,9 @@ fn pam(cx: &mut Ctx, out: &mut Vec<Entry>) {
                 (filename.clone(), &toks[..])
             } else if toks.len() > 1 && pam_type(toks[1]).is_some() {
                 (lossy(toks[0]), &toks[1..])
+            } else if eqi(toks[0], "@include") && toks.len() > 1 {
+                out.push(pam_include(cx, &rel, &filename, "@include", toks[1], &shadowed_by, &shadows));
+                continue;
             } else {
                 continue;
             };
@@ -429,6 +483,13 @@ fn pam(cx: &mut Ctx, out: &mut Vec<Entry>) {
             }
             let Some(mtype) = pam_type(rule[0]) else { continue };
             let (control, module, args) = (rule[1], rule[2], &rule[3..]);
+            if eqi(control, "include") || eqi(control, "substack") {
+                // Not a module: `module` names another stack, which is read
+                // as a file of its own where it is one of the stacks.
+                let kind = format!("{mtype} {}", lossy(control).to_ascii_lowercase());
+                out.push(pam_include(cx, &rel, &service, &kind, module, &shadowed_by, &shadows));
+                continue;
+            }
 
             let base = module.rsplit(|b| *b == b'/').next().unwrap_or(module);
             let prog = if eqi(base, "pam_exec.so") {
@@ -2503,6 +2564,45 @@ mod tests {
         assert_eq!(evil.target_path, Some(PathBuf::from("/tmp/evil.so")));
         assert!(evil.command.is_none(), "a plain module has no command");
 
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_module_directory_is_the_one_libpam_names_not_the_first_that_holds_pam_permit() {
+        let d = tree("pamdir");
+        put(&d, "etc/pam.d/sshd", "auth required pam_unix.so\n");
+        // What libpam was built with, as a string among others.
+        put(&d, "usr/lib64/libpam.so.0", b"\0/etc/pam.d\0/usr/lib64/security/\0%s\0".as_slice());
+        put(&d, "usr/lib64/security/pam_unix.so", "real");
+        // A directory that comes first in the search, with a link that makes
+        // it look like a module directory and a planted module in front.
+        put(&d, "lib/x86_64-linux-gnu/security/pam_permit.so", "");
+        put(&d, "lib/x86_64-linux-gnu/security/pam_unix.so", "planted");
+        let s = scan(&d);
+        let unix = named(&s, "sshd:auth:pam_unix.so").pop().unwrap();
+        assert_eq!(unix.target_path, Some(d.join("usr/lib64/security/pam_unix.so")));
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_pam_include_names_a_stack_and_is_not_a_missing_module() {
+        let d = tree("pam-include");
+        put(
+            &d,
+            "etc/pam.d/sshd",
+            "@include common-auth\n\
+             account    include      common-account\n\
+             session    substack     /tmp/stack\n",
+        );
+        let s = scan(&d);
+        assert_eq!(s.entries.len(), 3, "got {:?}", s.entries.iter().map(|e| &e.name).collect::<Vec<_>>());
+        let bare = named(&s, "sshd:account include:common-account").pop().unwrap();
+        assert_eq!(bare.raw["include"], "common-account");
+        assert!(!bare.raw.contains_key("module_missing"), "an include is not a module");
+        assert!(bare.target_path.is_none());
+        assert_eq!(named(&s, "sshd:@include:common-auth").len(), 1);
+        let path = named(&s, "sshd:session substack:/tmp/stack").pop().unwrap();
+        assert_eq!(path.target_path, Some(PathBuf::from("/tmp/stack")));
         std::fs::remove_dir_all(&d).unwrap();
     }
 
