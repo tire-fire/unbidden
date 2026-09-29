@@ -41,9 +41,10 @@ pub struct Diffed {
 }
 
 /// Comparing two scans that did not see the same things produces fiction.
-/// A baseline taken while the rpm collector failed would report every
-/// RPM-owned entry as newly appeared, and a baseline taken unprivileged
-/// would report every root-owned one as removed.
+/// A baseline taken while enrichment could not read the rpm database would
+/// report every RPM-owned entry as Unknown where the next scan says packaged,
+/// and a baseline taken unprivileged would report every root-owned one as
+/// removed.
 pub fn comparable(baseline: &Scan, current: &Scan) -> Result<(), String> {
     if baseline.header.deep != current.header.deep {
         return Err(format!(

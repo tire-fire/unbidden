@@ -79,8 +79,8 @@ if [ "$ID" = linuxmint ]; then
 fi
 
 # --- merged /usr ---------------------------------------------------------
-# Every supported distribution ships /lib, /bin and /sbin as links into
-# /usr. A vendor unit reached through both names must be reported once, and
+# Debian, Ubuntu, Mint and Fedora ship /lib, /bin and /sbin as links into
+# /usr; Alpine does not, and the loop below skips what is not a link. A vendor unit reached through both names must be reported once, and
 # under the name the package database and an administrator use. Comparing
 # entry ids cannot catch the failure, because the id includes the path: a
 # unit reported under /lib and again under /usr/lib has two distinct ids.

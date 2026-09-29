@@ -4,19 +4,22 @@
 //!
 //! Three things make this collector different from a directory walk.
 //!
-//! The search path is walked by directory identity, not by name. On every
-//! supported distro /lib is a symlink to /usr/lib, so `lib/systemd/system` and
-//! `usr/lib/systemd/system` name one directory; walking both would give every
-//! vendor unit two ids that never reconcile in a diff.
+//! The search path is walked by directory identity, not by name. On the
+//! merged-/usr distributions (Debian, Ubuntu, Mint, Fedora) /lib is a symlink
+//! to /usr/lib, so `lib/systemd/system` and `usr/lib/systemd/system` name one
+//! directory; walking both would give every vendor unit two ids that never
+//! reconcile in a diff.
 //!
 //! Presence is not enablement (§6). Without D-Bus the answer comes from
 //! resolving the `.wants/` and `.requires/` symlink farms, which is an
 //! inference, so every unit carries DegradedEnablement to say so. The D-Bus
 //! enrichment pass overwrites both on a live host.
 //!
-//! Precedence is recorded, not resolved. A unit present in /etc and in
-//! /usr/lib is two entries plus the rank and the path of its neighbour, so
-//! enrichment can decide which shadows which; the collector does not.
+//! Precedence is recorded and the shadowing noted, and what it means is left
+//! to enrichment. A unit present in /etc and in /usr/lib is two entries; the
+//! collector orders them by search-path rank and notes on each the one it
+//! shadows or is shadowed by (`shadows`, `shadowed_by`), and enrichment turns
+//! that into a flag.
 
 use crate::entry::key;
 use crate::text::{lossy};
@@ -1612,7 +1615,7 @@ mod tests {
     fn merged_usr_reports_each_vendor_unit_once() {
         let dir = tree("merged");
         std::fs::create_dir_all(dir.join("usr/lib/systemd/system")).unwrap();
-        // What every supported distro looks like: /lib is /usr/lib.
+        // What a merged-/usr distribution looks like: /lib is /usr/lib.
         std::os::unix::fs::symlink("usr/lib", dir.join("lib")).unwrap();
         write(&dir, "usr/lib/systemd/system/vendor.service", VENDOR);
 

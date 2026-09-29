@@ -1,12 +1,15 @@
-//! Pre-systemd and boot-adjacent execution: rc.local, the SysV init scripts
-//! with their runlevel links, update-motd.d, and NetworkManager's dispatcher
-//! hooks (§5).
+//! Pre-systemd and boot-adjacent execution (§5): rc.local, the SysV init
+//! scripts with their runlevel links and OpenRC's, update-motd.d, the hooks
+//! network software runs (NetworkManager's dispatcher, ifupdown, pppd, dhclient
+//! and dhcpcd, WireGuard, OpenVPN, ifplugd, networkd-dispatcher), and crypttab
+//! keyscripts.
 //!
-//! One collector because all four are the same material — a root-owned script
-//! that some supervisor executes — and the same question is asked of each:
-//! does anything actually run it? For SysV that question is the whole job. A
-//! script in /etc/init.d runs only when an S-link in some /etc/rc?.d points at
-//! it, which is the SysV shape of the `.wants` problem systemd has, and
+//! One collector because all are the same material — a root-owned script that
+//! some supervisor executes — and the same question is asked of each: does
+//! anything actually run it? For SysV that question is the whole job. A script
+//! in /etc/init.d runs under SysV or systemd's generator only when an S-link
+//! in the /etc/rc?.d it reads points at it (OpenRC reads /etc/runlevels
+//! instead), which is the SysV shape of the `.wants` problem systemd has, and
 //! treating presence in init.d as enablement is the defect this avoids.
 
 use crate::entry::key;

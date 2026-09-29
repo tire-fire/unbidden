@@ -43,8 +43,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# The supported set of §1. A defect on any of these blocks a release, so the
-# matrix is a first-class mode rather than something a caller loops over.
+# The supported distributions of §1 that publish a cloud image. A defect on
+# any of these blocks a release, so the matrix is a first-class mode rather
+# than something a caller loops over. Mint and LMDE run in container-harness.sh
+# and Alpine in distro-check.sh.
 SUPPORTED=(debian-12 debian-13 ubuntu-22.04 ubuntu-24.04 fedora-43 fedora-44)
 
 if [ "$ALL" -eq 1 ]; then

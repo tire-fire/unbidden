@@ -141,9 +141,10 @@ fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Back
     Resolution { answers: out, failures }
 }
 
-/// Aliased paths under merged /usr. Every supported distribution ships
-/// /lib as a symlink to /usr/lib, and package databases are inconsistent
-/// about which spelling they record, so a lookup must try both.
+/// Aliased paths under merged /usr. Debian, Ubuntu, Mint and Fedora ship /lib
+/// as a symlink to /usr/lib (Alpine does not, and none of these apply), and
+/// package databases are inconsistent about which spelling they record, so a
+/// lookup must try both.
 pub fn usr_aliases(rel: &Path) -> Vec<PathBuf> {
     const ALIASED: [&str; 4] = ["bin", "sbin", "lib", "lib64"];
     let mut out = vec![rel.to_path_buf()];

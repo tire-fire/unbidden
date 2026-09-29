@@ -8,13 +8,13 @@ on:
     branches: ['**']
     tags: ['v*']
   workflow_dispatch:
-  # The PANIX loop runs on main and nightly rather than on pull requests, and
+  # The PANIX loop runs on main and nightly rather than on other branches, and
   # nightly also because a distribution image can change under an unchanged
   # tree.
   schedule:
     - cron: '17 4 * * *'
 
-# A newer push to a pull request makes its older run moot. The free plan runs
+# A newer push to a branch makes its older run moot. The free plan runs
 # twenty jobs at once, and a stale run holding them delays the current one.
 # Runs on main are never cancelled: each one may be a release.
 concurrency:
@@ -46,13 +46,13 @@ jobs:
     # §13: every parser gets a cargo-fuzz target, and §3 is why — parser input
     # is adversarial, so "it does not panic" has to be exercised rather than
     # asserted. cargo-fuzz needs nightly for its sanitizer flags, which is the
-    # one place this repository leaves the toolchain in Cargo.toml.
+    # one place this repository leaves the stable toolchain.
     #
     # It fails the run: a collector that panics is a whole mechanism class the
     # operator silently loses, and a fuzzer that cannot redden a build is
-    # decoration. On main and nightly, a minute on each of the §13 names and
-    # twenty seconds on every other parser; on a pull request ten and five, a
-    # smoke run of the smoke run, so the checks a change waits on stay short.
+    # decoration. On main and nightly, a minute on each of the parsers §13
+    # names and twenty seconds on every other; on another branch ten and five,
+    # a smoke run of the smoke run, so the checks a change waits on stay short.
     # Either catches a shallow panic; the deep ones are what a corpus and a
     # real fuzzing host are for.
     runs-on: ubuntu-latest
@@ -113,7 +113,7 @@ jobs:
     # image, in a real VM: a real boot, a real systemd, a kernel of its own.
     # It gates a release, as §1 says every supported distribution does, so it
     # runs on every push to main, on tags and nightly. It is too slow for a
-    # pull request to wait on: nine to fourteen minutes an image.
+    # branch's checks to wait on: nine to fourteen minutes an image.
     needs: static
     if: github.ref_type != 'branch' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
@@ -194,7 +194,7 @@ jobs:
     # image in the matrix below skips the enablement half of the extension
     # collector without saying so. One image per desktop boots a real
     # session instead: Mint brings Cinnamon and Debian brings GNOME, which
-    # is the pair §1 puts across the four supported distributions.
+    # is the pair §1 puts across the supported distributions.
     needs: static
     runs-on: ubuntu-latest
     strategy:
@@ -301,11 +301,10 @@ jobs:
             ${{ matrix.image }} sh -c '${{ matrix.prep }} sh ci/distro-check.sh /w/bin/unbidden'
 
   release:
-    # A push to main that touched the tool is a release. A README or workflow
-    # change is not a new version, so it is skipped rather than tagged. CI
-    # only ever adds one to the patch: a minor or major bump is chosen by
-    # editing the version in Cargo.toml, and CI then uses what it finds. A
-    # hand-pushed vX.Y.Z tag releases exactly that version.
+    # A push to main whose Cargo.toml version has no tag yet is a release. A
+    # README or workflow change that leaves the version alone releases nothing.
+    # The version is chosen by editing Cargo.toml in a signed commit; this job
+    # commits nothing. A hand-pushed vX.Y.Z tag releases exactly that version.
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref_type == 'tag')
     needs: [test, lint, fuzz, static, desktop, distros, persistence, persistence-mint]
     runs-on: ubuntu-latest
@@ -345,11 +344,11 @@ jobs:
           echo "version=$cur" >> "$GITHUB_OUTPUT"
       - name: build the binaries this release ships
         if: steps.v.outputs.skip != '1'
-        # Not the artifacts from the static job: those were built before the
-        # bump and would report the previous version to --version. Each target
-        # gets its own directory because cross runs each one in a different
-        # container, and a host build script compiled against one image's
-        # glibc will not run inside the other's.
+        # Built again here from the commit the tag will name, rather than taken
+        # from the static job, which builds and checks the same commit. Each
+        # target gets its own directory because cross runs each one in a
+        # different container, and a host build script compiled against one
+        # image's glibc will not run inside the other's.
         run: |
           cargo install cross --locked
           for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do

@@ -58,15 +58,16 @@ pub fn suppressed(e: &Entry) -> bool {
         return true;
     }
     let target_verified = e.target_verdict().is_none_or(|v| v.is_verified());
-    // nsswitch.conf is written at install time on every supported
-    // distribution, by libc-bin's postinst from a template and edited by
-    // libnss-systemd's, or rendered by authselect, and no package database
-    // records what it should hold, so the file is never packaged and intact:
-    // at best it is GeneratedBy libc-bin, a copy of its template. A module is
-    // judged by the library glibc loads for it instead: hidden when that is
-    // packaged and intact, or when there is none and glibc skips the name,
-    // and never when it follows a `#` a person reads as a comment. An
-    // unpackaged or modified library shows through target_provenance.
+    // nsswitch.conf is written at install time, by libc-bin's postinst from a
+    // template on Debian and edited by libnss-systemd's, or rendered by
+    // authselect on Fedora, and no package database records what it should
+    // hold, so the file is never packaged and intact. Unedited, it is a
+    // byte-for-byte copy of libc-bin's template and Reproduced (§7), which is
+    // verified above; edited or rendered it is not, and a module is judged by
+    // the library glibc loads for it instead: hidden when that is packaged
+    // and intact, or when there is none and glibc skips the name, and never
+    // when it follows a `#` a person reads as a comment. An unpackaged or
+    // modified library shows through target_provenance.
     if e.kind == Kind::NssModule && !e.provenance.is_verified() {
         let source_only = e.flags.iter().all(|f| matches!(f, Flag::DegradedEnablement | Flag::Unpackaged));
         return source_only && target_verified && !e.raw.contains_key(key::AFTER_HASH);

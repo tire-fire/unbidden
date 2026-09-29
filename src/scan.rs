@@ -21,7 +21,8 @@ use crate::users::{self, User};
 pub trait Collector: Sync {
     fn name(&self) -> &'static str;
 
-    /// True for the three collectors that need a whole-filesystem traversal.
+    /// True for the collectors that walk the whole filesystem or every package
+    /// manifest, which a plain scan skips and records as skipped.
     fn deep_only(&self) -> bool {
         false
     }
@@ -321,8 +322,9 @@ fn is_sticky(mode: u32) -> bool {
 #[serde(tag = "status", rename_all = "kebab-case")]
 pub enum Status {
     Complete,
-    /// Ran, but could not read everything it needed. A baseline taken this
-    /// way is not comparable with one that was complete.
+    /// Ran, but could not read everything it needed. A diff against a scan
+    /// that read more trusts this collector's differences only as far as both
+    /// saw the same things (`diff::compare`).
     Partial { unreadable: Vec<String> },
     Skipped { reason: String },
     Failed { error: String },
