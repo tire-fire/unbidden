@@ -19,7 +19,11 @@ use crate::pyyaml::{Event, Parser};
 /// frames count against the same limit. A lower bound would refuse a file
 /// cloud-init loads, and every command in it would go unread.
 pub const MAX_DEPTH: usize = 512;
-pub const MAX_NODES: usize = 100_000;
+/// A node takes at least two bytes of text (`a,`), so this is the most a file
+/// the collectors read whole can hold, and PyYAML loads it: a budget below
+/// that would refuse a file cloud-init loads and leave every command in it
+/// unread. What an alias copies is charged against it too.
+pub const MAX_NODES: usize = crate::root::READ_CAP / 2 + 16;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -758,6 +762,18 @@ mod tests {
             let _ = parse(text);
         }
         assert!(parse("a: !!int \"0x\u{20ac}1\"").is_err());
+    }
+
+    #[test]
+    fn every_file_the_collectors_read_whole_fits_the_budget() {
+        // Two bytes a node, the densest text there is, up to the read cap.
+        let items = (crate::root::READ_CAP - 16) / 2;
+        let doc = format!("[{}]", "a,".repeat(items));
+        assert!(doc.len() <= crate::root::READ_CAP);
+        match parse(&doc) {
+            Ok(Some(Value::Seq(v))) => assert_eq!(v.len(), items),
+            other => panic!("refused a file within the read cap: {:?}", other.err()),
+        }
     }
 
     #[test]
