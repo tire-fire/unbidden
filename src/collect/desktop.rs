@@ -748,12 +748,40 @@ fn read_gvdb(cx: &mut Ctx, rel: &Path) -> Option<Gvdb<'static>> {
         return None;
     }
     match Gvdb::from_bytes(Cow::Owned(bytes)) {
-        Ok(f) => Some(f),
+        Ok(f) if file_is_safe_to_query(&f) => Some(f),
+        Ok(_) => {
+            cx.note_limited(format!("{}: a dconf database whose parent links loop, not parsed", rel.display()));
+            None
+        }
         Err(e) => {
             cx.note_limited(format!("{}: not a readable dconf database ({e}), not parsed", rel.display()));
             None
         }
     }
+}
+
+/// Whether a lookup in this database is bounded. `gvdb` resolves a key by
+/// following parent links recursively with no limit: an item whose parent is
+/// itself, under an empty key, recurses until the stack overflows, which
+/// ends the whole process and takes the scan's output with it (§3), and the
+/// user's own database is theirs to write. Its `keys()` bounds every parent
+/// chain by the item count and reports a loop, so every table a lookup can
+/// reach — the root, `.locks`, a schema's — is walked that way first.
+fn file_is_safe_to_query(file: &Gvdb<'static>) -> bool {
+    file.hash_table().is_ok_and(|root| table_is_safe_to_query(&root, 0))
+}
+
+fn table_is_safe_to_query(table: &gvdb::read::HashTable<'_, '_>, depth: usize) -> bool {
+    // dconf nests one level, schemas two; a deeper table is not a dconf one.
+    if depth > 4 {
+        return false;
+    }
+    let Ok(keys) = table.keys().collect::<Result<Vec<_>, _>>() else { return false };
+    keys.iter().all(|key| match table.get_hash_table(key) {
+        Ok(inner) => table_is_safe_to_query(&inner, depth + 1),
+        // Not a table: a value, or a path component.
+        Err(_) => true,
+    })
 }
 
 fn dconf_stack(cx: &mut Ctx, u: &User) -> Stack {
@@ -1098,6 +1126,52 @@ mod tests {
         let mut root = HashTableBuilder::with_path_separator(None);
         root.insert_table(schema, inner).unwrap();
         FileWriter::new().write_to_vec_with_table(root).unwrap()
+    }
+
+    /// A database with one item whose parent is itself and whose key is
+    /// empty, under the hash of the very key the collector looks up.
+    fn looping_db() -> Vec<u8> {
+        let key = "/org/gnome/shell/enabled-extensions";
+        let mut data = dconf_db(&[(key, &["x@y.z"])], &[], &[]);
+        let leaf = {
+            let file = Gvdb::from_bytes(Cow::Owned(data.clone())).unwrap();
+            let table = file.hash_table().unwrap();
+            table.keys().position(|k| k.is_ok_and(|k| k == key)).expect("the leaf is an item of the table")
+        };
+        let u32_at = |d: &[u8], at: usize| u32::from_le_bytes(d[at..at + 4].try_into().unwrap()) as usize;
+        // File header: "GVariant", version, options, then the root pointer.
+        let root = u32_at(&data, 16);
+        // Table header, 8 bytes: the bloom shift over the bloom word count
+        // (27 bits), then the bucket count; then the words, the buckets, and
+        // 24-byte items.
+        let (bloom, buckets) = (u32_at(&data, root) & 0x07ff_ffff, u32_at(&data, root + 4));
+        let item = root + 8 + 4 * bloom + 4 * buckets + 24 * leaf;
+        data[item + 4..item + 8].copy_from_slice(&(leaf as u32).to_le_bytes());
+        data[item + 12..item + 14].copy_from_slice(&0u16.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn a_database_whose_parent_links_loop_is_not_queried() {
+        let good = dconf_db(&[("/org/gnome/shell/enabled-extensions", &["x@y.z"])], &[], &["/org/gnome/shell/enabled-extensions"]);
+        assert!(file_is_safe_to_query(&Gvdb::from_bytes(Cow::Owned(good)).unwrap()), "a real database, .locks included");
+        let looping = Gvdb::from_bytes(Cow::Owned(looping_db())).unwrap();
+        assert!(!file_is_safe_to_query(&looping));
+        let schemas = schemas_db("org.gnome.shell", "/org/gnome/shell/", &[("enabled-extensions", &["a"])]);
+        assert!(file_is_safe_to_query(&Gvdb::from_bytes(Cow::Owned(schemas)).unwrap()), "a schema's nested tables");
+    }
+
+    #[test]
+    fn a_looping_user_database_costs_the_scan_nothing_but_a_limit() {
+        // Queried, this file overflowed the stack and killed the process.
+        let d = tree("gvdb-loop");
+        put(&d, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/sh\n");
+        put(&d, "home/alice/.config/dconf/user", &looping_db());
+        extension(&d, "home/alice/.local/share/gnome-shell/extensions", "x@y.z", "extension.js");
+        let (entries, status) = run(&d);
+        assert!(matches!(status, Status::Complete), "{status:?}");
+        assert!(entries.iter().any(|e| e.name.contains("x@y.z")), "the extension is still reported");
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     fn extension(dir: &Path, base: &str, uuid: &str, file: &str) {
