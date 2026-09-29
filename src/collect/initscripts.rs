@@ -993,7 +993,7 @@ fn dispatcher(cx: &mut Ctx) -> Vec<Entry> {
             if let Some(why) = nm_name_refused(ent.name.as_bytes()) {
                 refused.push(why);
             } else if !first_of.insert((phase.clone(), ent.name.as_bytes().to_vec())) {
-                refused.push("a script of the same name in an earlier directory is run instead");
+                refused.push("masked by a script of the same name in an earlier directory");
             }
             e.enabled = if exec && refused.is_empty() {
                 Enablement::Enabled
@@ -1010,26 +1010,33 @@ fn dispatcher(cx: &mut Ctx) -> Vec<Entry> {
 }
 
 /// The names nm-dispatcher passes over: a hidden file, an editor backup, and a
-/// package manager's leftover copy. The suffixes are the ones in its binary.
+/// package manager's leftover copy. The suffixes are the ones in its binary
+/// (`~`, `.rpmsave`, `.rpmorig`, `.rpmnew`, `.swp`), and a name whose last dot
+/// begins `.dpkg-` is refused whatever follows; `10-x.dpkg-old.sh` runs.
 fn nm_name_refused(name: &[u8]) -> Option<&'static str> {
+    let last_dot = name.iter().rposition(|b| *b == b'.').map(|n| &name[n..]);
     let backup = name.first() == Some(&b'.')
         || name.ends_with(b"~")
-        || [&b".rpmsave"[..], b".rpmorig", b".rpmnew"].iter().any(|s| name.ends_with(s))
-        || name.windows(6).any(|w| w == b".dpkg-");
+        || [&b".rpmsave"[..], b".rpmorig", b".rpmnew", b".swp"].iter().any(|s| name.ends_with(s))
+        || last_dot.is_some_and(|tail| tail.starts_with(b".dpkg-"));
     backup.then_some("a hidden, backup or package-manager copy")
 }
 
-/// NetworkManager refuses to run a dispatcher script it does not trust: not a
-/// regular file, not owned by root, writable by group or other, or set-UID
-/// (the messages nm-dispatcher gives for each). The caller adds that it must
-/// be executable by its owner. A script that fails one is present and inert,
-/// and reporting it as enabled would be a lie in the operator's favour.
+/// NetworkManager refuses to run a dispatcher script it does not trust: not
+/// owned by root, writable by group or other or set-UID, or not executable by
+/// its owner (the three messages in nm-dispatcher's binary). It skips without
+/// a word a script that is not a regular file, is empty, or is a link to
+/// /dev/null. The caller adds the execute bit. A script that fails any is
+/// present and inert, and reporting it as enabled would be a lie in the
+/// operator's favour.
 fn nm_refusal(cx: &Ctx, rel: &Path) -> Vec<&'static str> {
     let mut why = Vec::new();
     match cx.root.stat_follow(rel) {
         Ok(m) => {
             if !m.is_file {
                 why.push("not a regular file");
+            } else if m.size == 0 {
+                why.push("empty");
             }
             if m.uid != 0 {
                 why.push("not owned by root");
@@ -1836,9 +1843,11 @@ exec /usr/sbin/sshd\n";
         put(&dir, &format!("{etc}/10-local"), b"#!/bin/sh\n", 0o755);
         put(&dir, &format!("{vendor}/10-local"), b"#!/bin/sh\n", 0o755);
         put(&dir, &format!("{vendor}/20-only-vendor"), b"#!/bin/sh\n", 0o755);
-        for backup in [".hidden", "30-x~", "30-x.rpmsave", "30-x.dpkg-old"] {
+        for backup in [".hidden", "30-x~", "30-x.rpmsave", "30-x.swp", "30-x.dpkg-old"] {
             put(&dir, &format!("{etc}/{backup}"), b"#!/bin/sh\n", 0o755);
         }
+        // Only a last dot that begins `.dpkg-` marks a leftover.
+        put(&dir, &format!("{etc}/40-x.dpkg-old.sh"), b"#!/bin/sh\n", 0o755);
         let s = scan(&dir);
         let scripts = of_kind(&s, Kind::NetworkDispatcher);
         // The fixture is not root's, so nothing is Enabled here: what each says
@@ -1851,11 +1860,12 @@ exec /usr/sbin/sshd\n";
                 .unwrap_or_default()
         };
         assert!(!refused("10-local", etc).contains("earlier directory"));
-        assert!(refused("10-local", vendor).contains("same name in an earlier directory"), "the /etc copy is run instead");
+        assert!(refused("10-local", vendor).contains("same name in an earlier directory"), "the /etc copy masks it");
         assert!(!refused("20-only-vendor", vendor).contains("earlier directory"));
-        for backup in [".hidden", "30-x~", "30-x.rpmsave", "30-x.dpkg-old"] {
+        for backup in [".hidden", "30-x~", "30-x.rpmsave", "30-x.swp", "30-x.dpkg-old"] {
             assert!(refused(backup, etc).contains("backup or package-manager copy"), "{backup}");
         }
+        assert!(!refused("40-x.dpkg-old.sh", etc).contains("backup"), "NetworkManager looks at the last dot only");
         fs::remove_dir_all(&dir).unwrap();
     }
 

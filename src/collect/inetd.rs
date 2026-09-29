@@ -62,6 +62,10 @@ struct Xinetd {
     enabled: Option<Vec<String>>,
     /// `defaults { disabled = ... }`: ids that do not run.
     disabled: Vec<String>,
+    /// Files already read. A file that includes its own directory would
+    /// otherwise be read once per path to it, which is exponential in the
+    /// number of such files.
+    read: std::collections::BTreeSet<PathBuf>,
 }
 
 /// xinetd.conf as xinetd 2.3.15 reads it (parse.c, includedir.c): `defaults`
@@ -104,7 +108,7 @@ fn xinetd(cx: &mut Ctx, out: &mut Vec<Entry>) {
 }
 
 fn xinetd_file(cx: &mut Ctx, rel: &Path, depth: usize, conf: &mut Xinetd) {
-    if depth > MAX_DEPTH {
+    if depth > MAX_DEPTH || !conf.read.insert(rel.to_path_buf()) {
         return;
     }
     let Some(bytes) = cx.read_capped(rel, FILE_CAP) else { return };
@@ -366,6 +370,23 @@ mod tests {
             "# a comment\nservice {name}\n{{\n\tsocket_type = stream\n\tprotocol = tcp\n\twait = no\n\tuser = root\n\tserver = {server}\n{extra}}}\n"
         )
         .into_bytes()
+    }
+
+    #[test]
+    fn files_that_include_their_own_directory_are_read_once() {
+        let dir = crate::testing::Tree::new("xinetd-fan");
+        std::fs::create_dir_all(dir.join("etc/xinetd.d")).unwrap();
+        std::fs::create_dir_all(dir.join("usr/sbin")).unwrap();
+        std::fs::write(dir.join("usr/sbin/xinetd"), "").unwrap();
+        std::fs::write(dir.join("etc/xinetd.conf"), "includedir /etc/xinetd.d\n").unwrap();
+        for k in 0..12 {
+            let body = format!("includedir /etc/xinetd.d\nservice s{k}\n{{\n\tserver = /opt/s{k}\n}}\n");
+            std::fs::write(dir.join(format!("etc/xinetd.d/f{k}")), body).unwrap();
+        }
+        let started = std::time::Instant::now();
+        let s = scan(&dir);
+        assert!(started.elapsed().as_secs() < 5, "the include fan-out is bounded");
+        assert_eq!(s.entries.iter().filter(|e| e.kind == Kind::InetdService).count(), 12);
     }
 
     #[test]

@@ -213,11 +213,12 @@ pub(crate) fn run_parts_dir(cx: &mut Ctx, flavour: RunParts, dir: &Path) -> Vec<
 /// what the real binary ran over a table of names: a lower-case letter or
 /// digit then any of those, `_` and `-`; or hyphen-separated parts of
 /// lower-case letters, digits, `_` and `.`, the last of only letters and
-/// digits. Whatever the rule, names with a `.dpkg-` in them, a `~`, or a
-/// package-manager or editor suffix are dropped first.
+/// digits. Names ending `.dpkg-old`, `.dpkg-dist`, `.dpkg-new` or `.dpkg-tmp`
+/// are dropped first, and only those: `a.dpkg-bak` and `a.dpkg-old-y` run.
+/// Every other package-manager or editor leftover already fails the rule.
 fn lsb_name(name: &[u8]) -> bool {
-    const SKIP_SUFFIX: [&[u8]; 6] = [b"~", b".rpmsave", b".rpmorig", b".rpmnew", b".swp", b",v"];
-    if name.windows(6).any(|w| w == b".dpkg-") || SKIP_SUFFIX.iter().any(|s| name.ends_with(s)) || name.ends_with(b".cfsaved") {
+    const DPKG_LEFTOVERS: [&[u8]; 4] = [b".dpkg-old", b".dpkg-dist", b".dpkg-new", b".dpkg-tmp"];
+    if DPKG_LEFTOVERS.iter().any(|s| name.ends_with(s)) {
         return false;
     }
     let lower = |b: &u8| b.is_ascii_lowercase() || b.is_ascii_digit();
@@ -240,13 +241,15 @@ fn lsb_name(name: &[u8]) -> bool {
 /// Each directory comes with the file that first named it.
 pub(crate) fn ld_so_conf_dirs(cx: &mut Ctx) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
-    ld_so_conf(cx, Path::new("etc/ld.so.conf"), 0, &mut out);
+    ld_so_conf(cx, Path::new("etc/ld.so.conf"), 0, &mut out, &mut BTreeSet::new());
     out
 }
 
-fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(String, PathBuf)>) {
-    // An include loop ends here rather than in the stack.
-    if depth > 8 {
+fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(String, PathBuf)>, read: &mut BTreeSet<PathBuf>) {
+    // An include loop ends here rather than in the stack, and a file is read
+    // once however many includes reach it: files that each include the same
+    // glob would otherwise be read once per path, exponentially many times.
+    if depth > 8 || !read.insert(rel.to_path_buf()) {
         return;
     }
     let Some(bytes) = cx.read_capped(rel, 64 * 1024) else { return };
@@ -260,7 +263,7 @@ fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(String, Pat
         if word == b"include" && !rest.is_empty() {
             for pat in rest.split(u8::is_ascii_whitespace).filter(|p| !p.is_empty()) {
                 for f in expand_glob(cx, &include_rel(&base, pat)) {
-                    ld_so_conf(cx, &f, depth + 1, out);
+                    ld_so_conf(cx, &f, depth + 1, out, read);
                 }
             }
             continue;
@@ -344,8 +347,8 @@ mod tests {
     /// is listed as that binary answered.
     #[test]
     fn the_lsb_name_rule_matches_what_run_parts_did() {
-        let accepted = "00-header 10-help-text 10-x.y-z 1-a 1_-a a a- a-1 a_1-b_2 a1-b2 _a-b a--b a-b a_b ab1 _a.b-c a.b-c a_b-c a-b-c-d a-b.c-d";
-        let rejected = "A _a a-B a.b a-b.c -a 10-x. 50-landscape-sysinfo.sh x.dpkg-old x~ A-b .a";
+        let accepted = "00-header 10-help-text 10-x.y-z 1-a 1_-a a a- a-1 a_1-b_2 a1-b2 _a-b a--b a-b a_b ab1 _a.b-c a.b-c a_b-c a-b-c-d a-b.c-d a.dpkg-bak a.dpkg-old-y x.dpkg-oldx";
+        let rejected = "A _a a-B a.b a-b.c -a 10-x. 50-landscape-sysinfo.sh x.dpkg-old a.dpkg-dist a.dpkg-new a.dpkg-tmp 10-a.dpkg-old x~ A-b .a";
         for n in accepted.split(' ') {
             assert!(lsb_name(n.as_bytes()), "{n} is run");
         }

@@ -1308,6 +1308,20 @@ mod tests {
     }
 
     #[test]
+    fn ld_so_conf_files_that_include_the_same_glob_are_read_once() {
+        let dir = tmpdir("ldconf-fan");
+        fs::create_dir_all(dir.join("etc/ld.so.conf.d")).unwrap();
+        fs::write(dir.join("etc/ld.so.conf"), "include /etc/ld.so.conf.d/*.conf\n").unwrap();
+        for k in 0..12 {
+            fs::write(dir.join(format!("etc/ld.so.conf.d/f{k}.conf")), format!("include /etc/ld.so.conf.d/*.conf\n/opt/l{k}\n")).unwrap();
+        }
+        let started = std::time::Instant::now();
+        let scan = run(&dir);
+        assert!(started.elapsed().as_secs() < 5, "the include fan-out is bounded");
+        assert_eq!(scan.entries.iter().filter(|e| e.kind == Kind::LibraryDir).count(), 12);
+    }
+
+    #[test]
     fn preload_is_a_leftover_where_only_musl_is_the_loader() {
         let dir = tmpdir("preload-musl");
         fs::create_dir_all(dir.join("lib")).unwrap();

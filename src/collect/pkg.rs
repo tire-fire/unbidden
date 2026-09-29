@@ -313,14 +313,18 @@ const APT_CONF_D: &str = "etc/apt/apt.conf.d";
 /// prefix is stripped, since a hook may be scoped to one front-end.
 ///
 /// `runs_program` adds the keys that name a program apt runs without a shell.
-/// Nothing else under apt.conf.d executes: the `APT::Get` options change
-/// behaviour but never spawn anything, and `etc/apt/preferences.d` is pin
-/// priorities only, so no entry is emitted for it.
+/// The list was measured on apt 3.0 by giving every candidate key a command
+/// that touches a file and running install, update, remove and clean: the
+/// keys below ran, and `APT::Clean::*` and `DPkg::Post-Invoke-Success` did
+/// not. `APT::Get` options change behaviour but never spawn anything, and
+/// `etc/apt/preferences.d` is pin priorities only, so no entry is emitted for
+/// them. A key this list lacks is a gap to measure, not a claim that none exists.
 const HOOK_KEYS: &[&str] = &[
     "dpkg::pre-invoke",
     "dpkg::post-invoke",
-    "dpkg::post-invoke-success",
     "dpkg::pre-install-pkgs",
+    "apt::install::pre-invoke",
+    "apt::install::post-invoke-success",
     "apt::update::pre-invoke",
     "apt::update::post-invoke",
     "apt::update::post-invoke-success",
@@ -400,8 +404,13 @@ fn apt(cx: &mut Ctx) -> Vec<Entry> {
             }
             out.push(e);
         }
-        for (key, value) in apt_conf_pairs(&bytes) {
+        for AptPair { key, value, scalar } in apt_conf_pairs(&bytes) {
             let Some((binary, canon)) = hook_of(&key) else { continue };
+            // The hook options are lists and apt reads their entries: a bare
+            // `Key "cmd";` sets the option's own value, which nothing reads
+            // (measured on apt 3.0: it never runs, `Key:: "cmd";` and a block
+            // do). It is still evidence of an attempt, so it is reported off.
+            let inert = scalar && HOOK_KEYS.contains(&canon.as_str());
             let name = format!("{canon}:{}", short_hash(&value));
             let mut e = cx.entry(Kind::PkgHook, &rel, name);
             e.trigger = Trigger::PackageOp;
@@ -409,8 +418,12 @@ fn apt(cx: &mut Ctx) -> Vec<Entry> {
             e.principal = Some("root".to_string());
             e.enabled = match &skipped {
                 Some(_) => Enablement::Disabled,
+                None if inert => Enablement::Disabled,
                 None => Enablement::Enabled,
             };
+            if inert {
+                e.note("not_run", "assigned as a scalar; apt runs the entries of a hook list, not its own value");
+            }
             e.note("manager", "apt");
             // The canonical key, not the spelling in the file: apt accepts the
             // same hook written as a nested block or flattened with `::`, and
@@ -550,20 +563,28 @@ fn apt_tokens(bytes: &[u8]) -> Vec<Tok> {
 /// Flattens an apt.conf into `(key, value)` pairs, where the key is the full
 /// `::`-joined path to the value.
 ///
-/// The two spellings apt accepts collapse here:
-/// `DPkg { Post-Invoke { "cmd"; }; };` and `DPkg::Post-Invoke {"cmd";};`
-/// both yield `("DPkg::Post-Invoke", "cmd")`. A stray `}` pops nothing rather
+/// The spellings that add a list entry collapse here:
+/// `DPkg { Post-Invoke { "cmd"; }; };`, `DPkg::Post-Invoke {"cmd";};` and
+/// `DPkg::Post-Invoke:: "cmd";` all yield `("DPkg::Post-Invoke", "cmd")`. A
+/// bare `DPkg::Post-Invoke "cmd";` yields the same pair marked `scalar`,
+/// because it sets the option's own value instead. A stray `}` pops nothing rather
 /// than failing, and a `{` never closed simply leaves the stack deep — an
 /// unbalanced file yields whatever it can, because a file apt itself would
 /// reject is still evidence of what someone tried to install.
-fn apt_conf_pairs(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+struct AptPair {
+    key: String,
+    value: Vec<u8>,
+    scalar: bool,
+}
+
+fn apt_conf_pairs(bytes: &[u8]) -> Vec<AptPair> {
     let mut out = Vec::new();
     let mut stack: Vec<String> = Vec::new();
     let mut tag: Option<Vec<u8>> = None;
     for tok in apt_tokens(bytes) {
         match tok {
             Tok::Word(w) => match tag.take() {
-                Some(t) => out.push((key_of(&stack, Some(&t)), w)),
+                Some(t) => out.push(AptPair { key: key_of(&stack, Some(&t)), value: w, scalar: !t.ends_with(b"::") }),
                 None => tag = Some(w),
             },
             Tok::Open => {
@@ -574,13 +595,13 @@ fn apt_conf_pairs(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
             // is the block that holds it.
             Tok::Close => {
                 if let Some(t) = tag.take() {
-                    out.push((key_of(&stack, None), t));
+                    out.push(AptPair { key: key_of(&stack, None), value: t, scalar: false });
                 }
                 stack.pop();
             }
             Tok::Semi => {
                 if let Some(t) = tag.take() {
-                    out.push((key_of(&stack, None), t));
+                    out.push(AptPair { key: key_of(&stack, None), value: t, scalar: false });
                 }
             }
         }
@@ -1616,8 +1637,8 @@ mod tests {
         let second = shape(one(&s, |e| e.kind == Kind::PkgHook));
         assert_eq!(first, second, "one hook, two spellings, two different entries");
 
-        // And the third spelling: a bare assignment with no block at all.
-        put(&dir, "etc/apt/apt.conf.d/50hooks", br#"DPkg::Post-Invoke "/usr/bin/touch /var/lib/x";"#);
+        // And the third spelling: a list entry appended with `::`.
+        put(&dir, "etc/apt/apt.conf.d/50hooks", br#"DPkg::Post-Invoke:: "/usr/bin/touch /var/lib/x";"#);
         let s = scan(&dir);
         assert_eq!(shape(one(&s, |e| e.kind == Kind::PkgHook)), first);
 
@@ -1627,6 +1648,13 @@ mod tests {
         assert_eq!(e.enabled, Enablement::Enabled);
         assert_eq!(e.raw.get("key").map(String::as_str), Some("dpkg::post-invoke"));
         assert_eq!(e.target_path, Some(PathBuf::from("/usr/bin/touch")));
+
+        // A bare assignment sets the option's own value, which apt never runs.
+        put(&dir, "etc/apt/apt.conf.d/50hooks", br#"DPkg::Post-Invoke "/usr/bin/touch /var/lib/x";"#);
+        let s = scan(&dir);
+        let e = one(&s, |e| e.kind == Kind::PkgHook);
+        assert_eq!(e.enabled, Enablement::Disabled);
+        assert!(e.raw["not_run"].contains("scalar"));
         fs::remove_dir_all(&dir).unwrap();
     }
 
