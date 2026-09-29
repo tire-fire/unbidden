@@ -439,9 +439,10 @@ impl Root {
         Ok(PathBuf::from(OsStr::from_bytes(target.as_bytes()).to_os_string()))
     }
 
-    /// Directory listing, links reported but never followed. Missing
-    /// directories are an empty listing rather than an error: most search
-    /// paths are absent on most hosts, and that is not a collector failure.
+    /// Directory listing, in name order, links reported but never followed. A
+    /// missing directory is an error here (`NotFound`); `read_dir_optional`
+    /// turns it into an empty listing for the many search paths that are
+    /// absent on most hosts, which is not a collector failure.
     pub fn read_dir(&self, rel: impl AsRef<Path>) -> io::Result<Vec<DirEnt>> {
         let rel = rel.as_ref();
         let fd = self.open_under(self.confinement(rel), rel, OFlags::RDONLY | OFlags::DIRECTORY)?;

@@ -1,10 +1,12 @@
-//! Authentication-path persistence: PAM stacks, SSH login material, sudoers.
+//! Authentication-path persistence: PAM stacks and namespace setup, NSS
+//! modules, sshd and ssh client configuration and login material, sudoers and
+//! sudo's plugins, doas, and group membership.
 //!
-//! Three mechanism classes in one collector because they share their source
-//! material's shape: line-oriented text read at credential time. Every parser
-//! here works over bytes and converts to String only at the field boundary, so
-//! a rule carrying invalid UTF-8 survives as evidence rather than becoming
-//! replacement characters.
+//! One collector because they share their source material's shape:
+//! line-oriented text read at credential time. The parsers work over bytes and
+//! convert to String at the field boundary (the account databases, which are
+//! read as text, are the exception), so a rule carrying invalid UTF-8 survives
+//! as evidence rather than becoming replacement characters.
 
 use crate::entry::key;
 use crate::text::{Padding, base64_decode, base64_encode_unpadded, lossy, short_hash};
@@ -1062,8 +1064,11 @@ fn sshd_kv(line: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((keyword, &line[i..]))
 }
 
-/// An include path resolved root-relative: absolute means relative to the scan
-/// root, bare means relative to `base`.
+/// Reads one sshd_config file, each keyword that runs or moves something an
+/// entry, and follows an `Include` to `depth` levels. `live` says whether an
+/// Include reaches the file: one that none does is reported off, and neither
+/// follows its own Includes nor answers where keys are kept. `seen` stops a
+/// file being read twice and `keys` gathers AuthorizedKeysFile.
 fn sshd_config_file(
     cx: &mut Ctx,
     out: &mut Vec<Entry>,
@@ -1161,8 +1166,9 @@ fn sshd_config_file(
         flag_non_utf8(&mut e, line);
         out.push(e);
 
-        // ponytail: Include is followed exactly one level; a second level
-        // needs a cycle guard and a depth budget nobody has asked for.
+        // ponytail: Include is followed exactly one level, the depth passed
+        // in, because nesting them is rare in sshd_config. `seen` already
+        // stops a repeat, so following more is a change to that number.
         if canonical == "Include" && depth > 0 && live {
             let here = current.clone();
             for spec in words(value) {

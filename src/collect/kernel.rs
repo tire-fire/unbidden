@@ -1,8 +1,11 @@
-//! udev rules and kernel modules.
+//! What the kernel and udev run or load: udev rules, kernel modules (what is
+//! loaded, /etc/modules, modules-load.d, modprobe.d), the programs the kernel
+//! itself runs (sysctl.d's `kernel.core_pattern` and its kin, binfmt_misc
+//! handlers, request-key.conf).
 //!
-//! One collector, because the two formats share a reader: both are line-based
-//! and both are read from a search path whose merged-usr aliases must collapse to a single directory
-//! before anything is emitted (§5).
+//! One collector, because these formats share a reader: all are line-based
+//! and read from a search path whose merged-usr aliases must collapse to a
+//! single directory before anything is emitted (§5).
 
 use crate::entry::key;
 use crate::collect::first_absolute;
@@ -157,9 +160,10 @@ fn sysctl_callouts(cx: &mut Ctx) -> Vec<Entry> {
 /// binfmt_misc: the kernel runs a handler's interpreter for every file whose
 /// header or extension matches. From binfmt.d, one `:name:type:offset:
 /// magic:mask:interpreter:flags` line per handler, the first character being
-/// the delimiter; and on a live root, what is registered now. Flags C and O
-/// hand the interpreter the file's own credentials, which on a setuid file
-/// are root's.
+/// the delimiter; and on a live root, what is registered now. Flag C hands
+/// the interpreter the file's own credentials, which on a setuid file are
+/// root's (and implies O, which passes the interpreter an open descriptor to
+/// the file and no credentials).
 fn binfmt_handlers(cx: &mut Ctx) -> Vec<Entry> {
     let mut out = Vec::new();
     for (rel, shadowed_by) in super::replaceable(cx, &BINFMT_DIRS, ".conf") {
@@ -214,8 +218,8 @@ fn binfmt_entry(cx: &mut Ctx, rel: &Path, name: String, interpreter: &[u8], flag
     }
     let flags = lossy(flags).trim().to_string();
     if !flags.is_empty() {
-        if flags.contains(['C', 'O']) {
-            e.note("credentials", "the matched file's (flag C or O)");
+        if flags.contains('C') {
+            e.note("credentials", "the matched file's (flag C)");
         }
         e.note("flags", flags);
     }
@@ -1192,7 +1196,7 @@ mod tests {
         put(
             &dir,
             "etc/binfmt.d/evil.conf",
-            b"# comment\n:evil:M::\\x7fELF::/opt/interp:OC\n,ext,E,,xyz,,/opt/xyz,\n",
+            b"# comment\n:evil:M::\\x7fELF::/opt/interp:OC\n,ext,E,,xyz,,/opt/xyz,\n:fdonly:E::abc::/opt/fd:O\n",
         );
         put(&dir, "etc/request-key.d/evil.conf", b"create user debug:* * /opt/rk %k %d\n");
         let s = scan(&dir);
@@ -1217,6 +1221,10 @@ mod tests {
         assert_eq!(evil.target_path, Some(PathBuf::from("/opt/interp")));
         assert_eq!(evil.raw["flags"], "OC");
         assert!(evil.raw.contains_key("credentials"));
+        assert!(!named("binfmt.d/evil.conf", "ext").raw.contains_key("credentials"), "no C, no credentials");
+        let fd_only = named("binfmt.d/evil.conf", "fdonly");
+        assert_eq!(fd_only.raw["flags"], "O");
+        assert!(!fd_only.raw.contains_key("credentials"), "O passes a descriptor, not the file's credentials");
         assert_eq!(named("binfmt.d/evil.conf", "ext").raw["match"], "extension", "any first character delimits");
 
         let rk = named("request-key.d/evil.conf", "create user debug:*");

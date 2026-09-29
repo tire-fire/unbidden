@@ -202,9 +202,10 @@ enum PresetMatch {
     Template,
 }
 
-/// systemd.preset(5): the files of the vendor directories in name order,
-/// the first line whose glob matches deciding; `enable` for the instance
-/// itself, or for its template, is a yes. The administrator's directories
+/// systemd.preset(5): the files of the vendor directories in name order, the
+/// first `enable` or `disable` line whose glob matches deciding (a line with
+/// any other verb is not read); `enable` for the instance itself, or for its
+/// template, is a yes. The administrator's directories
 /// are not read: a preset there is a file no package wrote.
 fn preset_verdict(root: &Root, unit: &str, template: &str) -> Option<PresetMatch> {
     let mut files: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();

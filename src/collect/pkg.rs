@@ -605,8 +605,8 @@ fn key_of(stack: &[String], tag: Option<&[u8]>) -> String {
 const DPKG_INFO: &str = "var/lib/dpkg/info";
 
 /// The maintainer scripts dpkg runs around a package operation. `.config` is
-/// debconf's and runs too, but only under debconf's own frontend; it is left
-/// to the enrichment pass rather than guessed at here.
+/// debconf's and runs too, but only under debconf's own frontend; it is not
+/// reported.
 const MAINTAINER_SCRIPTS: &[&str] = &["preinst", "postinst", "prerm", "postrm"];
 
 /// Every maintainer script on the host, several hundred of them, all packaged.
@@ -1503,8 +1503,10 @@ fn distinct_dirs(cx: &mut Ctx, candidates: &[&'static str]) -> Vec<&'static str>
     cx.distinct_dirs(listed).into_iter().map(|(rank, _, _)| candidates[rank]).collect()
 }
 
-/// Fills in everything derived from a command line at once, so no caller can
-/// set the command and forget the encoding flag or the environment notes.
+/// Fills in what a collector derives from a command line at once, so no
+/// caller can set the command and forget the target or the encoding flag.
+/// The environment it hands its program is read in enrichment, from every
+/// entry's command alike.
 fn set_command(e: &mut Entry, bytes: &[u8]) {
     e.command = Some(bytes.to_vec());
     e.target_path = first_absolute(bytes);

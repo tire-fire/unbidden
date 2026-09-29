@@ -18,7 +18,8 @@ use crate::scan::{Collector, Ctx};
 pub struct Logrotate;
 
 const CAP: usize = 256 * 1024;
-/// include nests; a loop ends here.
+/// How deep `include` may nest. A loop is ended by the set of files already
+/// read; this bounds the nesting of a chain that is not one.
 const MAX_DEPTH: usize = 8;
 const SCRIPTS: [&str; 5] = ["prerotate", "postrotate", "firstaction", "lastaction", "preremove"];
 /// logrotate's default taboo extensions; `.rhn-cfg-tmp-*` is a pattern.

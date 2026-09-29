@@ -27,7 +27,8 @@ pub struct Fail2ban;
 
 const CAP: usize = 256 * 1024;
 const BASE: &str = "etc/fail2ban";
-/// Includes nest; a loop ends here, as interpolation does past its depth.
+/// How deep includes may nest, and how far interpolation follows a reference.
+/// An include loop is ended by the set of files already read.
 const MAX_DEPTH: usize = 10;
 
 /// Substitutions one value may make, however deep. A depth limit alone lets

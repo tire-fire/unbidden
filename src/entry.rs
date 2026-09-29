@@ -288,8 +288,9 @@ pub enum Provenance {
 }
 
 impl Provenance {
-    /// The suppression test of §8: hidden by default only when a package owns
-    /// the file and its contents still match the manifest.
+    /// A package owns the file and its contents still match the manifest: the
+    /// core of §8's rule for hiding an entry by default, which `render::suppressed`
+    /// applies through `is_verified` and the entry's flags.
     pub fn is_packaged_intact(&self) -> bool {
         matches!(self, Provenance::Packaged { integrity: Integrity::Intact, .. })
     }

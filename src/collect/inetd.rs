@@ -91,8 +91,8 @@ fn xinetd(cx: &mut Ctx, out: &mut Vec<Entry>) {
                 e.note(key, v.clone());
             }
         }
-        // An INTERNAL service is xinetd's own code, and a redirect forwards
-        // the connection elsewhere; neither starts a program.
+        // An INTERNAL service is xinetd's own code and starts no program. A
+        // redirect names none either: it has no `server`, so none is recorded.
         let internal = s.attrs.get("type").is_some_and(|t| t.split_whitespace().any(|w| w == "INTERNAL"));
         if let (false, Some(server)) = (internal, s.attrs.get("server")) {
             let args = s.attrs.get("server_args").map(|a| format!(" {a}")).unwrap_or_default();
