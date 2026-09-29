@@ -102,14 +102,20 @@ pub fn parse(text: &str) -> Result<Option<Value>, String> {
             }
             Event::Alias { anchor } => {
                 let id = b.names.get(&anchor).copied().ok_or("alias to an undefined anchor")?;
-                let (v, depth) = b.anchors.get(&id).cloned().ok_or("alias to an undefined anchor")?;
+                // Cost and depth are read off the anchor before it is copied,
+                // so an alias the budget refuses allocates nothing.
+                let (cost, depth) = {
+                    let (v, depth) = b.anchors.get(&id).ok_or("alias to an undefined anchor")?;
+                    (size(v), *depth)
+                };
                 // What an alias pastes in counts towards the depth too, or a
                 // chain of anchors each one level deeper would nest without
                 // limit.
                 if b.stack.len() + depth > MAX_DEPTH {
                     return Err(format!("nested deeper than {MAX_DEPTH}"));
                 }
-                b.count(size(&v))?;
+                b.count(cost)?;
+                let (v, _) = b.anchors.get(&id).cloned().ok_or("alias to an undefined anchor")?;
                 b.push(Item::Value(v), 0)?;
             }
             Event::StreamStart | Event::StreamEnd | Event::DocumentEnd => {}
@@ -355,10 +361,16 @@ fn depth(v: &Value) -> usize {
     }
 }
 
+/// What pasting `v` in costs against `MAX_NODES`: one per node, and one more
+/// per 64 bytes of text. A node budget alone bounds the tree and not the
+/// bytes in it: a 600 KB scalar aliased thirty thousand times is thirty
+/// thousand nodes and eighteen gigabytes, which aborted the whole process
+/// (an allocation failure no `catch_unwind` can catch).
 fn size(v: &Value) -> usize {
     match v {
         Value::Seq(s) => s.iter().fold(1, |n, v| n.saturating_add(size(v))),
         Value::Map(m) => m.iter().fold(1, |n, (k, v)| n.saturating_add(size(k)).saturating_add(size(v))),
+        Value::Str(s) | Value::Other(s) => 1 + s.len() / 64,
         _ => 1,
     }
 }
@@ -746,6 +758,28 @@ mod tests {
             let _ = parse(text);
         }
         assert!(parse("a: !!int \"0x\u{20ac}1\"").is_err());
+    }
+
+    #[test]
+    fn an_alias_is_charged_for_the_bytes_it_pastes_in() {
+        // Without the byte charge this document is 4,000 nodes and 800 MB.
+        let big = "x".repeat(200_000);
+        let mut doc = format!("a: &big \"{big}\"\nl:\n");
+        for _ in 0..4_000 {
+            doc.push_str("  - *big\n");
+        }
+        assert!(parse(&doc).is_err(), "refused by the budget rather than expanded");
+        // A few uses of a large value, and many of a small one, still load.
+        let mut ok = format!("a: &big \"{}\"\nl:\n", "x".repeat(2_000));
+        for _ in 0..50 {
+            ok.push_str("  - *big\n");
+        }
+        assert!(parse(&ok).is_ok());
+        let mut many = String::from("a: &s x\nl:\n");
+        for _ in 0..20_000 {
+            many.push_str("  - *s\n");
+        }
+        assert!(parse(&many).is_ok());
     }
 
     #[test]
