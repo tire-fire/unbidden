@@ -1256,6 +1256,9 @@ fn gate_on_super_server(entries: &mut [Entry]) {
                 Some(s) => {
                     e.note("daemon_state", format!("{daemon} {by} {s}"));
                     if e.enabled == Enablement::Enabled && s != Enablement::Enabled {
+                        // What the collector read is kept, as the bus answer
+                        // keeps it, so the override can be told from the file.
+                        e.note("inferred_enablement", e.enabled.as_str());
                         e.enabled = s;
                     }
                 }
@@ -2113,6 +2116,10 @@ mod tests {
             daemon(Kind::SysvInit, "xinetd", Enablement::Enabled),
         ]);
         assert_eq!(got, [(Enablement::Disabled, "xinetd systemd unit disabled".to_string())]);
+        // What the service file said is kept beside what the daemon decided.
+        let mut entries = vec![service("xinetd"), daemon(Kind::SystemdUnit, "xinetd.service", Enablement::Disabled)];
+        gate_on_super_server(&mut entries);
+        assert_eq!(entries[0].raw["inferred_enablement"], "enabled");
         // A vendor unit disabled and an /etc copy enabled: it runs.
         let got = run(vec![
             service("xinetd"),
