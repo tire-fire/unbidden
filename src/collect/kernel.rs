@@ -1,8 +1,7 @@
 //! udev rules and kernel modules.
 //!
-//! One collector, because the two formats share a reader: both are line-based,
-//! both continue a line on a trailing backslash, and both are read from a
-//! search path whose merged-usr aliases must collapse to a single directory
+//! One collector, because the two formats share a reader: both are line-based
+//! and both are read from a search path whose merged-usr aliases must collapse to a single directory
 //! before anything is emitted (§5).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -117,7 +116,7 @@ fn sysctl_callouts(cx: &mut Ctx) -> Vec<Entry> {
     for (rel, shadowed_by) in files {
         let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
         let mut used: BTreeMap<String, usize> = BTreeMap::new();
-        for line in logical_lines(&bytes) {
+        for line in logical_lines(&bytes, Join::Never) {
             let line = String::from_utf8_lossy(&line).into_owned();
             let line = line.trim();
             if line.is_empty() || line.starts_with(['#', ';']) {
@@ -166,7 +165,7 @@ fn binfmt_handlers(cx: &mut Ctx) -> Vec<Entry> {
     for (rel, shadowed_by) in super::replaceable(cx, &BINFMT_DIRS, ".conf") {
         let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
         let mut used: BTreeMap<String, usize> = BTreeMap::new();
-        for line in logical_lines(&bytes) {
+        for line in logical_lines(&bytes, Join::Never) {
             let line = line.trim_ascii();
             let Some(&delim) = line.first() else { continue };
             if matches!(delim, b'#' | b';') {
@@ -240,7 +239,7 @@ fn request_key(cx: &mut Ctx) -> Vec<Entry> {
     for rel in files {
         let Some(bytes) = cx.read_capped(&rel, CALLOUT_CAP) else { continue };
         let mut used: BTreeMap<String, usize> = BTreeMap::new();
-        for line in logical_lines(&bytes) {
+        for line in logical_lines(&bytes, Join::Never) {
             if line.trim_ascii().first().is_none_or(|b| *b == b'#') {
                 continue;
             }
@@ -308,7 +307,7 @@ fn udev_rules(cx: &mut Ctx) -> Vec<Entry> {
 
         let Some(bytes) = cx.read(rel) else { continue };
         let mut used: BTreeMap<String, usize> = BTreeMap::new();
-        for line in logical_lines(&bytes) {
+        for line in logical_lines(&bytes, Join::Udev) {
             let tokens = udev_tokens(&line);
             let facts = udev_facts(&tokens);
             let digest = short_hash(&line);
@@ -641,7 +640,7 @@ fn module_load_lists(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
     for rel in files {
         let Some(bytes) = cx.read(&rel) else { continue };
         let mut used: BTreeMap<String, usize> = BTreeMap::new();
-        for line in logical_lines(&bytes) {
+        for line in logical_lines(&bytes, Join::Never) {
             // /etc/modules permits module parameters after the name.
             let Some((module, params)) = take_word(&line) else { continue };
             let name = uniq(&mut used, lossy(module));
@@ -678,7 +677,7 @@ fn modprobe_configs(cx: &mut Ctx, loaded: &Option<Loaded>) -> Vec<Entry> {
     for rel in files {
         let Some(bytes) = cx.read(&rel) else { continue };
         let mut used: BTreeMap<String, usize> = BTreeMap::new();
-        for line in logical_lines(&bytes) {
+        for line in logical_lines(&bytes, Join::Kmod) {
             // A `#` inside a directive is kept rather than stripped: an install
             // command may legitimately contain one, and truncating there would
             // discard the half of the command that matters.
@@ -757,18 +756,36 @@ fn set_loaded_state(e: &mut Entry, loaded: &Option<Loaded>, module: &[u8]) {
 
 // ------------------------------------------------------------- shared ----
 
-/// Physical lines joined on a trailing backslash, with comments and blank
-/// lines dropped. A comment line that itself ends in a backslash takes the
-/// line below it with it, because treating that continuation as a rule of its
-/// own would invent one that nothing executes.
-fn logical_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
+/// Whether a trailing backslash continues a line, and if so what a comment
+/// does to it. Each reader here decides for itself, so the answer is per
+/// format and was checked against the real reader:
+/// `modprobe -C dir -c` for kmod, `udevadm verify` for udev.
+#[derive(Clone, Copy)]
+enum Join {
+    /// A backslash is part of the line. sysctl.d, binfmt.d, modules-load.d and
+    /// request-key.conf have no continuation, and joining would let one line
+    /// swallow the next: `a = 1 \` above `kernel.core_pattern = |/x` hides it.
+    Never,
+    /// kmod reads a comment line as a line like any other, so one that ends in
+    /// a backslash takes the line below it with it.
+    Kmod,
+    /// udev drops a comment line before it looks for a continuation, so the
+    /// line below a comment ending in a backslash is a rule of its own.
+    Udev,
+}
+
+/// Physical lines joined per `join`, with comments and blank lines dropped.
+fn logical_lines(bytes: &[u8], join: Join) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
     let mut current: Vec<u8> = Vec::new();
     let mut continued = false;
     let mut dropping = false;
     for raw in bytes.split(|b| *b == b'\n') {
         let line = raw.strip_suffix(b"\r").unwrap_or(raw);
-        let more = line.last() == Some(&b'\\');
+        let is_comment = |l: &[u8]| l.trim_ascii_start().first() == Some(&b'#');
+        let more = !matches!(join, Join::Never)
+            && line.last() == Some(&b'\\')
+            && !(matches!(join, Join::Udev) && !continued && is_comment(line));
         let body = if more { &line[..line.len() - 1] } else { line };
         if !continued {
             let head = body.trim_ascii_start();
@@ -868,6 +885,32 @@ fn path_note(cx: &Ctx, rel: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    fn joined(bytes: &str, join: Join) -> Vec<String> {
+        logical_lines(bytes.as_bytes(), join).into_iter().map(|l| String::from_utf8(l).unwrap()).collect()
+    }
+
+    #[test]
+    fn a_format_without_continuation_never_lets_one_line_swallow_the_next() {
+        let text = "vm.swappiness = 1 \\\nkernel.core_pattern = |/tmp/x\n";
+        assert_eq!(joined(text, Join::Never), ["vm.swappiness = 1 \\", "kernel.core_pattern = |/tmp/x"]);
+    }
+
+    #[test]
+    fn udev_reads_the_line_below_a_comment_that_ends_in_a_backslash() {
+        // `udevadm verify` reports the second line as a rule of its own.
+        let text = "# a comment \\\nACTION==\"add\", RUN+=\"/tmp/x\"\n";
+        assert_eq!(joined(text, Join::Udev), ["ACTION==\"add\", RUN+=\"/tmp/x\""]);
+        // A real rule still continues.
+        assert_eq!(joined("ACTION==\"add\", \\\nRUN+=\"/x\"\n", Join::Udev), ["ACTION==\"add\", RUN+=\"/x\""]);
+    }
+
+    #[test]
+    fn kmod_takes_the_line_below_a_comment_that_ends_in_a_backslash() {
+        // `modprobe -C dir -c` does not report `install foo` here.
+        assert!(joined("# a comment \\\ninstall foo /bin/true\n", Join::Kmod).is_empty());
+        assert_eq!(joined("install bar /bin/fal\\\nse\n", Join::Kmod), ["install bar /bin/false"]);
+    }
+
     use super::*;
     use crate::root::Root;
     use crate::scan::{Options, Scan, Status, run};
