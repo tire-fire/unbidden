@@ -1162,6 +1162,15 @@ fn encoded_run(command: &[u8]) -> Option<(usize, usize, &'static str)> {
 /// that really is a command, and a forced command is where an attacker who
 /// already has a key line puts a payload.
 fn apply_encoding(entry: &mut Entry) {
+    // Bytes that are not text in a command, a target or the path of the file
+    // are evidence in themselves. Decided here from the entry, once, rather
+    // than as something each collector has to remember to say.
+    let not_text = entry.command.as_deref().is_some_and(|c| std::str::from_utf8(c).is_err())
+        || entry.target_path.as_ref().is_some_and(|p| p.to_str().is_none())
+        || entry.source.to_str().is_none();
+    if not_text {
+        entry.flag(Flag::EncodingAnomaly);
+    }
     let Some(command) = &entry.command else { return };
     let Some((offset, len, alphabet)) = encoded_run(command) else { return };
     entry.flag(Flag::EncodingAnomaly);
@@ -2601,6 +2610,26 @@ mod tests {
         assert_eq!(look_through_wrappers(&root, std::slice::from_mut(&mut e)).len(), 2);
         assert!(!e.raw.contains_key("commands_listed"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn bytes_that_are_not_text_are_flagged_whatever_the_collector_remembered() {
+        use std::os::unix::ffi::OsStrExt;
+        let mut command = Entry::new(Kind::Cron, "/etc/cron.d/x", "job");
+        command.command = Some(b"/opt/x \xff\xfe".to_vec());
+        let mut target = Entry::new(Kind::Cron, "/etc/cron.d/x", "job");
+        target.target_path = Some(PathBuf::from(std::ffi::OsStr::from_bytes(b"/opt/\xff")));
+        let mut source = Entry::new(Kind::Cron, PathBuf::from(std::ffi::OsStr::from_bytes(b"/etc/cron.d/\xfe")), "job");
+        source.command = Some(b"/opt/x".to_vec());
+        let mut plain = Entry::new(Kind::Cron, "/etc/cron.d/x", "job");
+        plain.command = Some(b"/opt/x --ok".to_vec());
+        for e in [&mut command, &mut target, &mut source, &mut plain] {
+            apply_encoding(e);
+        }
+        assert_eq!(
+            [&command, &target, &source, &plain].map(|e| e.has_flag(Flag::EncodingAnomaly)),
+            [true, true, true, false]
+        );
     }
 
     #[test]
