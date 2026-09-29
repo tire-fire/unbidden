@@ -1180,13 +1180,13 @@ const SCRIPT_CAP: usize = 256 * 1024;
 /// A DHCP client hook: a file the client's script sources, as root, on every
 /// lease event. Sourced, not executed, so its execute bit does not decide
 /// whether it runs; the script's own rule does.
-fn dhcp_hook(cx: &mut Ctx, rel: &Path, client: &str, phase: &str, runs: bool, why: Option<String>) -> Entry {
+fn dhcp_hook(cx: &mut Ctx, rel: &Path, client: &str, phase: &str, not_run: Option<String>) -> Entry {
     let name = rel.file_name().unwrap_or_default().to_os_string();
     let mut e = script_entry(cx, Kind::NetworkDispatcher, rel, &name, Trigger::NetworkEvent);
     e.note("dispatcher", client);
     e.note("hook_phase", phase);
-    e.enabled = if runs { Enablement::Enabled } else { Enablement::Disabled };
-    if let Some(why) = why {
+    e.enabled = if not_run.is_none() { Enablement::Enabled } else { Enablement::Disabled };
+    if let Some(why) = not_run {
         e.note("not_run", why);
     }
     e
@@ -1213,7 +1213,7 @@ fn dhclient_hooks(cx: &mut Ctx) -> Vec<Entry> {
     for phase in ["enter", "exit"] {
         let file = etc.join(format!("dhclient-{phase}-hooks"));
         if cx.root.stat_follow(&file).is_ok_and(|m| m.is_file) {
-            out.push(dhcp_hook(cx, &file, "dhclient", phase, true, None));
+            out.push(dhcp_hook(cx, &file, "dhclient", phase, None));
         }
         let dir = etc.join(format!("dhclient-{phase}-hooks.d"));
         let mut files = Vec::new();
@@ -1221,26 +1221,25 @@ fn dhclient_hooks(cx: &mut Ctx) -> Vec<Entry> {
         files.sort();
         for rel in files {
             let name = rel.file_name().unwrap_or_default().as_bytes().to_vec();
-            let (runs, why) = if run_parts {
+            let why = if run_parts {
                 let ok = !name.is_empty() && name.iter().all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-');
-                (ok, (!ok).then(|| "run-parts --list skips a name with other characters".to_string()))
+                (!ok).then(|| "run-parts --list skips a name with other characters".to_string())
             } else if find {
                 let empty = cx.root.stat_follow(&rel).is_ok_and(|m| m.size == 0);
                 let exec = exec_mode(cx, &rel) != 0;
-                let ok = exec && !empty;
-                (ok, (!ok).then(|| "dhclient-script runs only executable, non-empty files".to_string()))
+                (!(exec && !empty)).then(|| "dhclient-script runs only executable, non-empty files".to_string())
             } else {
                 // A script this reader does not recognise: shown as running.
-                (true, None)
+                None
             };
-            out.push(dhcp_hook(cx, &rel, "dhclient", phase, runs, why));
+            out.push(dhcp_hook(cx, &rel, "dhclient", phase, why));
         }
     }
     if find {
         let up = etc.join("dhclient-up-hooks");
         if cx.root.stat_follow(&up).is_ok_and(|m| m.is_file) {
             let exec = exec_mode(cx, &up) != 0;
-            out.push(dhcp_hook(cx, &up, "dhclient", "up", exec, (!exec).then(|| "not executable".to_string())));
+            out.push(dhcp_hook(cx, &up, "dhclient", "up", (!exec).then(|| "not executable".to_string())));
         }
         let dir = etc.join("dhclient.d");
         let mut files: Vec<PathBuf> = cx
@@ -1252,7 +1251,7 @@ fn dhclient_hooks(cx: &mut Ctx) -> Vec<Entry> {
         files.sort();
         for rel in files {
             let exec = exec_mode(cx, &rel) != 0;
-            out.push(dhcp_hook(cx, &rel, "dhclient", "config", exec, (!exec).then(|| "not executable".to_string())));
+            out.push(dhcp_hook(cx, &rel, "dhclient", "config", (!exec).then(|| "not executable".to_string())));
         }
     }
     out
@@ -1327,14 +1326,15 @@ fn dhcpcd_hooks(cx: &mut Ctx) -> Vec<Entry> {
             }
             let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             let phase = if pat.contains("enter-hook") { "enter" } else if pat.contains("exit-hook") { "exit" } else { "hooks" };
-            let (runs, why) = if name.ends_with('~') {
-                (false, Some("dhcpcd-run-hooks skips a name ending in ~".to_string()))
+            let why = if name.ends_with('~') {
+                Some("dhcpcd-run-hooks skips a name ending in ~".to_string())
             } else if skipped_by(&name, &global) {
-                (false, Some("nohook in dhcpcd.conf".to_string()))
+                Some("nohook in dhcpcd.conf".to_string())
             } else {
-                (true, None)
+                None
             };
-            let mut e = dhcp_hook(cx, &rel, "dhcpcd", phase, runs, why);
+            let runs = why.is_none();
+            let mut e = dhcp_hook(cx, &rel, "dhcpcd", phase, why);
             if runs && skipped_by(&name, &scoped) {
                 e.note("nohook_for_some_interfaces", "true");
             }
