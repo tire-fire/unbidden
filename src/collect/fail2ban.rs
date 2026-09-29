@@ -30,6 +30,12 @@ const BASE: &str = "etc/fail2ban";
 /// Includes nest; a loop ends here, as interpolation does past its depth.
 const MAX_DEPTH: usize = 10;
 
+/// Substitutions one value may make, however deep. A depth limit alone lets
+/// references multiply: ten levels of ten references each is 10^10
+/// substitutions from an 816-byte jail.conf, and hung a scan for minutes.
+/// A real action has a handful; past the budget the rest stays as written.
+const SUBSTITUTIONS: usize = 4096;
+
 /// Section, then key, then the value and the file that set it.
 type Ini = BTreeMap<String, BTreeMap<String, (String, PathBuf)>>;
 
@@ -54,7 +60,8 @@ impl Collector for Fail2ban {
             }
             let _ = keys;
             if let Some(action) = get("action") {
-                used.extend(split_actions(&interpolate(&jails, section, &action, 0)));
+                let mut budget = SUBSTITUTIONS;
+                used.extend(split_actions(&interpolate(&jails, section, &action, 0, &mut budget)));
             }
         }
         // What the used actions include is used too.
@@ -91,7 +98,8 @@ impl Collector for Fail2ban {
                     continue;
                 }
                 let mut e = entry(cx, file, format!("fail2ban:{name}:{key}"));
-                e.command = Some(tags(&action, &interpolate(&action, "Definition", value, 0), 0).into_bytes());
+                let mut budget = SUBSTITUTIONS;
+                e.command = Some(tags(&action, &interpolate(&action, "Definition", value, 0, &mut budget), 0, &mut budget).into_bytes());
                 e.note("run_when", key.trim_start_matches("action"));
                 gate(&mut e, installed);
                 out.push(e);
@@ -241,13 +249,16 @@ fn lookup(ini: &Ini, section: &str, key: &str) -> Option<String> {
 }
 
 /// `%(name)s` replaced, from the section, `[DEFAULT]`, or `section/name`.
-fn interpolate(ini: &Ini, section: &str, value: &str, depth: usize) -> String {
+fn interpolate(ini: &Ini, section: &str, value: &str, depth: usize, budget: &mut usize) -> String {
     if depth > MAX_DEPTH {
         return value.to_string();
     }
     let mut out = String::new();
     let mut rest = value;
     while let Some(i) = rest.find("%(") {
+        if *budget == 0 {
+            break;
+        }
         out.push_str(&rest[..i]);
         let after = &rest[i + 2..];
         let Some(end) = after.find(")s") else {
@@ -260,7 +271,10 @@ fn interpolate(ini: &Ini, section: &str, value: &str, depth: usize) -> String {
             None => lookup(ini, section, &name),
         };
         match found {
-            Some(v) => out.push_str(&interpolate(ini, section, &v, depth + 1)),
+            Some(v) => {
+                *budget -= 1;
+                out.push_str(&interpolate(ini, section, &v, depth + 1, budget));
+            }
             None => out.push_str(&rest[i..i + 2 + end + 2]),
         }
         rest = &after[end + 2..];
@@ -272,13 +286,16 @@ fn interpolate(ini: &Ini, section: &str, value: &str, depth: usize) -> String {
 /// `<tag>` replaced as fail2ban replaces it from the action's own settings,
 /// `[Init]` first, then `[Definition]`; tags only a ban supplies, `<ip>` and
 /// the like, stay as written.
-fn tags(ini: &Ini, value: &str, depth: usize) -> String {
+fn tags(ini: &Ini, value: &str, depth: usize, budget: &mut usize) -> String {
     if depth > MAX_DEPTH {
         return value.to_string();
     }
     let mut out = String::new();
     let mut rest = value;
     while let Some(i) = rest.find('<') {
+        if *budget == 0 {
+            break;
+        }
         out.push_str(&rest[..i]);
         let after = &rest[i + 1..];
         let end = after.find('>').filter(|&e| e > 0 && after[..e].chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-'));
@@ -290,7 +307,11 @@ fn tags(ini: &Ini, value: &str, depth: usize) -> String {
         let name = after[..end].to_lowercase();
         let found = ["Init", "Definition"].iter().find_map(|s| ini.get(*s).and_then(|m| m.get(&name))).map(|(v, _)| v.clone());
         match found {
-            Some(v) => out.push_str(&tags(ini, &interpolate(ini, "Definition", &v, 0), depth + 1)),
+            Some(v) => {
+                *budget -= 1;
+                let expanded = interpolate(ini, "Definition", &v, 0, budget);
+                out.push_str(&tags(ini, &expanded, depth + 1, budget));
+            }
             None => out.push_str(&rest[i..i + end + 2]),
         }
         rest = &after[end + 1..];
@@ -343,6 +364,27 @@ mod tests {
         let root = Root::at(dir).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Fail2ban)];
         crate::scan::run(&root, &Options { deep: false }, &collectors)
+    }
+
+    #[test]
+    fn references_that_multiply_are_cut_off_not_expanded() {
+        // Ten levels of ten references each: 10^10 substitutions from a file
+        // of under a kilobyte.
+        let ten = |n: usize| (0..10).map(|_| format!("%(k{n})s")).collect::<Vec<_>>().join(" ");
+        let mut jail = String::from("[DEFAULT]\nenabled = true\n");
+        for i in 0..9 {
+            jail.push_str(&format!("k{i} = {}\n", ten(i + 1)));
+        }
+        jail.push_str("k9 = beacon\naction = %(k0)s\n[sshd]\nport = ssh\n");
+        let d = std::env::temp_dir().join(format!("unbidden-fail2ban-multiply-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        put(&d, "usr/bin/fail2ban-server", b"");
+        put(&d, "etc/fail2ban/jail.conf", jail.as_bytes());
+        let started = std::time::Instant::now();
+        let s = scan(&d);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "took {:?}", started.elapsed());
+        assert!(matches!(s.header.collectors[0].status, crate::scan::Status::Complete));
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
