@@ -446,6 +446,21 @@ if [ "$FAMILY" = apk ]; then
     [ "$triggers" -gt 0 ] || fail "the stock image registers a busybox trigger and none was reported"
     note "$triggers apk trigger scripts reported from the scripts archive"
 fi
+# /etc/ld.so.preload: glibc's loader reads it and musl's does not, so the same
+# plant is a live row on the glibc families and a disabled one on Alpine. The
+# library names nothing that exists, which the loader skips with a message.
+if [ "$FAMILY" = apk ]; then
+    printf '/tmp/unbidden-check-preload.so\n' > /etc/ld.so.preload
+    pre=$("$BIN" --json --all | tail -n +2 | grep '"kind":"ld_preload"' | grep -F 'unbidden-check-preload' || true)
+    rm -f /etc/ld.so.preload
+    [ -n "$pre" ] || fail "a library named in /etc/ld.so.preload was not reported"
+    case "$pre" in
+        *'"enabled":"disabled"'*) note "a library named in /etc/ld.so.preload reports disabled where musl is the loader" ;;
+        *) fail "musl ignores /etc/ld.so.preload and the row is not disabled: $pre" ;;
+    esac
+else
+    printf '/tmp/unbidden-check-preload.so\n' | plant_check /etc/ld.so.preload ld_preload unbidden-check-preload
+fi
 # BusyBox crond: a line appended to root's packaged crontab, which is the
 # file it reads for root (it reads each root-owned file in its directory that
 # is named for an account), and a periodic script the crontab's run-parts line

@@ -12,7 +12,7 @@
 //! the one thing this tool must never do. The blind spots are listed on
 //! `scan_shell` and are deliberate.
 
-use crate::text::{unquote};
+use crate::text::unquote;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -492,28 +492,11 @@ fn preload(cx: &mut Ctx, out: &mut Vec<Entry>) {
         cx.note_limited(format!("{} (truncated at 65536 bytes)", cx.root.abs(rel).display()));
     }
 
-    let mut libs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-    let mut listed = BTreeSet::new();
-    for raw in bytes.split(|b| *b == b'\n') {
-        let line = strip_cr(raw);
-        // glibc skips a leading '#' and splits the rest on whitespace.
-        let body = match line.iter().position(|b| *b == b'#') {
-            Some(0) => continue,
-            Some(_) if line.trim_ascii().first() == Some(&b'#') => continue,
-            _ => line,
-        };
-        for lib in body.split(|b| *b == b' ' || *b == b'\t') {
-            if lib.is_empty() || lib.starts_with(b"#") {
-                break;
-            }
-            if listed.insert(lib.to_vec()) {
-                libs.push((lib.to_vec(), line.to_vec()));
-            }
-        }
-    }
+    let libs = preload_names(&bytes);
     if libs.is_empty() {
         return;
     }
+    let ignored = musl_only(cx);
 
     let nonstandard = nonstandard_lib_dirs(cx);
     for (lib, line) in libs {
@@ -522,14 +505,49 @@ fn preload(cx: &mut Ctx, out: &mut Vec<Entry>) {
         e.command = Some(line);
         e.target_path = Some(PathBuf::from(OsString::from_vec(lib)));
         e.trigger = Trigger::Always;
-        // A library listed here is loaded into every dynamically linked
+        // glibc loads a library listed here into every dynamically linked
         // process on the system; there is no state in which it is not.
         e.enabled = Enablement::Enabled;
+        if ignored {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", "musl's loader does not read /etc/ld.so.preload");
+        }
         if !nonstandard.is_empty() {
             e.note("ld_so_conf.nonstandard", nonstandard.join("\n"));
         }
         out.push(e);
     }
+}
+
+/// The libraries `/etc/ld.so.preload` names, each with the line that named it,
+/// as glibc's loader reads the file (measured on 2.35, 2.41 and Fedora's):
+/// names are separated by blanks, tabs, colons and newlines and by nothing
+/// else, so a carriage return or a form feed is part of a name; a `#` starts a
+/// comment even in the middle of a word; a NUL ends what is read.
+fn preload_names(bytes: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let bytes = bytes.split(|b| *b == 0).next().unwrap_or_default();
+    let mut libs: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut listed = BTreeSet::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        let body = line.split(|b| *b == b'#').next().unwrap_or_default();
+        for lib in body.split(|b| matches!(b, b' ' | b'\t' | b':')) {
+            if !lib.is_empty() && listed.insert(lib.to_vec()) {
+                libs.push((lib.to_vec(), line.to_vec()));
+            }
+        }
+    }
+    libs
+}
+
+/// Whether the loader on this host is musl's alone. musl reads `LD_PRELOAD`
+/// and nothing else: `/etc/ld.so.preload` does nothing on Alpine (measured on
+/// 3.22 and 3.24), so a host with musl's loader and none of glibc's is one
+/// where the file is a leftover or a plant and not a mechanism.
+fn musl_only(cx: &mut Ctx) -> bool {
+    let named = |cx: &mut Ctx, prefix: &str| {
+        ["lib", "lib64", "usr/lib", "usr/lib64"].iter().any(|d| cx.dir(d).iter().any(|e| e.name.to_string_lossy().starts_with(prefix)))
+    };
+    named(cx, "ld-musl-") && !named(cx, "ld-linux")
 }
 
 /// Search directories configured outside the set every distribution already
@@ -937,13 +955,6 @@ fn is_shell_word(w: &[u8]) -> bool {
     )
 }
 
-fn strip_cr(line: &[u8]) -> &[u8] {
-    match line.split_last() {
-        Some((b'\r', rest)) => rest,
-        _ => line,
-    }
-}
-
 fn clip(b: &[u8], cap: usize) -> String {
     let mut s = String::from_utf8_lossy(&b[..cap.min(b.len())]).into_owned();
     if b.len() > cap {
@@ -1207,6 +1218,31 @@ mod tests {
         assert_eq!(evil.command.as_deref(), Some(&b"/usr/lib/libnss.so\t/tmp/evil.so"[..]));
         assert_eq!(evil.raw["ld_so_conf.nonstandard"], "/opt/weird/lib\n/opt/nested/lib");
         assert!(by_name(&scan, Kind::LdPreload, "/opt/weird/lib.so").command.is_some());
+    }
+
+    #[test]
+    fn preload_names_are_split_the_way_glibc_splits_them() {
+        let names: Vec<Vec<u8>> = preload_names(b"/a.so  /b.so # c /d.so\n/e.so:/f.so\n/g#h.so\n/i.so\r\n\0/never.so\n").into_iter().map(|(n, _)| n).collect();
+        let want: [&[u8]; 6] = [b"/a.so", b"/b.so", b"/e.so", b"/f.so", b"/g", b"/i.so\r"];
+        assert_eq!(names, want);
+    }
+
+    #[test]
+    fn preload_is_a_leftover_where_only_musl_is_the_loader() {
+        let dir = tmpdir("preload-musl");
+        fs::create_dir_all(dir.join("lib")).unwrap();
+        fs::create_dir_all(dir.join("etc")).unwrap();
+        fs::write(dir.join("lib/ld-musl-x86_64.so.1"), "").unwrap();
+        fs::write(dir.join("etc/ld.so.preload"), "/tmp/evil.so\n").unwrap();
+        let scan = run(&dir);
+        let evil = by_name(&scan, Kind::LdPreload, "/tmp/evil.so");
+        assert_eq!(evil.enabled, Enablement::Disabled);
+        assert!(evil.raw["not_run"].contains("musl"));
+        // A host that carries glibc's loader as well reads the file.
+        fs::create_dir_all(dir.join("lib64")).unwrap();
+        fs::write(dir.join("lib64/ld-linux-x86-64.so.2"), "").unwrap();
+        let scan = run(&dir);
+        assert_eq!(by_name(&scan, Kind::LdPreload, "/tmp/evil.so").enabled, Enablement::Enabled);
     }
 
     #[test]
