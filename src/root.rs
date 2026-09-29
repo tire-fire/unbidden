@@ -142,7 +142,7 @@ impl Root {
         let mut root = Root { fd, base: path.to_path_buf(), live, confined, homes: Vec::new() };
         // /etc/passwd and the home directories are read before any home is
         // known, which is the one time no home can be involved.
-        root.homes = crate::users::discover(&root).iter().filter(|u| u.has_real_home()).map(|u| u.home.clone()).collect();
+        root.homes = crate::users::discover(&root).iter().filter(|u| u.confines()).map(|u| u.home.clone()).collect();
         Ok(root)
     }
 

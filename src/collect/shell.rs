@@ -1351,6 +1351,26 @@ mod tests {
     }
 
     #[test]
+    fn a_service_account_home_outside_home_confines_links_too() {
+        // /srv/alice and /var/lib/svc are homes as much as /home/alice is.
+        let dir = tmpdir("escape-srv");
+        for home in ["srv/alice", "var/lib/svc"] {
+            fs::create_dir_all(dir.join(home)).unwrap();
+            symlink("/etc/shadow", dir.join(home).join(".bashrc")).unwrap();
+        }
+        fs::create_dir_all(dir.join("etc")).unwrap();
+        fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/srv/alice:/bin/bash\nsvc:x:998:998::/var/lib/svc:/bin/sh\n").unwrap();
+        fs::write(dir.join("etc/shadow"), "root:$6$secret:19000::::::\nexport LEAK=1\n").unwrap();
+        let scan = run(&dir);
+        let bashrc: Vec<_> = scan.entries.iter().filter(|e| e.name == ".bashrc").collect();
+        assert_eq!(bashrc.len(), 2);
+        for e in bashrc {
+            assert!(e.raw.contains_key("not_followed"), "{:?}", e.raw);
+            assert!(e.raw.keys().all(|k| !k.starts_with("env.") && k != "exec"), "the target was not read: {:?}", e.raw);
+        }
+    }
+
+    #[test]
     fn an_environment_drop_in_reached_through_merged_usr_is_reported_once() {
         let dir = tmpdir("envd");
         fs::create_dir_all(dir.join("usr/lib/environment.d")).unwrap();

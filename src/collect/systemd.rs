@@ -1237,7 +1237,7 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
         // what lies inside the account's own home is read; the root applies
         // its rule to links and `..` from there.
         if let Scope::Home(who) = scope {
-            let inside = cx.users.iter().find(|u| &u.name == who).is_some_and(|u| path.starts_with(&u.home));
+            let inside = cx.users.iter().find(|u| &u.name == who).is_some_and(|u| path.is_absolute() && crate::text::normalize(&path).starts_with(crate::text::normalize(&u.home)));
             if !inside {
                 e.note(&indexed("env_file_skipped", i), "outside the account's home; not read on its behalf");
                 continue;

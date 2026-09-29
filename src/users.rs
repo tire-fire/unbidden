@@ -57,6 +57,24 @@ impl User {
     }
 }
 
+impl User {
+    /// Whether the root refuses a link out of this account's home. Any
+    /// account can plant one in its own home, and the scan would follow it as
+    /// root, so this is every home except those that hold the system itself:
+    /// `/`, and the trees the scan reads programs and configuration from,
+    /// which would otherwise refuse every merged-/usr link. Deliberately not
+    /// `has_real_home`, which only keeps OwnerMismatch quiet: a service
+    /// account homed at /srv/alice or /var/lib/svc is as able to plant a link
+    /// as anyone.
+    pub fn confines(&self) -> bool {
+        const SYSTEM_TREES: [&str; 10] = ["/proc", "/sys", "/dev", "/bin", "/sbin", "/lib", "/lib64", "/usr", "/etc", "/boot"];
+        self.home == Path::new("/root")
+            || self.home.is_absolute()
+                && self.home.components().count() >= 3
+            && !SYSTEM_TREES.iter().any(|t| self.home.starts_with(t))
+    }
+}
+
 pub fn discover(root: &Root) -> Vec<User> {
     let mut found: BTreeMap<String, User> = BTreeMap::new();
 
@@ -156,6 +174,17 @@ mod tests {
         assert!(!user("/proc").has_real_home(), "rtkit");
         assert!(!user("/var/lib/mysql").has_real_home());
         assert!(!user("/srv/http").has_real_home());
+    }
+
+    #[test]
+    fn a_link_out_of_a_service_account_home_is_refused_too() {
+        let user = |home: &str| User { name: "x".into(), uid: Some(1), home: PathBuf::from(home), shell: None, source: "passwd" };
+        for home in ["/home/alice", "/root", "/srv/alice", "/var/lib/svc", "/var/mail/x", "/tmp/x"] {
+            assert!(user(home).confines(), "{home}");
+        }
+        for home in ["/", "/bin", "/usr/sbin", "/etc/x", "/proc", "/nonexistent", "/var", "/srv"] {
+            assert!(!user(home).confines(), "{home}");
+        }
     }
 
     #[test]

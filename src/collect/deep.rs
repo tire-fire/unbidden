@@ -466,6 +466,10 @@ fn repository(cx: &mut Ctx, w: &mut Walk, gitdir: &Path, worktree: &Path) -> Vec
 
 fn hooks(cx: &mut Ctx, w: &mut Walk, gitdir: &Path, repo: &str, gitdir_abs: &str) -> Vec<Entry> {
     let dir = gitdir.join("hooks");
+    if !followable(cx, &dir) {
+        cx.note_limited(format!("{}: a link to a place its owner does not own, not listed", cx.root.abs(&dir).display()));
+        return Vec::new();
+    }
     let listing = match cx.root.read_dir(&dir) {
         Ok(v) => v,
         Err(e) => {
@@ -491,7 +495,7 @@ fn hooks(cx: &mut Ctx, w: &mut Walk, gitdir: &Path, repo: &str, gitdir_abs: &str
         // A repository outside a home has no home rule to keep a link inside
         // it, and any account can plant one: `pre-commit -> /root/.secret`
         // would put the text of a root-only script in the report.
-        let followed = cx.root.stat(&rel).is_ok_and(|link| reaches_only_what_its_owner_owns(&link, &meta));
+        let followed = followable(cx, &rel);
 
         let mut e = cx.entry(Kind::GitHook, &rel, ent.name.to_string_lossy());
         name_from_os(&mut e, &ent.name);
@@ -519,6 +523,27 @@ fn reaches_only_what_its_owner_owns(link: &crate::root::Meta, target: &crate::ro
     link.uid == 0 || link.uid == target.uid
 }
 
+/// Whether every link on the way to `rel`, the last component included, may
+/// be followed: a directory link partway down the path leaves the repository
+/// as surely as a link at the end does.
+fn followable(cx: &Ctx, rel: &Path) -> bool {
+    let mut prefix = PathBuf::new();
+    for component in rel.components() {
+        prefix.push(component);
+        let Ok(link) = cx.root.stat(&prefix) else { return true };
+        if !link.is_symlink {
+            continue;
+        }
+        match cx.root.stat_follow(&prefix) {
+            Ok(target) if reaches_only_what_its_owner_owns(&link, &target) => {}
+            Ok(_) => return false,
+            // A dangling link reads nothing.
+            Err(_) => return true,
+        }
+    }
+    true
+}
+
 /// The interpreter line of a hook, which is what actually executes when the
 /// hook fires. Only the first line is wanted, so this is not a truncated read
 /// of the whole file and does not belong in the status as one.
@@ -531,6 +556,10 @@ fn shebang(cx: &Ctx, rel: &Path) -> Option<String> {
 
 fn config_at(cx: &mut Ctx, rel: &Path, repo: &str, gitdir_abs: &str) -> Vec<Entry> {
     let rel = rel.to_path_buf();
+    if !followable(cx, &rel) {
+        cx.note_limited(format!("{}: a link to a place its owner does not own, not read", cx.root.abs(&rel).display()));
+        return Vec::new();
+    }
     let Some(bytes) = cx.read(&rel) else { return Vec::new() };
 
     let mut out = Vec::new();
@@ -938,6 +967,19 @@ mod tests {
         assert_eq!(hook.raw.get("repository").map(String::as_str), Some(dir.join("srv/app").to_str().unwrap()));
         assert_eq!(hook.raw.get("interpreter").map(String::as_str), Some("/bin/sh"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_hooks_directory_and_a_config_that_are_links_to_their_own_owners_files_are_read() {
+        let dir = tree("hook-links");
+        put(&dir, "srv/app/shared/post-merge", b"#!/bin/sh\n/tmp/x\n", 0o755);
+        put(&dir, "srv/app/shared/config", b"[core]\n\tpager = /tmp/pager\n", 0o644);
+        put(&dir, "srv/app/.git/HEAD", b"ref: refs/heads/main\n", 0o644);
+        std::os::unix::fs::symlink("../shared", dir.join("srv/app/.git/hooks")).unwrap();
+        std::os::unix::fs::symlink("../shared/config", dir.join("srv/app/.git/config")).unwrap();
+        let s = scan_deep(&dir);
+        assert_eq!(named(&s, "post-merge").raw.get("interpreter").map(String::as_str), Some("/bin/sh"));
+        assert!(s.entries.iter().any(|e| e.name == "core.pager"), "{:?}", s.entries.iter().map(|e| &e.name).collect::<Vec<_>>());
     }
 
     #[test]
