@@ -323,10 +323,10 @@ const APT_CONF_D: &str = "etc/apt/apt.conf.d";
 /// against the canonical lower-case key after any `Binary::<program>::`
 /// prefix is stripped, since a hook may be scoped to one front-end.
 ///
-/// Nothing else under apt.conf.d executes. `Dir::`, `Acquire::` and the
-/// `APT::Get` options change behaviour but never spawn anything, and
-/// `etc/apt/preferences.d` is pin priorities only — no key in it runs a
-/// command, so no entry is emitted for it.
+/// `runs_program` adds the keys that name a program apt runs without a shell.
+/// Nothing else under apt.conf.d executes: the `APT::Get` options change
+/// behaviour but never spawn anything, and `etc/apt/preferences.d` is pin
+/// priorities only, so no entry is emitted for it.
 const HOOK_KEYS: &[&str] = &[
     "dpkg::pre-invoke",
     "dpkg::post-invoke",
@@ -338,6 +338,42 @@ const HOOK_KEYS: &[&str] = &[
     "apt::update::post-invoke-stats",
 ];
 
+/// Files one apt run may pull in through `#include`, however they chain. A
+/// real configuration has a few; the limit is for one that includes itself
+/// through a dozen names.
+const APT_INCLUDE_FILES: usize = 64;
+
+/// Whether a canonical key names a program apt runs: a hook it hands to the
+/// shell, one of its `Dir::Bin::` executables or directories of them (dpkg,
+/// the acquire methods, the solvers, the decompressors), or the command an
+/// acquire method runs to find its proxy.
+fn runs_program(canon: &str) -> bool {
+    HOOK_KEYS.contains(&canon)
+        || canon.starts_with("dir::bin::")
+        || (canon.starts_with("acquire::") && (canon.ends_with("::proxy-auto-detect") || canon.ends_with("::proxyautodetect")))
+}
+
+/// The files a configuration pulls in with `#include "file"`, as written.
+/// apt reads them as configuration of their own, wherever they are.
+fn apt_includes(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        let Some(rest) = line.trim_ascii_start().strip_prefix(b"#include") else { continue };
+        let rest = rest.trim_ascii_start();
+        let (open, close) = match rest.first() {
+            Some(b'"') => (1, b'"'),
+            Some(b'<') => (1, b'>'),
+            _ => (0, b';'),
+        };
+        let body = &rest[open..];
+        let end = body.iter().position(|b| *b == close || (open == 0 && b.is_ascii_whitespace())).unwrap_or(body.len());
+        if end > 0 {
+            out.push(body[..end].to_vec());
+        }
+    }
+    out
+}
+
 fn apt(cx: &mut Ctx) -> Vec<Entry> {
     let mut files: Vec<(PathBuf, Option<String>)> = vec![(PathBuf::from(APT_CONF), None)];
     for ent in cx.dir(APT_CONF_D) {
@@ -346,11 +382,36 @@ fn apt(cx: &mut Ctx) -> Vec<Entry> {
         }
         files.push((Path::new(APT_CONF_D).join(&ent.name), apt_skips(&ent.name)));
     }
+    let mut visited: BTreeSet<PathBuf> = files.iter().map(|(rel, _)| rel.clone()).collect();
 
     let mut out = Vec::new();
-    for (rel, skipped) in files {
+    let mut at = 0;
+    while at < files.len() {
+        let (rel, skipped) = files[at].clone();
+        at += 1;
         let Some(bytes) = cx.read(&rel) else { continue };
         let mut used: BTreeMap<String, usize> = BTreeMap::new();
+        for target in apt_includes(&bytes) {
+            let mut e = cx.entry(Kind::PkgHook, &rel, uniq(&mut used, format!("#include:{}", lossy(&target))));
+            e.trigger = Trigger::PackageOp;
+            e.principal = Some("root".to_string());
+            e.enabled = if skipped.is_some() { Enablement::Disabled } else { Enablement::Enabled };
+            e.note("manager", "apt");
+            e.note("key", "#include");
+            if let Some(why) = &skipped {
+                e.note("not_read_by_apt", why.clone());
+            }
+            e.target_path = Some(PathBuf::from(OsStr::from_bytes(&target)));
+            let at_root = Path::new(OsStr::from_bytes(&target)).strip_prefix("/").map(Path::to_path_buf);
+            match at_root {
+                Ok(inc) if skipped.is_none() && visited.len() < APT_INCLUDE_FILES && visited.insert(inc.clone()) => files.push((inc, None)),
+                Ok(_) => {}
+                // apt opens a relative name from its own working directory,
+                // which nothing on disk records.
+                Err(_) => e.note("not_followed", "a relative path: apt resolves it from its working directory"),
+            }
+            out.push(e);
+        }
         for (key, value) in apt_conf_pairs(&bytes) {
             let Some((binary, canon)) = hook_of(&key) else { continue };
             let name = uniq(&mut used, format!("{canon}:{}", short_hash(&value)));
@@ -411,7 +472,7 @@ fn hook_of(key: &str) -> Option<(Option<String>, String)> {
         parts.drain(..2);
     }
     let canon = parts.join("::");
-    HOOK_KEYS.contains(&canon.as_str()).then_some((binary, canon))
+    runs_program(&canon).then_some((binary, canon))
 }
 
 enum Tok {
@@ -1633,7 +1694,6 @@ mod tests {
             APT::Update::Post-Invoke-Success {"/usr/bin/one";};
             Binary::apt-get::DPkg::Pre-Install-Pkgs {"/usr/bin/two --file"; };
             DPkg::Options {"--force-confdef";};
-            Dir::Bin::dpkg "/usr/bin/dpkg";
             APT::Get::Assume-Yes "true";
             DPkg::Pre-Invoke {"LD_PRELOAD=/tmp/e.so /usr/bin/three";};
             APT::Update::Post-Invoke {"/usr/bin/four"; "/usr/bin/five";};
@@ -1672,6 +1732,49 @@ mod tests {
         let ignored = one(&s, |e| e.source.to_string_lossy().ends_with("99evil.sh"));
         assert_eq!(ignored.enabled, Enablement::Disabled, "apt never reads a .sh fragment");
         assert!(ignored.raw.contains_key("not_read_by_apt"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_keys_that_name_a_program_apt_runs_are_entries_too() {
+        let dir = tree("programs");
+        put(
+            &dir,
+            "etc/apt/apt.conf.d/30progs",
+            br#"
+            Dir::Bin::dpkg "/opt/evil/dpkg";
+            Dir::Bin::methods "/opt/evil/methods";
+            Acquire::http::Proxy-Auto-Detect "/opt/evil/proxy";
+            Acquire::https { ProxyAutoDetect "/opt/evil/proxy2"; };
+            Dir::Cache "/var/cache/apt";
+            Acquire::http::Proxy "http://proxy:3128";
+            "#,
+        );
+        let s = scan(&dir);
+        let keys: BTreeSet<&str> = of_kind(&s, Kind::PkgHook).iter().map(|e| e.raw["key"].as_str()).collect();
+        assert_eq!(
+            keys,
+            BTreeSet::from(["dir::bin::dpkg", "dir::bin::methods", "acquire::http::proxy-auto-detect", "acquire::https::proxyautodetect"])
+        );
+        let dpkg = one(&s, |e| e.raw["key"] == "dir::bin::dpkg");
+        assert_eq!(dpkg.target_path, Some(PathBuf::from("/opt/evil/dpkg")));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_include_is_an_entry_and_the_file_it_names_is_read() {
+        let dir = tree("include");
+        put(&dir, "etc/apt/apt.conf.d/10inc", b"#include \"/srv/extra.conf\";\n#include <relative.conf>\n");
+        put(&dir, "srv/extra.conf", b"DPkg::Post-Invoke {\"/srv/hook\";};\n#include \"/etc/apt/apt.conf.d/10inc\";\n");
+        let s = scan(&dir);
+        let hook = one(&s, |e| e.command.as_deref() == Some(b"/srv/hook".as_slice()));
+        assert_eq!(hook.source, dir.join("srv/extra.conf"), "the hook is attributed to the file it is in");
+        let inc = one(&s, |e| e.raw.get("key").is_some_and(|k| k == "#include") && e.target_path == Some(PathBuf::from("/srv/extra.conf")));
+        assert_eq!(inc.enabled, Enablement::Enabled);
+        let rel = one(&s, |e| e.target_path == Some(PathBuf::from("relative.conf")));
+        assert!(rel.raw.contains_key("not_followed"));
+        // The cycle back to the first file ends: its include is one entry per file.
+        assert_eq!(of_kind(&s, Kind::PkgHook).iter().filter(|e| e.raw.get("key").is_some_and(|k| k == "#include")).count(), 3);
         fs::remove_dir_all(&dir).unwrap();
     }
 
