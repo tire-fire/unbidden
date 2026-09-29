@@ -499,6 +499,14 @@ struct Links {
     start: BTreeSet<String>,
     stop: BTreeSet<String>,
     priority: BTreeSet<String>,
+    /// Runlevels whose start links nothing here reads: systemd's generator
+    /// looks only at rc1.d to rc5.d.
+    unread: BTreeSet<String>,
+}
+
+/// Whether PID 1 is systemd, from what /sbin/init leads to.
+fn init_is_systemd(cx: &Ctx) -> bool {
+    cx.root.resolve(Path::new("sbin/init")).ok().is_some_and(|p| p.file_name().is_some_and(|n| n == "systemd"))
 }
 
 fn sysv(cx: &mut Ctx) -> Vec<Entry> {
@@ -511,6 +519,7 @@ fn sysv(cx: &mut Ctx) -> Vec<Entry> {
     let init_dirs = distinct_dirs(cx, dirs);
     let init_ids: BTreeSet<(u64, u64)> = init_dirs.iter().map(|(_, id, _)| *id).collect();
     let kind = if openrc.is_some() { Kind::OpenrcService } else { Kind::SysvInit };
+    let systemd = init_is_systemd(cx);
 
     let mut scripts: Vec<Entry> = Vec::new();
     let mut links: Vec<Links> = Vec::new();
@@ -576,10 +585,16 @@ fn sysv(cx: &mut Ctx) -> Vec<Entry> {
                 _ => None,
             };
 
+            // systemd-sysv-generator reads rc1.d to rc5.d and nothing else, so a
+            // start link in rc0.d, rc6.d or rcS.d is run by sysvinit and by no
+            // one under systemd.
+            let unread = systemd && starts && matches!(level.as_str(), "0" | "6" | "S");
             match script {
                 Some(i) => {
                     let l = &mut links[i];
-                    if starts {
+                    if unread {
+                        l.unread.insert(level.clone());
+                    } else if starts {
                         l.start.insert(level.clone());
                         if !priority.is_empty() {
                             l.priority.insert(priority);
@@ -594,7 +609,10 @@ fn sysv(cx: &mut Ctx) -> Vec<Entry> {
                     // a place nobody enumerates.
                     let mut e = script_entry(cx, Kind::SysvInit, &rel, &ent.name, Trigger::Boot);
                     e.enabled =
-                        if starts { Enablement::Enabled } else { Enablement::Disabled };
+                        if starts && !unread { Enablement::Enabled } else { Enablement::Disabled };
+                    if unread {
+                        e.note("not_run", "systemd reads only rc1.d to rc5.d");
+                    }
                     e.note("runlevel", level.clone());
                     e.note("action", if starts { "start" } else { "stop" });
                     if !priority.is_empty() {
@@ -632,9 +650,12 @@ fn sysv(cx: &mut Ctx) -> Vec<Entry> {
             }
             Some(rc) => openrc_service(cx, rc, &mut e, &mut conf_d),
         }
-        for (key, set) in
-            [("start_runlevels", &l.start), ("stop_runlevels", &l.stop), ("start_priority", &l.priority)]
-        {
+        for (key, set) in [
+            ("start_runlevels", &l.start),
+            ("stop_runlevels", &l.stop),
+            ("start_priority", &l.priority),
+            ("unread_runlevels", &l.unread),
+        ] {
             if !set.is_empty() {
                 e.note(key, set.iter().cloned().collect::<Vec<_>>().join(", "));
             }
@@ -676,7 +697,7 @@ fn openrc_state(cx: &mut Ctx) -> Option<Openrc> {
     if !OPENRC_RUN.iter().any(|p| cx.root.exists(p)) {
         return None;
     }
-    if cx.root.resolve(Path::new("sbin/init")).ok().is_some_and(|p| p.file_name().is_some_and(|n| n == "systemd")) {
+    if init_is_systemd(cx) {
         return None;
     }
     let mut levels: BTreeMap<String, (BTreeSet<String>, Vec<String>)> = BTreeMap::new();
@@ -1614,6 +1635,44 @@ exec /usr/sbin/sshd\n";
         assert_eq!(one(&s, Kind::SysvInit, "ssh").enabled, Enablement::Enabled, "the generator reads rc2.d");
         assert!(of_kind(&s, Kind::OpenrcService).is_empty());
         assert!(of_kind(&s, Kind::RcLocal).is_empty());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn under_systemd_only_rc1_to_rc5_start_links_are_read() {
+        let script = |dir: &Path, name: &str| put(dir, &format!("etc/init.d/{name}"), SSH, 0o755);
+        let host = |tag: &str, systemd: bool| {
+            let dir = tree(tag);
+            if systemd {
+                put(&dir, "lib/systemd/systemd", b"\x7fELF systemd", 0o755);
+                link(&dir, "/lib/systemd/systemd", "sbin/init");
+            }
+            for name in ["at-shutdown", "at-boot", "in-rc2"] {
+                script(&dir, name);
+            }
+            link(&dir, "../init.d/at-shutdown", "etc/rc6.d/S90at-shutdown");
+            link(&dir, "../init.d/at-boot", "etc/rcS.d/S10at-boot");
+            link(&dir, "../init.d/in-rc2", "etc/rc2.d/S20in-rc2");
+            // Outside init.d, in a level nothing under systemd reads.
+            link(&dir, "/opt/x", "etc/rc0.d/S99elsewhere");
+            dir
+        };
+        let dir = host("rc-systemd", true);
+        let s = scan(&dir);
+        assert_eq!(one(&s, Kind::SysvInit, "in-rc2").enabled, Enablement::Enabled);
+        for name in ["at-shutdown", "at-boot"] {
+            let e = one(&s, Kind::SysvInit, name);
+            assert_eq!(e.enabled, Enablement::Disabled, "{name}");
+            assert!(e.raw["unread_runlevels"] == "6" || e.raw["unread_runlevels"] == "S");
+        }
+        assert_eq!(one(&s, Kind::SysvInit, "S99elsewhere").raw["not_run"], "systemd reads only rc1.d to rc5.d");
+        fs::remove_dir_all(&dir).unwrap();
+        // The same links under sysvinit run at shutdown and at boot.
+        let dir = host("rc-sysvinit", false);
+        let s = scan(&dir);
+        for name in ["at-shutdown", "at-boot", "in-rc2"] {
+            assert_eq!(one(&s, Kind::SysvInit, name).enabled, Enablement::Enabled, "{name}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 
