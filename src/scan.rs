@@ -108,13 +108,20 @@ impl<'a> Ctx<'a> {
             // which would demote the collector to Partial over one planted
             // symlink.
             Read::NotRegular => self.truncated.push(format!("{}: not a regular file, not read", rel.display())),
-            Read::NotFollowed(target) => self.note_limited(format!(
-                "{}: leads out of its owner's home to {}, not followed",
-                rel.display(),
-                target.display()
-            )),
+            Read::NotFollowed(target) => self.note_left_home(rel, target),
             Read::Failed(e) => self.note_failed(rel, e),
         }
+    }
+
+    /// A link out of its owner's home, refused by the root (§3): recorded as
+    /// a limit, since any account can plant one and none may use it to make
+    /// a collector Partial.
+    pub fn note_left_home(&mut self, rel: &Path, target: &Path) {
+        self.note_limited(format!(
+            "{}: leads out of its owner's home to {}, not followed",
+            rel.display(),
+            target.display()
+        ));
     }
 
     pub fn dir(&mut self, rel: impl AsRef<Path>) -> Vec<DirEnt> {
@@ -143,6 +150,13 @@ impl<'a> Ctx<'a> {
     /// else, and for any other error, the scan could not look, and the
     /// collector is Partial.
     pub fn note_failed(&mut self, path: impl AsRef<Path>, e: &std::io::Error) {
+        // A refusal is the root's policy working: a link out of its home, or
+        // a file that is not a regular one. Any account can cause it, so it
+        // is a limit on what was read and never a failure to read.
+        if let Some(refusal) = crate::root::refusal(e) {
+            self.note_limited(refusal.to_string());
+            return;
+        }
         let path = path.as_ref();
         let what = format!("{}: {e}", path.display());
         let is = |n: rustix::io::Errno| e.raw_os_error() == Some(n.raw_os_error());

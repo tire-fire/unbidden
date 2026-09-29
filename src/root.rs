@@ -316,35 +316,46 @@ impl Root {
     pub fn open(&self, rel: impl AsRef<Path>) -> io::Result<File> {
         let rel = rel.as_ref();
         const READ: OFlags = OFlags::RDONLY.union(OFlags::NONBLOCK).union(OFlags::NOCTTY);
-        let fd = match self.confinement(rel) {
-            Confinement::Unresolvable(e) => return Err(e),
-            Confinement::Escapes(target) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    Refusal::LeavesHome { link: rel.to_path_buf(), target },
-                ));
+        let conf = self.confinement(rel);
+        if matches!(conf, Confinement::NoHome | Confinement::Inside(_)) {
+            // A first look, so a device or FIFO is not opened at all in the
+            // ordinary case; the descriptor's own type is what is finally
+            // trusted below.
+            if !self.statat_unjudged(rel, AtFlags::empty())?.is_file {
+                return Err(not_regular(rel));
             }
-            // Opened as resolved, refusing every link, so a link swapped in
-            // between the check and the open fails instead of escaping.
-            Confinement::Inside(resolved) => {
-                self.require_regular(rel)?;
-                self.open_resolved(&resolved, READ)?
-            }
-            Confinement::NoHome => {
-                self.require_regular(rel)?;
-                self.open_raw(rel, READ)?
-            }
-        };
+        }
+        let fd = self.open_under(conf, rel, READ)?;
         if !meta_of(&rustix::fs::fstat(&fd)?).is_file {
             return Err(not_regular(rel));
         }
         Ok(File::from(fd))
     }
 
-    /// A first look, so a device or FIFO is not opened at all in the ordinary
-    /// case; the descriptor's own type is what `open` finally trusts.
-    fn require_regular(&self, rel: &Path) -> io::Result<()> {
-        if self.stat_follow(rel)?.is_file { Ok(()) } else { Err(not_regular(rel)) }
+    /// Opens `rel` as the home rule allows: a path under a home is opened as
+    /// resolved, refusing every link, so a link swapped in between the check
+    /// and the open fails instead of escaping; one that leaves its home, or
+    /// cannot be resolved, is refused with the reason.
+    fn open_under(&self, conf: Confinement, rel: &Path, flags: OFlags) -> io::Result<OwnedFd> {
+        match conf {
+            Confinement::Unresolvable(e) => Err(e),
+            Confinement::Escapes(target) => Err(leaves_home(rel, target)),
+            Confinement::Inside(resolved) => self.open_resolved(&resolved, flags),
+            Confinement::NoHome => self.open_raw(rel, flags),
+        }
+    }
+
+    /// The home rule for a stat or a listing: refuses what leaves its home,
+    /// so a linked directory cannot be used to learn what is under /root.
+    /// A stat of a link itself judges the directory it sits in, since that
+    /// is where a link out of the home could be hiding.
+    fn judge(&self, rel: &Path, describes_the_link: bool) -> io::Result<()> {
+        let judged = if describes_the_link { rel.parent().unwrap_or(Path::new("")) } else { rel };
+        match self.confinement(judged) {
+            Confinement::Escapes(target) => Err(leaves_home(rel, target)),
+            Confinement::Unresolvable(e) => Err(e),
+            Confinement::NoHome | Confinement::Inside(_) => Ok(()),
+        }
     }
 
     /// Reads at most `cap` bytes. The returned flag says the file was longer,
@@ -369,6 +380,11 @@ impl Root {
     }
 
     fn statat(&self, rel: &Path, at: AtFlags) -> io::Result<Meta> {
+        self.judge(rel, at.contains(AtFlags::SYMLINK_NOFOLLOW))?;
+        self.statat_unjudged(rel, at)
+    }
+
+    fn statat_unjudged(&self, rel: &Path, at: AtFlags) -> io::Result<Meta> {
         let rel = strip_leading_slash(rel);
         let rel = if rel.as_os_str().is_empty() { Path::new(".") } else { rel };
         // statat cannot express RESOLVE_IN_ROOT, so resolution goes through
@@ -405,7 +421,7 @@ impl Root {
         // the directories leading to it are, and they must stay in the root.
         let target = match (rel.parent(), rel.file_name()) {
             (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
-                let dir = self.open_raw(parent, OFlags::PATH | OFlags::DIRECTORY)?;
+                let dir = self.open_under(self.confinement(parent), parent, OFlags::PATH | OFlags::DIRECTORY)?;
                 rustix::fs::readlinkat(&dir, name, Vec::new())?
             }
             _ => rustix::fs::readlinkat(&self.fd, rel, Vec::new())?,
@@ -417,7 +433,8 @@ impl Root {
     /// directories are an empty listing rather than an error: most search
     /// paths are absent on most hosts, and that is not a collector failure.
     pub fn read_dir(&self, rel: impl AsRef<Path>) -> io::Result<Vec<DirEnt>> {
-        let fd = self.open_raw(rel.as_ref(), OFlags::RDONLY | OFlags::DIRECTORY)?;
+        let rel = rel.as_ref();
+        let fd = self.open_under(self.confinement(rel), rel, OFlags::RDONLY | OFlags::DIRECTORY)?;
         let mut out = Vec::new();
         for ent in Dir::read_from(&fd)? {
             let ent = ent?;
@@ -459,10 +476,14 @@ impl Root {
     pub fn dir_identity(&self, rel: impl AsRef<Path>) -> io::Result<(u64, u64)> {
         let rel = strip_leading_slash(rel.as_ref());
         let rel = if rel.as_os_str().is_empty() { Path::new(".") } else { rel };
-        let fd = self.open_raw(rel, OFlags::PATH | OFlags::DIRECTORY)?;
+        let fd = self.open_under(self.confinement(rel), rel, OFlags::PATH | OFlags::DIRECTORY)?;
         let st = rustix::fs::statat(&fd, "", AtFlags::EMPTY_PATH)?;
         Ok((st.st_dev as u64, st.st_ino as u64))
     }
+}
+
+fn leaves_home(rel: &Path, target: PathBuf) -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, Refusal::LeavesHome { link: rel.to_path_buf(), target })
 }
 
 fn not_regular(rel: &Path) -> io::Error {
@@ -663,6 +684,39 @@ mod tests {
 
         // And a link outside any home is not this rule's business.
         assert!(root.escaping_link(Path::new("etc/shadow")).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_linked_directory_out_of_a_home_cannot_be_listed_stated_or_walked() {
+        // Only file opens applied the home rule, so a directory link was
+        // enough to list what is under /root, resolve into it, and read the
+        // link names inside it.
+        let dir = tmpdir("dir-escape");
+        std::fs::create_dir_all(dir.join("home/alice")).unwrap();
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::create_dir_all(dir.join("srv/secret/systemd/user")).unwrap();
+        std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
+        std::fs::write(dir.join("srv/secret/systemd/user/private.service"), b"[Service]\nExecStart=/x\n").unwrap();
+        std::fs::write(dir.join("srv/secret/token"), b"TOKEN").unwrap();
+        std::os::unix::fs::symlink("/srv/secret", dir.join("home/alice/.secret")).unwrap();
+        std::os::unix::fs::symlink("/srv/secret/token", dir.join("home/alice/.token")).unwrap();
+        let root = Root::at(&dir).unwrap();
+
+        let refused = |e: io::Error| matches!(refusal(&e), Some(Refusal::LeavesHome { .. }));
+        assert!(refused(root.read_dir("home/alice/.secret").err().unwrap()));
+        assert!(refused(root.read_dir("home/alice/.secret/systemd").err().unwrap()));
+        assert!(refused(root.dir_identity("home/alice/.secret").err().unwrap()));
+        assert!(refused(root.stat_follow("home/alice/.secret/token").err().unwrap()));
+        assert!(refused(root.stat_follow("home/alice/.token").err().unwrap()));
+        assert!(refused(root.stat("home/alice/.secret/token").err().unwrap()), "the link's own stat, through a linked directory");
+        assert!(refused(root.read_link("home/alice/.secret/token").err().unwrap()));
+
+        // The link itself is still evidence: it can be stated and read.
+        assert!(root.stat("home/alice/.secret").unwrap().is_symlink);
+        assert_eq!(root.read_link("home/alice/.secret").unwrap(), Path::new("/srv/secret"));
+        // And the same paths outside a home are not this rule's business.
+        assert_eq!(root.read_dir("srv/secret").unwrap().len(), 2);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

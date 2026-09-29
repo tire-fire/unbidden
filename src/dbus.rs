@@ -377,18 +377,14 @@ pub fn apply(manager: &Manager, entries: &mut [Entry]) -> usize {
 
         // A generated unit was written by a systemd generator, which is
         // itself a persistence mechanism and a separate entry. Saying so
-        // here is what lets an operator connect the two.
+        // here is what lets an operator connect the two. Which file a
+        // generator wrote is not this layer's to say: it is provenance's,
+        // by where the file is (`run/systemd/generator*`, which only root
+        // writes). A manager's answer is enablement, and a user manager is
+        // a process its account runs, so what it says must never decide
+        // whether a row is hidden (§6).
         if state == "generated" {
             e.note("generated", "true");
-            if matches!(e.provenance, Provenance::Unpackaged | Provenance::Unknown) {
-                e.provenance = Provenance::GeneratedBy { by: "systemd-generator".into() };
-                // The unit file was written by a generator; what it runs is a
-                // separate file with its own verdict. An Unpackaged flag that
-                // came from the target is still true and stays.
-                if e.raw.get("target_provenance").map(String::as_str) != Some("unpackaged") {
-                    e.flags.retain(|f| *f != Flag::Unpackaged);
-                }
-            }
         }
     }
     answered
@@ -517,32 +513,30 @@ mod tests {
     }
 
     #[test]
-    fn a_generated_unit_is_attributed_to_its_generator_not_called_unpackaged() {
-        let mut e = Entry::new(Kind::SystemdUnit, "/run/systemd/generator/x.mount", "x.mount");
+    fn a_managers_generated_answer_never_decides_a_units_provenance() {
+        // alice runs her own user manager on a bus only she controls, so it
+        // can claim any of her units is generated. That once set
+        // GeneratedBy, dropped the Unpackaged flag, and hid a unit running a
+        // verified program from the default view.
+        let mut e = user_unit("/home/alice/.config/systemd/user/c2.service", "c2.service", "user:alice");
+        e.note("scope_uid", "1000");
         e.provenance = Provenance::Unpackaged;
         e.flag(Flag::Unpackaged);
-
-        let manager = manager_of(vec![("/run/systemd/generator/x.mount", answers(&[("system", "generated")]))]);
-
+        let manager = manager_of(vec![("/home/alice/.config/systemd/user/c2.service", answers(&[("user:1000", "generated")]))]);
         let mut entries = vec![e];
         apply(&manager, &mut entries);
-        assert!(!entries[0].has_flag(Flag::Unpackaged));
-        assert_eq!(entries[0].raw["generated"], "true");
-        assert!(matches!(&entries[0].provenance, Provenance::GeneratedBy { by } if by == "systemd-generator"));
-    }
+        assert_eq!(entries[0].provenance, Provenance::Unpackaged);
+        assert!(entries[0].has_flag(Flag::Unpackaged));
+        assert_eq!(entries[0].raw["generated"], "true", "what it said is still recorded");
 
-    #[test]
-    fn a_generated_unit_keeps_the_unpackaged_flag_its_target_earned() {
-        let mut e = Entry::new(Kind::SystemdUnit, "/run/systemd/generator/x.service", "x.service");
+        // The system manager's word does not decide it either; the path does.
+        let mut e = Entry::new(Kind::SystemdUnit, "/etc/systemd/system/x.service", "x.service");
         e.provenance = Provenance::Unpackaged;
-        e.note("target_provenance", "unpackaged");
         e.flag(Flag::Unpackaged);
-
-        let manager = manager_of(vec![("/run/systemd/generator/x.service", answers(&[("system", "generated")]))]);
+        let manager = manager_of(vec![("/etc/systemd/system/x.service", answers(&[("system", "generated")]))]);
         let mut entries = vec![e];
         apply(&manager, &mut entries);
-        assert!(matches!(&entries[0].provenance, Provenance::GeneratedBy { .. }));
-        assert!(entries[0].has_flag(Flag::Unpackaged), "what the unit runs is still unpackaged");
+        assert_eq!(entries[0].provenance, Provenance::Unpackaged);
     }
 
     #[test]

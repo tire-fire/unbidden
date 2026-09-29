@@ -487,6 +487,10 @@ fn hooks(cx: &mut Ctx, w: &mut Walk, gitdir: &Path, repo: &str, gitdir_abs: &str
         if !meta.is_file || meta.mode & 0o111 == 0 {
             continue;
         }
+        // A repository outside a home has no home rule to keep a link inside
+        // it, and any account can plant one: `pre-commit -> /root/.secret`
+        // would put the text of a root-only script in the report.
+        let followed = cx.root.stat(&rel).is_ok_and(|link| reaches_only_what_its_owner_owns(&link, &meta));
 
         let mut e = cx.entry(Kind::GitHook, &rel, ent.name.to_string_lossy());
         name_from_os(&mut e, &ent.name);
@@ -495,12 +499,23 @@ fn hooks(cx: &mut Ctx, w: &mut Walk, gitdir: &Path, repo: &str, gitdir_abs: &str
         e.target_path = Some(cx.root.abs(&rel));
         e.note("repository", repo);
         e.note("gitdir", gitdir_abs);
-        if let Some(line) = shebang(cx, &rel) {
+        if !followed {
+            e.note("not_followed", "a link to a file its owner does not own");
+            cx.note_limited(format!("{}: a link to a file its owner does not own, not read", cx.root.abs(&rel).display()));
+        } else if let Some(line) = shebang(cx, &rel) {
             e.note("interpreter", line);
         }
         out.push(e);
     }
     out
+}
+
+/// Whether a link an account planted may be followed: a root-owned link goes
+/// anywhere, since root could read the target itself; any other only to a file
+/// its own owner owns, since otherwise it makes this scan read for them what
+/// they cannot (§3).
+fn reaches_only_what_its_owner_owns(link: &crate::root::Meta, target: &crate::root::Meta) -> bool {
+    link.uid == 0 || link.uid == target.uid
 }
 
 /// The interpreter line of a hook, which is what actually executes when the
@@ -601,7 +616,18 @@ fn gitdir_file(cx: &mut Ctx, w: &mut Walk, rel: &Path, worktree: &Path) -> Vec<E
     // for a mounted image is not a path on the analyst's machine.
     let gitdir =
         if target.is_absolute() { cx.root.rel(target) } else { worktree.join(target) };
-    repository(cx, w, &normalize(&gitdir), worktree)
+    let gitdir = normalize(&gitdir);
+    // The file is its owner's to write, so what it names is theirs to read:
+    // `gitdir: /root/.x` would have this scan read root's config for them.
+    let owned = match (cx.root.stat(rel), cx.root.stat_follow(&gitdir)) {
+        (Ok(file), Ok(dir)) => reaches_only_what_its_owner_owns(&file, &dir),
+        _ => true,
+    };
+    if !owned {
+        cx.note_limited(format!("{}: names a gitdir its owner does not own, not followed", cx.root.abs(rel).display()));
+        return Vec::new();
+    }
+    repository(cx, w, &gitdir, worktree)
 }
 
 /// `..` resolved in the path rather than on disk. It matches how the root
@@ -764,6 +790,25 @@ fn lower(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_link_reaches_only_what_its_owner_owns() {
+        let meta = |uid| crate::root::Meta {
+            uid,
+            gid: 0,
+            mode: 0o755,
+            size: 0,
+            mtime: None,
+            ctime: None,
+            is_dir: false,
+            is_symlink: false,
+            is_file: true,
+        };
+        assert!(super::reaches_only_what_its_owner_owns(&meta(1000), &meta(1000)));
+        assert!(!super::reaches_only_what_its_owner_owns(&meta(1000), &meta(0)), "alice's link to a root file");
+        assert!(!super::reaches_only_what_its_owner_owns(&meta(1000), &meta(1001)));
+        assert!(super::reaches_only_what_its_owner_owns(&meta(0), &meta(1000)), "root's own link goes anywhere");
+    }
+
     use super::*;
     use crate::root::Root;
     use crate::scan::{Options, Scan, Status, run};

@@ -246,6 +246,13 @@ impl Walk {
         // /etc/systemd/user and merged-usr makes /lib one to /usr/lib;
         // walking the link's name would report every unit under a path no
         // administrator uses, and re-key them all in the process (§5).
+        // Not for a directory a home links out of it: its account could
+        // point ~/.config/systemd/user at /root's, and the walk would then
+        // read root's units as theirs (§3).
+        if let Some(target) = cx.root.escaping_link(dir) {
+            cx.note_left_home(dir, &target);
+            return;
+        }
         let canonical = match cx.root.stat(dir) {
             Ok(m) if m.is_symlink => cx.root.resolve(dir).ok(),
             _ => None,
@@ -1207,6 +1214,19 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
         // A leading `-` means tolerate absence; the path is what follows.
         let path = spec.strip_prefix(b"-").unwrap_or(spec);
         let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+        // A unit in a home belongs to its account, whose user manager reads
+        // what that account can read. Root reading whatever path it names
+        // would read it on the account's behalf: `EnvironmentFile=` at
+        // /etc/mysql/debian.cnf would put root's secrets in the report. Only
+        // what lies inside the account's own home is read; the root applies
+        // its rule to links and `..` from there.
+        if let Scope::Home(who) = scope {
+            let inside = cx.users.iter().find(|u| &u.name == who).is_some_and(|u| path.starts_with(&u.home));
+            if !inside {
+                e.note(&indexed("env_file_skipped", i), "outside the account's home; not read on its behalf");
+                continue;
+            }
+        }
         let Some(bytes) = cx.read_capped(&path, 256 * 1024) else { continue };
         for (k, v) in parse_env_file(&bytes) {
             e.note(&format!("env.{k}"), v);
@@ -1434,6 +1454,49 @@ mod tests {
         assert_eq!(rc_local.raw["condition_fails"], "ConditionFileIsExecutable=/etc/rc.local", "present but not executable");
         assert!(!one(&s, "held.service").raw.contains_key("condition_fails"), "a negated absent path, a directory and a present file all hold");
         assert!(!one(&s, "reset.service").raw.contains_key("condition_fails"), "an empty assignment clears the list");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_home_cannot_make_root_read_units_it_may_not_or_break_the_scan() {
+        let dir = tree("home-escape");
+        write(&dir, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/sh\nbob:x:1001:1001::/home/bob:/bin/sh\n");
+        std::fs::create_dir_all(dir.join("home/alice/.config/systemd")).unwrap();
+        std::fs::create_dir_all(dir.join("home/bob/.config/systemd")).unwrap();
+        write(&dir, "srv/secret/user/private.service", b"[Service]\nExecStart=/usr/bin/tool --token=ROOTSECRET\n");
+        write(&dir, "srv/secret/file", b"not a directory");
+        link(&dir, "/srv/secret/user", "home/alice/.config/systemd/user");
+        link(&dir, "/srv/secret/file", "home/bob/.config/systemd/user");
+        let s = scan(&dir);
+        assert!(s.entries.iter().all(|e| !e.name.contains("private")), "root's unit is not alice's");
+        assert!(
+            !serde_json::to_string(&s.entries).unwrap().contains("ROOTSECRET"),
+            "and its command is not in the report"
+        );
+        let status = &s.header.collectors[0].status;
+        assert!(matches!(status, crate::scan::Status::Complete), "a link out of a home is a limit, not a failure: {status:?}");
+        assert!(s.header.collectors[0].truncated.iter().any(|t| t.contains("alice") && t.contains("not followed")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_home_unit_reads_only_environment_files_inside_its_home() {
+        let dir = tree("env-file");
+        write(&dir, "etc/passwd", b"alice:x:1000:1000::/home/alice:/bin/sh\n");
+        write(&dir, "etc/mysql/debian.cnf", b"password=ROOTSECRET\n");
+        write(&dir, "home/alice/env", b"LD_PRELOAD=/tmp/x.so\n");
+        let unit = |env: &str| format!("[Service]\nEnvironmentFile={env}\nExecStart=/usr/bin/tool\n");
+        write(&dir, "home/alice/.config/systemd/user/theirs.service", unit("/etc/mysql/debian.cnf").as_bytes());
+        write(&dir, "home/alice/.config/systemd/user/mine.service", unit("/home/alice/env").as_bytes());
+        write(&dir, "home/alice/.config/systemd/user/dots.service", unit("/home/alice/../../etc/mysql/debian.cnf").as_bytes());
+        write(&dir, "etc/systemd/system/admin.service", unit("/etc/mysql/debian.cnf").as_bytes());
+        let s = scan(&dir);
+        let theirs = one(&s, "theirs.service");
+        assert!(!theirs.raw.keys().any(|k| k.starts_with("env.")), "{:?}", theirs.raw);
+        assert!(theirs.raw.keys().any(|k| k.starts_with("env_file_skipped")), "the skip is on the entry: {:?}", theirs.raw);
+        assert_eq!(one(&s, "mine.service").raw["env.LD_PRELOAD"], "/tmp/x.so");
+        assert!(!one(&s, "dots.service").raw.keys().any(|k| k.starts_with("env.")), "`..` out of the home is refused too");
+        assert_eq!(one(&s, "admin.service").raw["env.password"], "ROOTSECRET", "an administrator's unit reads what it names");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
