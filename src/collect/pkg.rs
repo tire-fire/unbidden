@@ -988,7 +988,7 @@ fn rpm(cx: &mut Ctx) -> Vec<Entry> {
             // /tmp:/home` — share the prefix and load nothing, so they are
             // reported as the settings they are rather than as code that runs.
             let off = body.is_empty() || body == b"%{nil}" || body == b"%nil";
-            if off || names_shared_object(body) {
+            if off || shared_object_name(body).is_some() {
                 e.note("role", "plugin");
                 // rpm turns a transaction plugin off by defining its macro
                 // empty, which is why an empty body is not a missing value.
@@ -1228,13 +1228,10 @@ fn apk_hooks(cx: &mut Ctx) -> Vec<Entry> {
     out
 }
 
-/// Does this macro body name something rpm could dlopen? The extension is the
-/// only signal available before the transaction runs: rpm finds its plugins by
-/// looking for shared objects, and the macro says which one and with what.
-fn names_shared_object(body: &[u8]) -> bool {
-    shared_object_name(body).is_some()
-}
-
+/// The shared object a macro body names, if it names one rpm could dlopen.
+/// The extension is the only signal available before the transaction runs:
+/// rpm finds its plugins by looking for shared objects, and the macro says
+/// which one and with what.
 fn shared_object_name(body: &[u8]) -> Option<String> {
     body.split(|b: &u8| b.is_ascii_whitespace())
         .find(|w| w.ends_with(b".so"))

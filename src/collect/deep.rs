@@ -461,7 +461,7 @@ fn repository(cx: &mut Ctx, w: &mut Walk, gitdir: &Path, worktree: &Path) -> Vec
     let repo = cx.root.abs(worktree).display().to_string();
     let gitdir_abs = cx.root.abs(gitdir).display().to_string();
     let mut out = hooks(cx, w, gitdir, &repo, &gitdir_abs);
-    out.extend(config(cx, gitdir, &repo, &gitdir_abs));
+    out.extend(config_at(cx, &gitdir.join("config"), &repo, &gitdir_abs));
     out
 }
 
@@ -528,10 +528,6 @@ fn shebang(cx: &Ctx, rel: &Path) -> Option<String> {
     let rest = bytes.strip_prefix(b"#!")?;
     let end = rest.iter().position(|b| *b == b'\n').unwrap_or(rest.len());
     Some(String::from_utf8_lossy(rest[..end].trim_ascii()).into_owned())
-}
-
-fn config(cx: &mut Ctx, gitdir: &Path, repo: &str, gitdir_abs: &str) -> Vec<Entry> {
-    config_at(cx, &gitdir.join("config"), repo, gitdir_abs)
 }
 
 fn config_at(cx: &mut Ctx, rel: &Path, repo: &str, gitdir_abs: &str) -> Vec<Entry> {

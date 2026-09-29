@@ -41,7 +41,6 @@ fn entry(cx: &mut Ctx, rel: &Path, name: String, browser: &str, installed: bool)
     let mut e = cx.entry(Kind::BrowserPolicy, rel, name);
     e.trigger = Trigger::Login;
     e.enabled = Enablement::Enabled;
-    e.principal = None;
     e.note("browser", browser);
     if !installed {
         e.enabled = Enablement::Disabled;

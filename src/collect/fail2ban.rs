@@ -49,7 +49,7 @@ impl Collector for Fail2ban {
         let installed = cx.root.exists("usr/bin/fail2ban-server");
         let jails = read_config(cx, "jail");
         let mut used: BTreeSet<String> = BTreeSet::new();
-        for (section, keys) in &jails {
+        for (section, _) in &jails {
             if section == "DEFAULT" || section == "INCLUDES" {
                 continue;
             }
@@ -58,7 +58,6 @@ impl Collector for Fail2ban {
             if !enabled {
                 continue;
             }
-            let _ = keys;
             if let Some(action) = get("action") {
                 let mut budget = SUBSTITUTIONS;
                 used.extend(split_actions(&interpolate(&jails, section, &action, 0, &mut budget)));

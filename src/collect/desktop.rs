@@ -215,7 +215,6 @@ fn autostart(cx: &mut Ctx) -> Vec<Entry> {
         name_from_os(&mut e, &name);
         e.trigger = Trigger::Login;
         e.enabled = Enablement::Enabled;
-        e.principal = None;
         e.note("directory", "Xwayland-session.d");
         e.note("run_by", "gsd-xsettings");
         e.note("runs_when", "a GNOME Wayland session starts, as the user, before any X11 client");

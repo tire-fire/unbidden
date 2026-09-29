@@ -111,7 +111,6 @@ fn target(cx: &mut Ctx, e: &mut Entry, lib: &str, libdirs: &[String]) {
 fn entry(cx: &mut Ctx, rel: &Path, name: String, framework: &str, trigger: Trigger) -> Entry {
     let mut e = cx.entry(Kind::Plugin, rel, name);
     e.trigger = trigger;
-    e.principal = None;
     e.enabled = Enablement::Enabled;
     e.note("loaded_by", framework);
     e

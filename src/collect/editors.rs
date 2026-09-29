@@ -51,7 +51,6 @@ fn entry(cx: &mut Ctx, rel: &Path, name: String, program: &str, installed: bool)
     let mut e = cx.entry(Kind::ProgramStartup, rel, name);
     e.trigger = Trigger::Always;
     e.enabled = Enablement::Enabled;
-    e.principal = None;
     e.note("loaded_by", program);
     e.note("runs_when", format!("{program} starts, for every account"));
     if !installed {
