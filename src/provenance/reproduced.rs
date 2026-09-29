@@ -33,10 +33,11 @@ const NSSWITCH_TEMPLATE: &str = "usr/share/libc-bin/nsswitch.conf";
 
 /// Files a package's postinst installs by copying a template it ships, so
 /// that dpkg owns the template and never the file: base-files' /etc/profile
-/// and root's dotfiles, openssh-server's sshd_config from Debian 12 on,
-/// sysvinit-core's inittab. Byte for byte the template, the file is what the
+/// and root's dotfiles, libc-bin's nsswitch.conf, openssh-server's sshd_config
+/// from Debian 12 on, sysvinit-core's inittab. Byte for byte the template, the file is what the
 /// package wrote; edited, it is the operator's or an intruder's, and shows.
-const COPIES: [(&str, &str); 5] = [
+const COPIES: [(&str, &str); 6] = [
+    (NSSWITCH, NSSWITCH_TEMPLATE),
     ("etc/profile", "usr/share/base-files/profile"),
     ("root/.bashrc", "usr/share/base-files/dot.bashrc"),
     ("root/.profile", "usr/share/base-files/dot.profile"),
@@ -78,33 +79,86 @@ fn read(root: &Root, rel: &Path) -> Option<Vec<u8>> {
     root.read_capped(rel, CAP).ok().filter(|(_, truncated)| !truncated).map(|(b, _)| b)
 }
 
+/// How a file this module can reproduce is made: the same description says
+/// what it reads (which must be packaged and intact), what it should contain,
+/// and who to credit.
+enum Recipe {
+    /// A copy of a packaged template.
+    Copy(PathBuf),
+    /// The /etc/pam.d/common-<type> stack pam-auth-update assembles.
+    Pam { ty: &'static str, template: PathBuf, modules: Vec<String> },
+    /// A PAM stack authselect renders from its profile.
+    Authselect { template: PathBuf, features: Vec<String> },
+}
+
+fn recipe(root: &Root, path: &Path) -> Option<Recipe> {
+    if let Some(ty) = pam_type(path) {
+        return Some(Recipe::Pam {
+            ty,
+            template: Path::new(PAM_TEMPLATES).join(format!("common-{ty}")),
+            modules: saved_modules(root, ty),
+        });
+    }
+    if let Some(name) = authselect_name(path) {
+        let (dir, features) = authselect_config(root)?;
+        return Some(Recipe::Authselect { template: dir.join(name), features });
+    }
+    template_of(path).map(Recipe::Copy)
+}
+
+impl Recipe {
+    /// The packaged files the reproduction reads, whose verdicts are looked up
+    /// alongside it.
+    fn inputs(&self, root: &Root) -> Vec<PathBuf> {
+        match self {
+            Recipe::Copy(template) => vec![template.clone()],
+            Recipe::Pam { template, modules, .. } => {
+                let mut inputs: Vec<PathBuf> = modules.iter().map(|m| Path::new(PAM_PROFILES).join(m)).collect();
+                inputs.push(template.clone());
+                inputs
+            }
+            // A profile without this file renders it empty, preamble only.
+            Recipe::Authselect { template, .. } => if root.exists(template) { vec![template.clone()] } else { Vec::new() },
+        }
+    }
+
+    /// What the file should hold, byte for byte, or None where it cannot be
+    /// worked out.
+    fn expected(&self, root: &Root) -> Option<Vec<u8>> {
+        match self {
+            Recipe::Copy(template) => read(root, template),
+            Recipe::Pam { ty, template, modules } => pam_auth_update(root, ty, template, modules),
+            Recipe::Authselect { template, features } => match read(root, template) {
+                Some(t) => authselect_render(&t, features).map(|r| [AUTHSELECT_PREAMBLE.as_bytes(), &r].concat()),
+                None if !root.exists(template) => Some(AUTHSELECT_PREAMBLE.as_bytes().to_vec()),
+                None => None,
+            },
+        }
+    }
+
+    /// Who made it, for the verdict. A copy is credited to the package that
+    /// ships the template, which must be known.
+    fn by(&self, answers: &Answers) -> Option<String> {
+        match self {
+            Recipe::Copy(template) => {
+                let Some(Provenance::Packaged { package, .. }) = answers.get(template) else { return None };
+                Some(format!("{package}, identical to /{}", template.display()))
+            }
+            Recipe::Pam { .. } => Some("pam-auth-update".to_string()),
+            Recipe::Authselect { .. } => Some("authselect".to_string()),
+        }
+    }
+}
+
 /// For each wanted path this module can reproduce, the packaged files the
 /// reproduction reads, whose verdicts must be looked up alongside it.
 pub fn inputs(root: &Root, wanted: &std::collections::BTreeSet<PathBuf>) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    for path in wanted {
-        if path == Path::new(NSSWITCH) {
-            out.push(PathBuf::from(NSSWITCH_TEMPLATE));
-        } else if let Some(ty) = pam_type(path) {
-            out.push(Path::new(PAM_TEMPLATES).join(format!("common-{ty}")));
-            out.extend(saved_modules(root, ty).into_iter().map(|m| Path::new(PAM_PROFILES).join(m)));
-        } else if let Some(name) = authselect_name(path) {
-            if let Some((dir, _)) = authselect_config(root) {
-                out.push(dir.join(name));
-            }
-        } else if let Some(template) = template_of(path) {
-            out.push(template);
-        }
-    }
-    out
+    wanted.iter().filter_map(|path| recipe(root, path)).flat_map(|r| r.inputs(root)).collect()
 }
 
 /// Verdicts for the wanted paths no package claimed and this module can
 /// reproduce from packaged, intact inputs.
 pub fn classify(root: &Root, wanted: &std::collections::BTreeSet<PathBuf>, answers: &Answers) -> Answers {
-    let intact = |p: &Path| {
-        matches!(answers.get(p), Some(Provenance::Packaged { integrity: Integrity::Intact, .. }))
-    };
     let mut out = Answers::new();
     for path in wanted {
         // A verdict a package database gave stands, unless it is a file the
@@ -114,38 +168,12 @@ pub fn classify(root: &Root, wanted: &std::collections::BTreeSet<PathBuf>, answe
             None | Some(Provenance::Packaged { integrity: Integrity::Unknown, .. }) => {}
             Some(_) => continue,
         }
-        let (expected, inputs, by) = if path == Path::new(NSSWITCH) {
-            let Some(Provenance::Packaged { package, .. }) = answers.get(Path::new(NSSWITCH_TEMPLATE)) else { continue };
-            let by = format!("{package}, identical to /{NSSWITCH_TEMPLATE}");
-            (read(root, Path::new(NSSWITCH_TEMPLATE)), vec![PathBuf::from(NSSWITCH_TEMPLATE)], by)
-        } else if let Some(ty) = pam_type(path) {
-            let template = Path::new(PAM_TEMPLATES).join(format!("common-{ty}"));
-            let modules = saved_modules(root, ty);
-            let mut inputs: Vec<PathBuf> = modules.iter().map(|m| Path::new(PAM_PROFILES).join(m)).collect();
-            inputs.push(template.clone());
-            (pam_auth_update(root, ty, &template, &modules), inputs, "pam-auth-update".to_string())
-        } else if let Some(name) = authselect_name(path) {
-            let Some((dir, features)) = authselect_config(root) else { continue };
-            let template = dir.join(name);
-            // A profile without this file renders it empty, preamble only.
-            let (rendered, inputs) = match read(root, &template) {
-                Some(t) => (authselect_render(&t, &features), vec![template]),
-                None if !root.exists(&template) => (Some(Vec::new()), Vec::new()),
-                None => continue,
-            };
-            let expected = rendered.map(|r| [AUTHSELECT_PREAMBLE.as_bytes(), &r].concat());
-            (expected, inputs, "authselect".to_string())
-        } else if let Some(template) = template_of(path) {
-            let Some(Provenance::Packaged { package, .. }) = answers.get(&template) else { continue };
-            let by = format!("{package}, identical to /{}", template.display());
-            (read(root, &template), vec![template], by)
-        } else {
-            continue;
-        };
-        if !inputs.iter().all(|p| intact(p)) {
+        let Some(recipe) = recipe(root, path) else { continue };
+        let Some(by) = recipe.by(answers) else { continue };
+        if !recipe.inputs(root).iter().all(|p| answers.get(p).is_some_and(Provenance::is_packaged_intact)) {
             continue;
         }
-        if let (Some(expected), Some(actual)) = (expected, read(root, path)) {
+        if let (Some(expected), Some(actual)) = (recipe.expected(root), read(root, path)) {
             if expected == actual {
                 out.insert(path.clone(), Provenance::Reproduced { by });
             }
