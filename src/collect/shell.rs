@@ -563,7 +563,9 @@ fn nonstandard_lib_dirs(cx: &mut Ctx) -> Vec<String> {
 /// the real one. The file that names it is the source; a vendor's packaged
 /// drop-in is hidden like any other packaged file.
 fn library_dirs(cx: &mut Ctx, out: &mut Vec<Entry>) {
-    for (dir, rel) in super::ld_so_conf_dirs(cx) {
+    let mut dirs = super::ld_so_conf_dirs(cx);
+    dirs.extend(musl_path_dirs(cx));
+    for (dir, rel) in dirs {
         if is_standard_lib_dir(&dir) {
             continue;
         }
@@ -573,6 +575,28 @@ fn library_dirs(cx: &mut Ctx, out: &mut Vec<Entry>) {
         e.target_path = Some(PathBuf::from(&dir));
         out.push(e);
     }
+}
+
+/// The directories musl's loader searches, from `/etc/ld-musl-<arch>.path`,
+/// each with the file that names it. A present file replaces the default
+/// search path outright, so a directory listed first decides which library
+/// answers a soname. Measured on Alpine 3.24: entries are separated by
+/// newlines and colons and by nothing else, so a blank or a carriage return
+/// belongs to the name, and there is no comment syntax.
+fn musl_path_dirs(cx: &mut Ctx) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    for ent in cx.dir("etc") {
+        let name = ent.name.to_string_lossy().into_owned();
+        if ent.is_dir || !name.starts_with("ld-musl-") || !name.ends_with(".path") {
+            continue;
+        }
+        let rel = Path::new("etc").join(&name);
+        let Some(bytes) = cx.read_capped(&rel, 64 * 1024) else { continue };
+        for dir in bytes.split(|b| matches!(b, b'\n' | b':')).filter(|d| !d.is_empty()) {
+            out.push((String::from_utf8_lossy(dir).into_owned(), rel.clone()));
+        }
+    }
+    out
 }
 
 fn is_standard_lib_dir(d: &str) -> bool {
@@ -1225,6 +1249,16 @@ mod tests {
         let names: Vec<Vec<u8>> = preload_names(b"/a.so  /b.so # c /d.so\n/e.so:/f.so\n/g#h.so\n/i.so\r\n\0/never.so\n").into_iter().map(|(n, _)| n).collect();
         let want: [&[u8]; 6] = [b"/a.so", b"/b.so", b"/e.so", b"/f.so", b"/g", b"/i.so\r"];
         assert_eq!(names, want);
+    }
+
+    #[test]
+    fn musl_search_path_file_names_directories_by_its_own_rules() {
+        let dir = tmpdir("musl-path");
+        fs::create_dir_all(dir.join("etc")).unwrap();
+        fs::write(dir.join("etc/ld-musl-x86_64.path"), "/opt/x:/lib\n#/hash\n/usr/lib\n").unwrap();
+        let scan = run(&dir);
+        let names: Vec<_> = scan.entries.iter().filter(|e| e.kind == Kind::LibraryDir).map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["#/hash", "/opt/x"], "colon and newline separate, nothing comments, /lib and /usr/lib are standard");
     }
 
     #[test]

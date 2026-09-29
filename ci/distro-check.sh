@@ -442,6 +442,10 @@ if [ "$FAMILY" = apk ]; then
         *) fail "the appended apk repository lost its tag: $repo" ;;
     esac
     printf -- '-----BEGIN PUBLIC KEY-----\nMIIB\n-----END PUBLIC KEY-----\n' | plant_check /etc/apk/keys/unbidden-check.rsa.pub pkg_source '"name":"key:unbidden-check.rsa.pub"'
+    # musl's search path file replaces the default; keeping /lib and /usr/lib
+    # in it leaves the container working while the plant is in place.
+    loader=$(ls /lib/ld-musl-*.so.1 | head -n 1); loader=${loader##*/}; loader=${loader%.so.1}
+    printf '/opt/unbidden-check-lib:/lib:/usr/lib\n' | plant_check "/etc/$loader.path" library_dir /opt/unbidden-check-lib
     triggers=$("$BIN" --json --all | tail -n +2 | grep '"kind":"pkg_hook"' | grep -c '"script":"trigger"' || true)
     [ "$triggers" -gt 0 ] || fail "the stock image registers a busybox trigger and none was reported"
     note "$triggers apk trigger scripts reported from the scripts archive"
