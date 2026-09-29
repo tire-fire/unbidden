@@ -303,7 +303,11 @@ fn commands(
         {
             let by = format!("/{}", sources[w].rel.display());
             if s.custom_merge {
-                e.enabled = Enablement::Unknown;
+                // Not knowing whether it merges is no reason to say it runs: an
+                // item the module will not run, or that fails it, stays off.
+                if e.enabled == Enablement::Enabled {
+                    e.enabled = Enablement::Unknown;
+                }
                 e.note("merge", format!("sets merge_how; may add to {by}"));
             } else {
                 e.enabled = Enablement::Disabled;
@@ -455,6 +459,23 @@ mod tests {
             .iter()
             .find(|e| e.command.as_deref() == Some(command.as_bytes()))
             .unwrap_or_else(|| panic!("no entry runs {command}"))
+    }
+
+    #[test]
+    fn a_merge_that_may_add_does_not_turn_a_module_that_never_runs_into_a_maybe() {
+        let d = std::env::temp_dir().join(format!("unbidden-cloudinit-merge-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        put(&d, "usr/bin/cloud-init", "#!/usr/bin/python3\n", 0o755);
+        // runcmd is in no module list, so nothing runs it whatever merges.
+        put(&d, "etc/cloud/cloud.cfg", "cloud_init_modules: [bootcmd]\nruncmd: [echo base]\n", 0o644);
+        put(&d, "etc/cloud/cloud.cfg.d/10-m.cfg", "merge_how: list(append)+dict()\nruncmd: [echo appended]\n", 0o644);
+        put(&d, "etc/cloud/cloud.cfg.d/90-z.cfg", "runcmd: [echo winner]\n", 0o644);
+        let s = scan(&d);
+        let appended = by_command(&s, "echo appended");
+        assert_eq!(appended.enabled, Enablement::Disabled);
+        assert_eq!(appended.raw["not_run"], "runcmd is in no module list");
+        assert!(appended.raw["merge"].starts_with("sets merge_how"), "the merge is still said");
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
