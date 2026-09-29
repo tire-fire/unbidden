@@ -1704,6 +1704,11 @@ fn handed_off(head: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
 /// `os.path.exists`, `os.path.isfile`, `os.access` and `shutil.which`. A
 /// program a script runs only after finding it is not an orphan when it
 /// is absent; the script is written for hosts without it.
+/// How far back from a program's name a guard for it is looked for. Longer
+/// than any `[ -x … ] &&`, `command -v` or `os.path.exists(` idiom, and the
+/// three lines an environment-variable `if` may span.
+const GUARD_WINDOW: usize = 512;
+
 fn guarded_by_test(text: &[u8], path: &[u8]) -> Option<String> {
     const TESTS: [&str; 5] = ["-x", "-e", "-f", "-s", "-r"];
     const CALLS: [&str; 6] = ["command -v", "which", "type", "os.path.exists(", "os.path.isfile(", "os.access("];
@@ -1719,7 +1724,10 @@ fn guarded_by_test(text: &[u8], path: &[u8]) -> Option<String> {
         if text.get(at + path.len()).is_some_and(|b| !b.is_ascii_whitespace() && !b"\"')];&|".contains(b)) {
             continue;
         }
-        let before = String::from_utf8_lossy(&text[..at]).into_owned();
+        // Only the text just before the path can be a guard for it, and a
+        // prefix built per occurrence made this quadratic: a user unit
+        // naming one path sixty thousand times stalled a root scan for 13 s.
+        let before = String::from_utf8_lossy(&text[at.saturating_sub(GUARD_WINDOW)..at]).into_owned();
         // A hand-off inside an `if` on an environment variable — debconf's
         // dpkg-preconfigure execs cdebconf's only when DEBCONF_USE_CDEBCONF
         // is set — runs when a person asks for it, not unbidden.
@@ -2391,6 +2399,19 @@ mod tests {
         assert!(unit.flags.iter().all(|f| *f == Flag::DegradedEnablement), "{:?}", unit.flags);
         assert!(crate::render::suppressed(unit));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn looking_for_a_guard_is_linear_in_the_text() {
+        // The same path sixty thousand times, none guarded: what a user unit
+        // can hand a root scan.
+        let text = "/x ".repeat(120_000);
+        let started = std::time::Instant::now();
+        assert_eq!(guarded_by_test(text.as_bytes(), b"/x"), None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "took {:?}", started.elapsed());
+        // And a guard still counts wherever in a long text it sits.
+        let long = format!("{}[ -x /x ] && /x", "/x ".repeat(50_000));
+        assert_eq!(guarded_by_test(long.as_bytes(), b"/x").as_deref(), Some("-x test"));
     }
 
     #[test]
