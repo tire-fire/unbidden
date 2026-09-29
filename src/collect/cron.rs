@@ -173,7 +173,7 @@ fn busybox_crontab_dirs(cx: &mut Ctx) -> Vec<String> {
     let mut dirs = Vec::new();
     if let Some(bytes) = cx.read("etc/conf.d/crond") {
         for line in bytes.split(|b| *b == b'\n') {
-            let Some(value) = trim(line).strip_prefix(b"CRON_OPTS=") else { continue };
+            let Some(value) = line.trim_ascii().strip_prefix(b"CRON_OPTS=") else { continue };
             let words: Vec<&[u8]> = unquote(value).split(|b| b.is_ascii_whitespace()).filter(|w| !w.is_empty()).collect();
             for (i, w) in words.iter().enumerate() {
                 let dir = match w.strip_prefix(b"-c") {
@@ -234,7 +234,7 @@ fn busybox_crontab(cx: &mut Ctx, rel: &Path, user: &str, out: &mut Vec<Entry>) {
             continue;
         }
         let mut e = if tokens[0][0] == b'@' {
-            let command = take_fields(original, 1).map(|(_, rest)| trim_start(rest)).unwrap_or(b"");
+            let command = take_fields(original, 1).map(|(_, rest)| rest.trim_ascii_start()).unwrap_or(b"");
             match (shortcut(tokens[0]), tokens.len() >= 2) {
                 (Some(trigger), true) => job(cx, rel, user, tokens[0], command, trigger, &mut used),
                 _ => {
@@ -421,7 +421,7 @@ fn crontab(cx: &mut Ctx, rel: &Path, layout: Layout<'_>, out: &mut Vec<Entry>) {
     let mut used = BTreeMap::new();
 
     for line in bytes.split(|b| *b == b'\n') {
-        let line = trim(line);
+        let line = line.trim_ascii();
         if line.is_empty() || line[0] == b'#' {
             continue;
         }
@@ -490,7 +490,7 @@ fn anacrontab(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let mut used = BTreeMap::new();
 
     for line in bytes.split(|b| *b == b'\n') {
-        let line = trim(line);
+        let line = line.trim_ascii();
         if line.is_empty() || line[0] == b'#' {
             continue;
         }
@@ -532,7 +532,7 @@ fn anacron_job(line: &[u8]) -> Option<(&[u8], &[u8], &[u8], &[u8])> {
     let (period, rest) = take_fields(line, 1)?;
     let (delay, rest) = take_fields(rest, 1)?;
     let (id, rest) = take_fields(rest, 1)?;
-    let command = trim(rest);
+    let command = rest.trim_ascii();
     if command.is_empty() {
         return None;
     }
@@ -597,7 +597,7 @@ fn at_preamble(bytes: &[u8]) -> (usize, Option<u32>, BTreeMap<String, String>) {
 
     for line in bytes.split(|b| *b == b'\n') {
         let advance = line.len() + 1;
-        let t = trim(line);
+        let t = line.trim_ascii();
         if in_guard {
             at += advance;
             if t == b"}" {
@@ -660,7 +660,7 @@ fn split_job<'a>(line: &'a [u8], layout: &Layout<'_>) -> Option<Job<'a>> {
         Layout::ForUser(_) => (None, rest),
     };
     // Everything after the last field is the command, `#` and all.
-    let command = trim_start(rest);
+    let command = rest.trim_ascii_start();
     if command.is_empty() {
         return None;
     }
@@ -866,26 +866,6 @@ fn take_fields(s: &[u8], n: usize) -> Option<(&[u8], &[u8])> {
         end = i;
     }
     Some((&s[begin..end], &s[i..]))
-}
-
-fn trim(s: &[u8]) -> &[u8] {
-    let mut a = 0;
-    let mut b = s.len();
-    while a < b && s[a].is_ascii_whitespace() {
-        a += 1;
-    }
-    while b > a && s[b - 1].is_ascii_whitespace() {
-        b -= 1;
-    }
-    &s[a..b]
-}
-
-fn trim_start(s: &[u8]) -> &[u8] {
-    let mut a = 0;
-    while a < s.len() && s[a].is_ascii_whitespace() {
-        a += 1;
-    }
-    &s[a..]
 }
 
 fn has_crlf(bytes: &[u8]) -> bool {

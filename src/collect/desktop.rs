@@ -415,7 +415,7 @@ fn desktop_entry_group(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     let mut inside = false;
     for line in bytes.split(|b| *b == b'\n') {
-        let line = trim(line);
+        let line = line.trim_ascii();
         if line.is_empty() || line[0] == b'#' {
             continue;
         }
@@ -427,11 +427,11 @@ fn desktop_entry_group(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
             continue;
         }
         let Some(eq) = line.iter().position(|b| *b == b'=') else { continue };
-        let key = lossy(trim(&line[..eq]));
+        let key = lossy(line[..eq].trim_ascii());
         if key.is_empty() {
             continue;
         }
-        out.push((key, trim(&line[eq + 1..]).to_vec()));
+        out.push((key, line[eq + 1..].trim_ascii().to_vec()));
     }
     out
 }
@@ -1046,24 +1046,6 @@ fn colon_fields_contain(value: &str, uuid: &str) -> bool {
 
 // -------------------------------------------------------------------- bytes
 
-
-fn trim(mut line: &[u8]) -> &[u8] {
-    while let [first, rest @ ..] = line {
-        if first.is_ascii_whitespace() {
-            line = rest;
-        } else {
-            break;
-        }
-    }
-    while let [rest @ .., last] = line {
-        if last.is_ascii_whitespace() {
-            line = rest;
-        } else {
-            break;
-        }
-    }
-    line
-}
 
 #[cfg(test)]
 mod tests {

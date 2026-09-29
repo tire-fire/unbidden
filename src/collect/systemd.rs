@@ -966,15 +966,15 @@ fn parse_unit(bytes: &[u8]) -> Vec<Directive> {
         // A comment line is skipped whole, before any continuation is looked
         // for: it neither ends a continued line nor continues into the next
         // (checked with `systemd-analyze verify`).
-        if matches!(trim_start(line).first(), Some(b'#' | b';')) {
+        if matches!(line.trim_ascii_start().first(), Some(b'#' | b';')) {
             continue;
         }
         if !pending.is_empty() {
-            line = trim_start(line);
+            line = line.trim_ascii_start();
         }
-        let t = trim_end(line);
+        let t = line.trim_ascii_end();
         if t.last() == Some(&b'\\') && lines.peek().is_some() {
-            pending.extend_from_slice(trim_end(&t[..t.len() - 1]));
+            pending.extend_from_slice(t[..t.len() - 1].trim_ascii_end());
             pending.push(b' ');
             continue;
         }
@@ -990,7 +990,7 @@ fn parse_unit(bytes: &[u8]) -> Vec<Directive> {
 }
 
 fn push_directive(out: &mut Vec<Directive>, section: &mut String, logical: &[u8]) {
-    let t = trim(logical);
+    let t = logical.trim_ascii();
     if t.is_empty() || t[0] == b'#' || t[0] == b';' {
         return;
     }
@@ -1000,14 +1000,14 @@ fn push_directive(out: &mut Vec<Directive>, section: &mut String, logical: &[u8]
         return;
     }
     let Some(eq) = t.iter().position(|b| *b == b'=') else { return };
-    let key = trim(&t[..eq]);
+    let key = t[..eq].trim_ascii();
     if key.is_empty() {
         return;
     }
     out.push(Directive {
         section: section.clone(),
         key: String::from_utf8_lossy(key).into_owned(),
-        value: trim(&t[eq + 1..]).to_vec(),
+        value: t[eq + 1..].trim_ascii().to_vec(),
     });
 }
 
@@ -1251,17 +1251,17 @@ fn fill(cx: &mut Ctx, e: &mut Entry, f: &Facts, scope: &Scope) {
 fn parse_env_file(bytes: &[u8]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for line in bytes.split(|b| *b == b'\n') {
-        let line = trim(line);
+        let line = line.trim_ascii();
         if line.is_empty() || line[0] == b'#' || line[0] == b';' {
             continue;
         }
-        let line = line.strip_prefix(b"export ").map(trim_start).unwrap_or(line);
+        let line = line.strip_prefix(b"export ").map(<[u8]>::trim_ascii_start).unwrap_or(line);
         let Some(eq) = line.iter().position(|b| *b == b'=') else { continue };
-        let key = trim(&line[..eq]);
+        let key = line[..eq].trim_ascii();
         if key.is_empty() {
             continue;
         }
-        let mut value = trim(&line[eq + 1..]);
+        let mut value = line[eq + 1..].trim_ascii();
         if value.len() >= 2 {
             let (first, last) = (value[0], value[value.len() - 1]);
             if (first == b'"' || first == b'\'') && first == last {
@@ -1391,20 +1391,6 @@ fn indexed(base: &str, i: usize) -> String {
 
 fn non_empty(v: &[u8]) -> Option<Vec<u8>> {
     if v.is_empty() { None } else { Some(v.to_vec()) }
-}
-
-fn trim(b: &[u8]) -> &[u8] {
-    trim_end(trim_start(b))
-}
-
-fn trim_start(b: &[u8]) -> &[u8] {
-    let i = b.iter().position(|c| !c.is_ascii_whitespace()).unwrap_or(b.len());
-    &b[i..]
-}
-
-fn trim_end(b: &[u8]) -> &[u8] {
-    let i = b.iter().rposition(|c| !c.is_ascii_whitespace()).map_or(0, |i| i + 1);
-    &b[..i]
 }
 
 #[cfg(test)]
