@@ -989,7 +989,8 @@ struct Directive {
 
 /// Unit files look like INI and are not. Keys repeat and the repetition is
 /// meaningful, an empty assignment resets the list, values may contain `=`,
-/// and a line ending in a backslash continues into the next. Values stay
+/// and a line ending in a backslash continues into the next, past any comment
+/// lines between. Values stay
 /// bytes: an ExecStart= that is not UTF-8 is evidence.
 fn parse_unit(bytes: &[u8]) -> Vec<Directive> {
     let mut out = Vec::new();
@@ -1001,6 +1002,12 @@ fn parse_unit(bytes: &[u8]) -> Vec<Directive> {
         let mut line = raw;
         if line.last() == Some(&b'\r') {
             line = &line[..line.len() - 1];
+        }
+        // A comment line is skipped whole, before any continuation is looked
+        // for: it neither ends a continued line nor continues into the next
+        // (checked with `systemd-analyze verify`).
+        if matches!(trim_start(line).first(), Some(b'#' | b';')) {
+            continue;
         }
         if !pending.is_empty() {
             line = trim_start(line);
@@ -1480,6 +1487,14 @@ mod tests {
         assert!(!one(&s, "held.service").raw.contains_key("condition_fails"), "a negated absent path, a directory and a present file all hold");
         assert!(!one(&s, "reset.service").raw.contains_key("condition_fails"), "an empty assignment clears the list");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_comment_neither_ends_nor_continues_a_continued_line() {
+        let d = parse_unit(b"[Service]\nExecStart=\\\n# a comment\n; another\n/tmp/evil --x\n# trailing slash \\\nRestart=always\n");
+        let get = |k: &str| d.iter().find(|x| x.key == k).map(|x| String::from_utf8_lossy(&x.value).into_owned());
+        assert_eq!(get("ExecStart").as_deref(), Some("/tmp/evil --x"));
+        assert_eq!(get("Restart").as_deref(), Some("always"), "a comment ending in a backslash swallows nothing");
     }
 
     #[test]
