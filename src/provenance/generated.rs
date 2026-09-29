@@ -92,8 +92,11 @@ fn producer(root: &Root, snaps: &Snaps, rel: &Path) -> Option<&'static str> {
     }
 
     // cloud-init's runtime state; its units and binaries are packaged and so
-    // never reach this function.
-    if text.starts_with("run/cloud-init/") || text.starts_with("var/lib/cloud/") {
+    // never reach this function. Not the directories it runs files from that
+    // an administrator, or anyone who planted one, puts them in: a script in
+    // `scripts/per-boot` was not written by cloud-init.
+    const ADMIN_WRITTEN: [&str; 3] = ["var/lib/cloud/scripts/", "var/lib/cloud/handlers/", "var/lib/cloud/seed/"];
+    if text.starts_with("run/cloud-init/") || (text.starts_with("var/lib/cloud/") && !ADMIN_WRITTEN.iter().any(|d| text.starts_with(d))) {
         return Some("cloud-init");
     }
     // apk's own state: the installed database, the scripts archive and the
@@ -316,6 +319,27 @@ mod tests {
         assert_eq!(out.get(Path::new("usr/lib/systemd/system/screen-cleanup.service")), Some(&Provenance::GeneratedBy { by: "dpkg-postinst".into() }));
         assert_eq!(out.get(Path::new("usr/lib/systemd/system/auditd.service")), None, "no maintainer script names it");
         assert_eq!(out.get(Path::new("etc/systemd/system/screen-cleanup.service")), None, "the administrator's directory is the administrator's");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn cloud_init_is_credited_with_what_it_writes_and_not_with_what_it_runs_from_the_administrator() {
+        use super::*;
+        let dir = std::env::temp_dir().join(format!("unbidden-cloud-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = Root::at(&dir).unwrap();
+        let snaps = Snaps(BTreeMap::new());
+        for (path, by) in [
+            ("var/lib/cloud/instance/scripts/part-001", Some("cloud-init")),
+            ("var/lib/cloud/instances/i-1/user-data.txt", Some("cloud-init")),
+            ("var/lib/cloud/data/result.json", Some("cloud-init")),
+            ("var/lib/cloud/scripts/per-boot/evil.sh", None),
+            ("var/lib/cloud/handlers/part-handler.py", None),
+            ("var/lib/cloud/seed/nocloud/user-data", None),
+        ] {
+            assert_eq!(producer(&root, &snaps, Path::new(path)), by, "{path}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
