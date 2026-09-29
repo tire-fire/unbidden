@@ -229,8 +229,10 @@ fi
 # Expected to differ from what the package shipped. Without conffile
 # handling, every host with a customised config lights up with the tool's
 # highest-signal finding. A conffile that is also an autostart source is what
-# this needs, and a minimal image may ship none: cron provides /etc/crontab
-# as one on every supported distribution.
+# this needs, and a minimal image may ship none: cron and cronie provide
+# /etc/crontab as one on Debian and Fedora. Alpine's is root's crontab in
+# /etc/crontabs, which /var/spool/cron/crontabs links to and the list below
+# reaches by that name.
 if [ ! -f /etc/crontab ]; then
     case "$FAMILY" in
         dpkg) apt-get -qq update >/dev/null 2>&1 && apt-get -qq install -y cron >/dev/null 2>&1 || true ;;
@@ -438,7 +440,8 @@ if [ "$FAMILY" = apk ]; then
     note "$triggers apk trigger scripts reported from the scripts archive"
 fi
 # BusyBox crond: a line appended to root's packaged crontab, which is the
-# one file it reads, and a periodic script the crontab's run-parts line
+# file it reads for root (it reads each root-owned file in its directory that
+# is named for an account), and a periodic script the crontab's run-parts line
 # reaches.
 if [ "$FAMILY" = apk ] && [ -f /etc/crontabs/root ]; then
     cp -p /etc/crontabs/root /etc/crontabs/root.unbidden-backup
