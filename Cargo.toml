@@ -33,6 +33,19 @@ tree-sitter-bash = "0.25.1"
 regex = "1.13"
 miniz_oxide = "0.9"
 
+# cargo-binstall downloads the release's static binary instead of compiling.
+# The releases carry musl builds only, so a host that reports a gnu target is
+# sent to the musl file of its architecture: it is static and runs there.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/unbidden-{ target }"
+pkg-fmt = "bin"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/unbidden-x86_64-unknown-linux-musl"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/unbidden-aarch64-unknown-linux-musl"
+
 [profile.release]
 lto = true
 strip = true

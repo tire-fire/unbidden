@@ -1,0 +1,25 @@
+# The release's .deb and .rpm, made by nfpm from the static binary. The binary
+# needs nothing from the host, so the packages declare no dependencies; that is
+# also why one package serves every Debian, Ubuntu, Fedora and derivative host
+# of its architecture. ci/package.sh sets the three variables.
+name: unbidden
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${NFPM_VERSION}
+maintainer: Tirefire <84106878+tire-fire@users.noreply.github.com>
+description: Linux autostart and persistence enumerator
+homepage: https://github.com/tire-fire/unbidden
+license: MIT
+section: admin
+contents:
+  - src: ${NFPM_BINARY}
+    dst: /usr/bin/unbidden
+    expand: true
+    file_info:
+      mode: 0755
+  - src: LICENSE
+    dst: /usr/share/doc/unbidden/LICENSE
+    type: license
+  - src: README.md
+    dst: /usr/share/doc/unbidden/README.md
+    type: doc

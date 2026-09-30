@@ -310,6 +310,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Build provenance for what is posted, signed by GitHub's own identity
+      # for this workflow run: no key of ours is involved.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -358,7 +362,13 @@ jobs:
             ci/static-check.sh "$bin"
             cp "$bin" "unbidden-$t"
           done
-          sha256sum unbidden-* > SHA256SUMS
+          # The same static binaries as a .deb and an .rpm for each architecture,
+          # for hosts that would rather install with their package manager.
+          v=${{ steps.v.outputs.version }}
+          ci/package.sh unbidden-x86_64-unknown-linux-musl amd64 "$v" .
+          ci/package.sh unbidden-aarch64-unknown-linux-musl arm64 "$v" .
+          ci/package-check.sh "$v" .
+          sha256sum unbidden-* unbidden_* > SHA256SUMS
           cat SHA256SUMS
       - name: tag it, now that the binaries exist
         id: tag
@@ -392,6 +402,14 @@ jobs:
           else
             cargo publish --locked
           fi
+      - name: attest what is posted
+        if: steps.v.outputs.skip != '1' && (github.ref_type == 'tag' || steps.tag.outputs.pushed == '1')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            unbidden-*
+            unbidden_*
+            SHA256SUMS
       - name: post it
         if: steps.v.outputs.skip != '1' && (github.ref_type == 'tag' || steps.tag.outputs.pushed == '1')
         env:
@@ -405,4 +423,4 @@ jobs:
             echo "v$v is already posted"
             exit 0
           fi
-          gh release create "v$v" --generate-notes unbidden-* SHA256SUMS
+          gh release create "v$v" --generate-notes unbidden-* unbidden_* SHA256SUMS

@@ -77,6 +77,28 @@ rustup target add x86_64-unknown-linux-musl
 cargo install unbidden --target x86_64-unknown-linux-musl
 ```
 
+To fetch the release binary without compiling:
+
+```sh
+cargo binstall unbidden
+```
+
+The releases also carry a `.deb` and an `.rpm` for x86_64 and aarch64. They
+hold the same static binary and depend on nothing, so one package serves every
+Debian, Ubuntu, Fedora or derivative host of its architecture:
+
+```sh
+sudo apt install ./unbidden_<version>_amd64.deb
+sudo dnf install ./unbidden-<version>-1.x86_64.rpm
+```
+
+Every file in a release, packages included, has build provenance from the
+workflow that made it. To check a download came from this repository's CI:
+
+```sh
+gh attestation verify unbidden-x86_64-unknown-linux-musl --repo tire-fire/unbidden
+```
+
 ## Use
 
 ```sh
