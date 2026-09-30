@@ -642,6 +642,8 @@ fn note_changed_after_install(cx: &Ctx, e: &mut Entry, rel: &Path, stem: &[u8]) 
             key::CHANGED_AFTER_INSTALL,
             format!("inode changed {}s after {} was written", after.as_secs(), cx.root.abs(Path::new(DPKG_INFO).join(list)).display()),
         );
+    } else if cx.root.is_live() && crate::provenance::dpkg::list_touched(cx.root, &list, installed) {
+        e.note(key::CHANGED_AFTER_INSTALL, format!("{} is newer than every file it names, so it cannot date this one", cx.root.abs(Path::new(DPKG_INFO).join(list)).display()));
     }
 }
 

@@ -74,6 +74,40 @@ pub(crate) fn list_written(root: &Root, package: &str) -> Option<(String, std::t
     Some((found, t))
 }
 
+/// Whether a package's file list has been touched to hide a later edit. dpkg
+/// writes the list in the same unpack as the files it names, so a list whose
+/// change time is well after that of every regular file it names (up to the
+/// first 64) was written by something else: `touch`ing it moves the
+/// package's baseline past an edited script or link, and `changed_after_install`
+/// would then read clean. A package that names no regular file says nothing.
+/// One whose files were all left in place by an upgrade reads as touched too,
+/// which is why this is a note and not a verdict.
+pub(crate) fn list_touched(root: &Root, list: &str, listed: std::time::SystemTime) -> bool {
+    list_touched_by(root, list, listed, INSTALL_WINDOW)
+}
+
+fn list_touched_by(root: &Root, list: &str, listed: std::time::SystemTime, window: std::time::Duration) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok((bytes, _)) = root.read_capped(Path::new(INFO).join(list), 1 << 20) else { return false };
+    let mut sampled = 0;
+    for line in bytes.split(|b| *b == b'\n').filter(|l| l.starts_with(b"/") && l.len() > 1) {
+        let rel = Path::new(std::ffi::OsStr::from_bytes(&line[1..]));
+        let Ok(meta) = root.stat(rel) else { continue };
+        if !meta.is_file {
+            continue;
+        }
+        let Some(ctime) = meta.ctime else { continue };
+        if !listed.duration_since(ctime).is_ok_and(|newer| newer > window) {
+            return false;
+        }
+        sampled += 1;
+        if sampled == 64 {
+            break;
+        }
+    }
+    sampled > 0
+}
+
 /// Whether `dpkg-statoverride` records a mode for `path` (root-relative).
 /// dpkg records no modes of its own, so an override is how an administrator
 /// legitimately changes a packaged file's mode; a few maintainer scripts
@@ -423,6 +457,32 @@ fn strip_slash_str(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_list_newer_than_every_file_it_names_reads_as_touched() {
+        let dir = crate::testing::Tree::new("dpkg-touched");
+        for f in ["usr/bin/a", "usr/bin/b"] {
+            std::fs::create_dir_all(dir.join(f).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(f), b"x").unwrap();
+        }
+        std::fs::create_dir_all(dir.join(INFO)).unwrap();
+        // The files first, then the list: a touch after an edit.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join(INFO).join("p.list"), b"/usr\n/usr/bin/a\n/usr/bin/b\n").unwrap();
+        let root = Root::at(&dir).unwrap();
+        let listed = root.stat(Path::new(INFO).join("p.list")).unwrap().ctime.unwrap();
+        let tick = std::time::Duration::from_millis(5);
+        assert!(list_touched_by(&root, "p.list", listed, tick), "the list postdates its files");
+        // The window an unpack takes covers the ordinary case.
+        assert!(!list_touched(&root, "p.list", listed), "within two minutes is one unpack");
+        // One file rewritten after the list: it is not newer than every file.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("usr/bin/b"), b"edited").unwrap();
+        assert!(!list_touched_by(&root, "p.list", listed, tick));
+        // No regular file named says nothing.
+        std::fs::write(dir.join(INFO).join("q.list"), b"/usr\n").unwrap();
+        assert!(!list_touched_by(&root, "q.list", listed, tick));
+    }
 
     struct Fixture(PathBuf);
 

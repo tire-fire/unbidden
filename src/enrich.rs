@@ -1509,9 +1509,15 @@ fn setuid_changed_after_install(root: &Root, e: &mut Entry) {
     }
     let Some((list, installed)) = crate::provenance::dpkg::list_written(root, package) else { return };
     let Some(changed) = file.ctime else { return };
-    let Some(after) = crate::provenance::dpkg::changed_after_install(changed, installed) else { return };
-    if !crate::provenance::dpkg::statoverridden(root, &rel) {
-        e.note(key::CHANGED_AFTER_INSTALL, format!("inode changed {}s after {list} was written", after.as_secs()));
+    if crate::provenance::dpkg::statoverridden(root, &rel) {
+        return;
+    }
+    match crate::provenance::dpkg::changed_after_install(changed, installed) {
+        Some(after) => e.note(key::CHANGED_AFTER_INSTALL, format!("inode changed {}s after {list} was written", after.as_secs())),
+        None if crate::provenance::dpkg::list_touched(root, &list, installed) => {
+            e.note(key::CHANGED_AFTER_INSTALL, format!("{list} is newer than every file it names, so it cannot date this one"));
+        }
+        None => {}
     }
 }
 
