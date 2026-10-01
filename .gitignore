@@ -11,4 +11,6 @@ fuzz/coverage
 # cargo publish does not read the working tree as dirty and refuse.
 /build-*
 /unbidden-*-linux-musl
+/unbidden_*.deb
+/unbidden-*.rpm
 /SHA256SUMS
