@@ -244,11 +244,23 @@ fn lsb_name(name: &[u8]) -> bool {
 /// Each directory comes with the file that first named it.
 pub(crate) fn ld_so_conf_dirs(cx: &mut Ctx) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
-    ld_so_conf(cx, Path::new("etc/ld.so.conf"), 0, &mut out, &mut BTreeSet::new());
+    ld_so_conf(cx, Path::new("etc/ld.so.conf"), 0, &mut out, &mut BTreeSet::new(), &mut BTreeSet::new());
     out
 }
 
-fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(String, PathBuf)>, read: &mut BTreeSet<PathBuf>) {
+/// Directories one scan takes from ld.so.conf. A host has a few dozen; past
+/// this the rest are dropped, which keeps a hostile file from making every
+/// directory in it an entry and a linear search per line.
+const MAX_LD_DIRS: usize = 4096;
+
+fn ld_so_conf(
+    cx: &mut Ctx,
+    rel: &Path,
+    depth: usize,
+    out: &mut Vec<(String, PathBuf)>,
+    read: &mut BTreeSet<PathBuf>,
+    named: &mut BTreeSet<String>,
+) {
     // An include loop ends here rather than in the stack, and a file is read
     // once however many includes reach it: files that each include the same
     // glob would otherwise be read once per path, exponentially many times.
@@ -266,7 +278,7 @@ fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(String, Pat
         if word == b"include" && !rest.is_empty() {
             for pat in rest.split(u8::is_ascii_whitespace).filter(|p| !p.is_empty()) {
                 for f in expand_glob(cx, &include_rel(&base, pat)) {
-                    ld_so_conf(cx, &f, depth + 1, out, read);
+                    ld_so_conf(cx, &f, depth + 1, out, read, named);
                 }
             }
             continue;
@@ -277,7 +289,7 @@ fn ld_so_conf(cx: &mut Ctx, rel: &Path, depth: usize, out: &mut Vec<(String, Pat
         while d.len() > 1 && d.ends_with('/') {
             d.pop();
         }
-        if !d.is_empty() && !out.iter().any(|(seen, _)| *seen == d) {
+        if !d.is_empty() && out.len() < MAX_LD_DIRS && named.insert(d.clone()) {
             out.push((d, rel.to_path_buf()));
         }
     }

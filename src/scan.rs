@@ -191,7 +191,9 @@ impl<'a> Ctx<'a> {
         if is(rustix::io::Errno::NOTDIR) && self.under_a_home_that_is_no_directory(path) {
             return;
         }
-        let built = is(rustix::io::Errno::LOOP) || is(rustix::io::Errno::NOTDIR);
+        // A chain or a path too long to resolve is as much the account's
+        // doing as a loop is, and no home holds one.
+        let built = is(rustix::io::Errno::LOOP) || is(rustix::io::Errno::NOTDIR) || is(rustix::io::Errno::NAMETOOLONG);
         if built && self.root.in_home(path) {
             self.note_limited(what);
         } else {
@@ -242,10 +244,12 @@ impl<'a> Ctx<'a> {
                 }
                 match self.root.stat_follow(rel) {
                     Ok(target) => target,
-                    Err(_) => {
+                    // A link the root refused to follow is not a dangling one.
+                    Err(err) if crate::root::refusal(&err).is_none() => {
                         e.note("dangling_symlink", "true");
                         link
                     }
+                    Err(_) => link,
                 }
             } else {
                 link

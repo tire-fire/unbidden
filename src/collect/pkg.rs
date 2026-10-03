@@ -331,9 +331,9 @@ const HOOK_KEYS: &[&str] = &[
     "apt::update::post-invoke-stats",
 ];
 
-/// Files one scan reads for apt: apt.conf, every conf.d fragment and what
-/// `#include` pulls in, however they chain. A real configuration has a few
-/// dozen at most; past the limit an include is recorded as not followed.
+/// Files one scan reads for apt through `#include`, however they chain. A real
+/// configuration has a few; past the limit an include is recorded as not
+/// followed.
 const APT_INCLUDE_FILES: usize = 64;
 
 /// Whether a canonical key names a program apt runs: a hook it hands to the
@@ -376,6 +376,9 @@ fn apt(cx: &mut Ctx) -> Vec<Entry> {
         files.push((Path::new(APT_CONF_D).join(&ent.name), apt_skips(&ent.name)));
     }
     let mut visited: BTreeSet<PathBuf> = files.iter().map(|(rel, _)| rel.clone()).collect();
+    // The limit is on what `#include` pulls in, not on the fragments apt.conf.d
+    // holds: padding the directory must not stop an include being followed.
+    let fragments = visited.len();
 
     let mut out = Vec::new();
     let mut at = 0;
@@ -396,8 +399,8 @@ fn apt(cx: &mut Ctx) -> Vec<Entry> {
             e.target_path = Some(PathBuf::from(OsStr::from_bytes(&target)));
             let at_root = Path::new(OsStr::from_bytes(&target)).strip_prefix("/").map(Path::to_path_buf);
             match at_root {
-                Ok(inc) if skipped.is_none() && visited.len() >= APT_INCLUDE_FILES && !visited.contains(&inc) => {
-                    e.note("not_followed", format!("{APT_INCLUDE_FILES} files are already read; the rest of the includes are not followed"));
+                Ok(inc) if skipped.is_none() && visited.len() - fragments >= APT_INCLUDE_FILES && !visited.contains(&inc) => {
+                    e.note("not_followed", format!("{APT_INCLUDE_FILES} included files are already read; the rest of the includes are not followed"));
                 }
                 Ok(inc) if skipped.is_none() && visited.insert(inc.clone()) => files.push((inc, None)),
                 Ok(_) => {}
@@ -1777,17 +1780,25 @@ mod tests {
     }
 
     #[test]
-    fn past_the_file_limit_an_include_says_it_was_not_followed() {
-        let dir = tree("include-limit");
-        for n in 0..APT_INCLUDE_FILES {
+    fn padding_apt_conf_d_does_not_stop_an_include_but_a_long_chain_does() {
+        // Sixty-odd fragments are no reason to stop following an include.
+        let dir = tree("include-padding");
+        for n in 0..APT_INCLUDE_FILES + 5 {
             put(&dir, &format!("etc/apt/apt.conf.d/50f{n:03}"), b"// nothing\n");
         }
         put(&dir, "etc/apt/apt.conf.d/99inc", b"#include \"/srv/late.conf\";\n");
         put(&dir, "srv/late.conf", b"DPkg::Post-Invoke {\"/srv/hook\";};\n");
         let s = scan(&dir);
-        let inc = one(&s, |e| e.target_path == Some(PathBuf::from("/srv/late.conf")));
-        assert!(inc.raw["not_followed"].contains("already read"), "{:?}", inc.raw);
-        assert!(s.entries.iter().all(|e| e.command.as_deref() != Some(b"/srv/hook".as_slice())));
+        assert!(s.entries.iter().any(|e| e.command.as_deref() == Some(b"/srv/hook".as_slice())));
+
+        // Each file includes the next: past the limit the rest is not followed, and says so.
+        let dir = tree("include-chain");
+        put(&dir, "etc/apt/apt.conf.d/10chain", b"#include \"/srv/c0.conf\";\n");
+        for n in 0..APT_INCLUDE_FILES + 5 {
+            put(&dir, &format!("srv/c{n}.conf"), format!("#include \"/srv/c{}.conf\";\n", n + 1).as_bytes());
+        }
+        let s = scan(&dir);
+        assert!(s.entries.iter().any(|e| e.raw.get("not_followed").is_some_and(|w| w.contains("already read"))));
     }
 
     #[test]

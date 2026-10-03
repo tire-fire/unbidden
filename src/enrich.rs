@@ -1015,7 +1015,9 @@ fn apply_target(root: &Root, entry: &mut Entry) {
         }
     };
 
-    if entry.target_sha256.is_none() {
+    // A link the scan declined to follow is not hashed through either.
+    let refused_link = entry.raw.contains_key("not_followed") && root.stat(&hashed).is_ok_and(|m| m.is_symlink);
+    if entry.target_sha256.is_none() && !refused_link {
         match provenance::digests(root, &hashed) {
             Some(d) => entry.target_sha256 = Some(d.sha256),
             None if root.stat_follow(&hashed).is_ok_and(|m| m.is_file && m.size > provenance::HASH_SIZE_LIMIT) => {

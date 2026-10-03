@@ -100,6 +100,17 @@ pub fn refusal(e: &io::Error) -> Option<&Refusal> {
     e.get_ref()?.downcast_ref()
 }
 
+/// Components in a resolved path, past which a lookup is refused.
+const MAX_RESOLVED_DEPTH: usize = 256;
+
+/// What a resolution found: where it ended, how many links it followed, and
+/// whether an account other than root made any of them.
+struct Resolved {
+    path: PathBuf,
+    links: usize,
+    planted: bool,
+}
+
 /// Where a path stands against the home rule.
 enum Confinement {
     /// Not under any home: this rule has nothing to say.
@@ -195,7 +206,14 @@ impl Root {
     /// description of the tree at one moment; anything that acts on it opens
     /// it with `open_resolved`, which refuses links outright.
     pub fn resolve(&self, rel: &Path) -> io::Result<PathBuf> {
+        self.resolve_noting_links(rel).map(|r| r.path)
+    }
+
+    /// As `resolve`, and says how many links the resolution followed and
+    /// whether any belongs to someone other than root.
+    fn resolve_noting_links(&self, rel: &Path) -> io::Result<Resolved> {
         let mut done: Vec<OsString> = Vec::new();
+        let (mut links, mut planted) = (0usize, false);
         let mut todo: std::collections::VecDeque<OsString> = normal_components(rel).collect();
         let mut hops = 0;
         while let Some(c) = todo.pop_front() {
@@ -204,11 +222,20 @@ impl Root {
                 continue;
             }
             done.push(c);
+            // No home holds a path this deep. Resolving one costs a stat of
+            // every prefix, so an unprivileged account could stall the scan
+            // with a long chain and a few links at its end.
+            if done.len() > MAX_RESOLVED_DEPTH {
+                return Err(io::Error::from_raw_os_error(rustix::io::Errno::NAMETOOLONG.raw_os_error()));
+            }
             let here: PathBuf = done.iter().collect();
             let st = rustix::fs::statat(&self.fd, &here, AtFlags::SYMLINK_NOFOLLOW)?;
-            if !meta_of(&st).is_symlink {
+            let meta = meta_of(&st);
+            if !meta.is_symlink {
                 continue;
             }
+            links += 1;
+            planted |= meta.uid != 0;
             // The kernel's own ceiling on links followed in one lookup.
             hops += 1;
             if hops > 40 {
@@ -224,7 +251,7 @@ impl Root {
                 todo.push_front(c);
             }
         }
-        Ok(done.iter().collect())
+        Ok(Resolved { path: done.iter().collect(), links, planted })
     }
 
     /// Opens a path `resolve` produced, following no link at all. Anything
@@ -307,36 +334,28 @@ impl Root {
         // path must stay inside is where the home really is.
         let declared = home.clone();
         let resolved = self.resolve(&home).and_then(|real_home| {
-            let resolved = self.resolve(&here)?;
+            let resolved = self.resolve_noting_links(&here)?;
             Ok((real_home, resolved))
         });
         match resolved {
             Err(e) => Confinement::Unresolvable(e),
-            Ok((home, resolved)) if resolved.starts_with(&home) => Confinement::Inside(resolved),
+            Ok((home, r)) if r.path.starts_with(&home) => Confinement::Inside(r.path),
             // A path that leaves the home through links only root made is
             // not a confused deputy: root could read the target itself. Alpine
             // links /var/spool/cron/crontabs to /etc/crontabs, and the `cron`
-            // account is homed at /var/spool/cron.
-            Ok(_) if !self.planted_link(&here, &declared) => Confinement::NoHome,
-            Ok((_, resolved)) => Confinement::Escapes(Path::new("/").join(resolved)),
-        }
-    }
-
-    /// Whether some link on the way from `home` down to `here` belongs to
-    /// someone other than root, so an account could have made it.
-    fn planted_link(&self, here: &Path, home: &Path) -> bool {
-        let mut prefix = PathBuf::new();
-        for component in here.components() {
-            prefix.push(component);
-            if prefix.starts_with(home) && prefix != home {
-                if let Ok(meta) = self.statat_unjudged(&prefix, AtFlags::SYMLINK_NOFOLLOW) {
-                    if meta.is_symlink && meta.uid != 0 {
-                        return true;
-                    }
-                }
+            // account is homed at /var/spool/cron. It takes a link, though:
+            // a `..` in the text that climbs out of the home is the account's
+            // doing, and one link made by anyone else spoils the whole path.
+            // The answer is `Inside` so the open still refuses every link.
+            Ok((_, r))
+                if r.links > 0
+                    && !r.planted
+                    && crate::text::normalize(&here).starts_with(crate::text::normalize(&declared)) =>
+            {
+                Confinement::Inside(r.path)
             }
+            Ok((_, r)) => Confinement::Escapes(Path::new("/").join(r.path)),
         }
-        false
     }
 
     /// Opens a regular file for reading, or says why not with a `Refusal`.
@@ -802,6 +821,41 @@ mod tests {
         }
         assert!(root.escaping_link(Path::new("home/alice/.zshrc")).is_none());
         assert_eq!(root.read("home/alice/.zshrc").unwrap(), b"export EDITOR=vi\n");
+    }
+
+    #[test]
+    fn a_dotdot_that_climbs_out_of_a_home_is_refused_with_no_link_in_sight() {
+        // An `Include ../../../root/x` in a user's ssh_config is the account's
+        // doing, and nothing on the path is a link for a root-made one to excuse.
+        let dir = tmpdir("dotdot");
+        std::fs::create_dir_all(dir.join("home/alice/.ssh")).unwrap();
+        std::fs::create_dir_all(dir.join("root/.ssh")).unwrap();
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("root/.ssh/leak"), b"secret\n").unwrap();
+        std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
+        let root = Root::at(&dir).unwrap();
+        let climb = "home/alice/.ssh/../../../root/.ssh/leak";
+        assert_eq!(root.read(climb).unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(root.escaping_link(Path::new(climb)).is_some());
+    }
+
+    #[test]
+    fn a_path_too_deep_to_resolve_is_refused_at_once() {
+        let dir = tmpdir("deep");
+        std::fs::create_dir_all(dir.join("etc")).unwrap();
+        std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
+        let mut at = dir.join("home/alice");
+        for _ in 0..300 {
+            at.push("d");
+        }
+        std::fs::create_dir_all(&at).unwrap();
+        std::fs::write(at.join("f"), b"x").unwrap();
+        let rel: PathBuf = at.strip_prefix(&*dir).unwrap().join("f");
+        let root = Root::at(&dir).unwrap();
+        let started = std::time::Instant::now();
+        let err = root.read(&rel).unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(rustix::io::Errno::NAMETOOLONG.raw_os_error()), "{err}");
+        assert!(started.elapsed().as_secs() < 2);
     }
 
     #[test]

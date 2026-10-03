@@ -564,6 +564,31 @@ esac
 [ "${diffrc:-0}" -eq 0 ] || fail "a scan with a home link out of the home would not diff: $diffed"
 note "a home link to /etc/shadow is recorded, not followed, and leaves the scan comparable"
 
+# --- a git hook that links at a root-only script ----------------------------
+# A repository outside any home has no home rule, so --deep refuses by owner:
+# a link an account made to a file the account does not own. The hook is
+# reported, and neither the scan nor `explain` may read the file behind it.
+mkdir -p /srv/unbidden-app/.git/hooks
+echo "ref: refs/heads/main" > /srv/unbidden-app/.git/HEAD
+printf '#!/bin/sh\necho SECRET-HOOK-TEXT\n' > /root/.unbidden-secret
+chmod 700 /root/.unbidden-secret
+ln -s /root/.unbidden-secret /srv/unbidden-app/.git/hooks/pre-commit
+chown -h 4242:4242 /srv/unbidden-app/.git/hooks/pre-commit
+"$BIN" --deep --save "$out.hook" > /dev/null
+hook=$("$BIN" --deep --json --all | grep '"kind":"git_hook"' | grep -F 'unbidden-app' | grep -F '"name":"pre-commit"' || true)
+hookid=$(echo "$hook" | field id)
+hookexplain=$("$BIN" explain --from "$out.hook" "$hookid" 2>&1 || true)
+rm -rf /srv/unbidden-app /root/.unbidden-secret "$out.hook"
+[ -n "$hook" ] || fail "a git hook that links out was not reported"
+case "$hook$hookexplain" in
+    *SECRET-HOOK-TEXT*|*'"target_sha256":"'*) fail "the script behind a refused hook link was read: $hook $hookexplain" ;;
+esac
+case "$hook" in
+    *'"not_followed"'*) ;;
+    *) fail "the refused hook link was not recorded as not followed: $hook" ;;
+esac
+note "a git hook linked at a file its owner does not own is recorded, and nothing behind it is read"
+
 # --- a desktop session -------------------------------------------------
 # §13: an extension present on disk runs only if dconf says so, and nothing
 # writes a dconf database until a session has run. A headless image therefore

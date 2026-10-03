@@ -477,6 +477,9 @@ fn profile(
     out.push(e);
 }
 
+/// A real ld.so.preload names a few libraries. Far past this is not one.
+const PRELOAD_CAP: usize = 4 << 20;
+
 /// `/etc/ld.so.preload`: the mechanism static linking exists to defend against
 /// (§3). One entry per library, because each named object is its own payload.
 fn preload(cx: &mut Ctx, out: &mut Vec<Entry>) {
@@ -485,19 +488,28 @@ fn preload(cx: &mut Ctx, out: &mut Vec<Entry>) {
     if !meta.is_file && !(meta.is_symlink && cx.root.stat_follow(rel).map(|m| m.is_file).unwrap_or(false)) {
         return;
     }
-    let Ok((bytes, truncated)) = cx.root.read_capped(rel, 64 * 1024) else {
+    let Ok((bytes, truncated)) = cx.root.read_capped(rel, PRELOAD_CAP) else {
         cx.note_unreadable(format!("{} unreadable", cx.root.abs(rel).display()));
         return;
     };
     if truncated {
-        cx.note_limited(format!("{} (truncated at 65536 bytes)", cx.root.abs(rel).display()));
+        cx.note_limited(format!("{} (truncated at {PRELOAD_CAP} bytes)", cx.root.abs(rel).display()));
     }
 
     let libs = preload_names(&bytes);
+    let ignored = musl_only(cx);
+    // glibc reads the whole file, so one longer than the cap hides what lies
+    // past it behind blanks. A file that size is a finding of its own.
+    if truncated {
+        let mut e = cx.entry(Kind::LdPreload, rel, format!("(names past {PRELOAD_CAP} bytes)"));
+        e.trigger = Trigger::Always;
+        e.enabled = if ignored { Enablement::Disabled } else { Enablement::Enabled };
+        e.note("not_read_whole", format!("longer than {PRELOAD_CAP} bytes; glibc loads every name in it"));
+        out.push(e);
+    }
     if libs.is_empty() {
         return;
     }
-    let ignored = musl_only(cx);
 
     let nonstandard = nonstandard_lib_dirs(cx);
     for (lib, line) in libs {
@@ -575,7 +587,9 @@ fn musl_only(cx: &mut Ctx) -> bool {
     let named = |cx: &mut Ctx, prefix: &str| {
         ["lib", "lib64", "usr/lib", "usr/lib64"].iter().any(|d| cx.dir(d).iter().any(|e| e.name.to_string_lossy().starts_with(prefix)))
     };
-    named(cx, "ld-musl-") && !named(cx, "ld-linux")
+    // glibc's loader is ld-linux* on most architectures and ld64.so.* on
+    // ppc64 and s390x.
+    named(cx, "ld-musl-") && !named(cx, "ld-linux") && !named(cx, "ld64.so")
 }
 
 /// Search directories configured outside the set every distribution already
@@ -1320,6 +1334,31 @@ mod tests {
         let scan = run(&dir);
         assert!(started.elapsed().as_secs() < 5, "the include fan-out is bounded");
         assert_eq!(scan.entries.iter().filter(|e| e.kind == Kind::LibraryDir).count(), 12);
+    }
+
+    #[test]
+    fn ld_so_conf_directories_are_capped_and_quick() {
+        let dir = tmpdir("ldconf-flood");
+        fs::create_dir_all(dir.join("etc")).unwrap();
+        let body: String = (0..9000).map(|n| format!("/opt/d{n}\n")).collect();
+        fs::write(dir.join("etc/ld.so.conf"), body).unwrap();
+        let started = std::time::Instant::now();
+        let scan = run(&dir);
+        assert!(started.elapsed().as_secs() < 5);
+        assert_eq!(scan.entries.iter().filter(|e| e.kind == Kind::LibraryDir).count(), 4096);
+    }
+
+    #[test]
+    fn a_preload_file_past_the_cap_is_reported_not_silently_cut() {
+        let dir = tmpdir("preload-long");
+        fs::create_dir_all(dir.join("etc")).unwrap();
+        let mut body = vec![b' '; PRELOAD_CAP + 10];
+        body.extend_from_slice(b"\n/tmp/evil.so\n");
+        fs::write(dir.join("etc/ld.so.preload"), body).unwrap();
+        let scan = run(&dir);
+        let cut = scan.entries.iter().find(|e| e.kind == Kind::LdPreload).expect("an entry for the unread tail");
+        assert!(cut.raw.contains_key("not_read_whole"));
+        assert_eq!(cut.enabled, Enablement::Enabled);
     }
 
     #[test]

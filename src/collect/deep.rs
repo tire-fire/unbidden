@@ -505,6 +505,10 @@ fn hooks(cx: &mut Ctx, w: &mut Walk, gitdir: &Path, repo: &str, gitdir_abs: &str
         e.note("repository", repo);
         e.note("gitdir", gitdir_abs);
         if !followed {
+            // Enrichment follows a target to hash it and read its interpreter
+            // line, and `explain` prints its source: none of that may reach
+            // through a link the scan refused.
+            e.target_path = None;
             e.note("not_followed", "a link to a file its owner does not own");
             cx.note_limited(format!("{}: a link to a file its owner does not own, not read", cx.root.abs(&rel).display()));
         } else if let Some(line) = shebang(cx, &rel) {

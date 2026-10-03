@@ -143,6 +143,13 @@ fn write_source(w: &mut impl Write, root: &Root, entry: &Entry) -> io::Result<()
         return Ok(());
     }
 
+    // The scan declined to follow a link that leads somewhere its owner does
+    // not own; showing the text behind it would do what the scan would not.
+    if let Some(why) = entry.raw.get("not_followed") {
+        writeln!(w, "source text  (a link that was not followed: {})", visible(why, false))?;
+        return Ok(());
+    }
+
     let rel = root.rel(&entry.source);
     let Ok((bytes, truncated)) = root.read_capped(&rel, WHOLE_FILE_LIMIT * 16) else {
         writeln!(w, "source text  (unreadable)")?;

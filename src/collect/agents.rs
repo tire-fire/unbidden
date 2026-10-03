@@ -695,7 +695,9 @@ fn zabbix(cx: &mut Ctx, out: &mut Vec<Entry>) {
                     }
                     e
                 }
-                "DenyKey" if v.starts_with("system.run") => {
+                // Any DenyKey can match system.run (`system.*`, `*`), and the
+                // match is made against the allowed key below.
+                "DenyKey" => {
                     denies.push(v.trim());
                     continue;
                 }
@@ -962,13 +964,14 @@ fn collectd_read(
     }
     let Ok(meta) = cx.root.stat_follow(rel) else { return };
     if meta.is_dir {
-        let names: Vec<_> = cx.dir(rel).into_iter().map(|e| e.name).filter(|n| !n.as_encoded_bytes().starts_with(b".")).collect();
-        // The recursion into a directory stops on a revisit: an included
-        // directory holding a file that includes it again would otherwise be
-        // read again at every depth. The listing above is repeated, cheaply.
-        if !cx.root.dir_identity(rel).is_ok_and(|_| seen.insert(rel.to_path_buf())) {
+        // A directory is entered once, by what it is and not by what it is
+        // called: links back at an ancestor are new paths for the same
+        // directory, and each would otherwise multiply the walk.
+        let visited = cx.root.dir_identity(rel).is_ok_and(|(dev, ino)| seen.insert(PathBuf::from(format!("\0dir:{dev}:{ino}"))));
+        if !visited {
             return;
         }
+        let names: Vec<_> = cx.dir(rel).into_iter().map(|e| e.name).filter(|n| !n.as_encoded_bytes().starts_with(b".")).collect();
         for n in names {
             collectd_read(cx, &rel.join(n), filter, depth, seen, out);
         }
@@ -1428,6 +1431,10 @@ mod tests {
         let run = s.entries.iter().find(|e| e.name == "zabbix:agentd:system.run").unwrap();
         assert_eq!(run.enabled, Enablement::Disabled);
         assert!(run.raw.contains_key("not_run"));
+        // A wider pattern refuses it too.
+        put(&d, "etc/zabbix/zabbix_agentd.conf", b"DenyKey=system.*\nAllowKey=system.run[*]\n");
+        let s = scan(&d);
+        assert_eq!(s.entries.iter().find(|e| e.name == "zabbix:agentd:system.run").unwrap().enabled, Enablement::Disabled);
     }
 
     #[test]
@@ -1487,6 +1494,21 @@ mod tests {
                 Close("Plugin".into()),
             ]
         );
+    }
+
+    #[test]
+    fn links_back_at_an_included_directory_do_not_multiply_the_walk() {
+        let d = fixture("collectd-loop");
+        put(&d, "usr/sbin/collectd", b"");
+        put(&d, "etc/collectd/collectd.conf", b"LoadPlugin exec\n<Include \"/etc/collectd/c.d\">\n  Filter \"*.conf\"\n</Include>\n");
+        put(&d, "etc/collectd/c.d/a.conf", b"<Plugin exec>\n  Exec \"nobody\" \"/opt/poll\"\n</Plugin>\n");
+        for n in 0..4 {
+            std::os::unix::fs::symlink(".", d.join(format!("etc/collectd/c.d/loop{n}"))).unwrap();
+        }
+        let started = std::time::Instant::now();
+        let s = scan(&d);
+        assert!(started.elapsed().as_secs() < 5, "a link back at the directory is the directory");
+        assert_eq!(s.entries.iter().filter(|e| e.command.as_deref().is_some_and(|c| c.starts_with(b"/opt/poll"))).count(), 1);
     }
 
     #[test]

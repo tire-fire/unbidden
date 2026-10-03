@@ -246,6 +246,10 @@ impl Builder {
         if anchor != 0
             && let Item::Value(v) = &item
         {
+            // The copy kept for later aliases is memory like any other: nested
+            // anchors would otherwise clone every level's whole subtree for
+            // nothing a node budget on the tree itself would see.
+            self.count(size(v))?;
             self.anchors.insert(anchor, (v.clone(), depth(v)));
         }
         let Some((frame, _)) = self.stack.last_mut() else {
@@ -762,6 +766,21 @@ mod tests {
             let _ = parse(text);
         }
         assert!(parse("a: !!int \"0x\u{20ac}1\"").is_err());
+    }
+
+    #[test]
+    fn nested_anchors_are_charged_for_the_copies_they_keep() {
+        // 300 anchors, each around a subtree holding all that follows: about
+        // 300 x 4,000 nodes of copies, past the budget though the tree is not.
+        let mut doc = String::from("foo: ");
+        for i in 0..300 {
+            doc.push_str(&format!("[&a{i} "));
+        }
+        doc.push_str(&format!("[{}]", "x,".repeat(4000)));
+        doc.push_str(&"]".repeat(300));
+        let started = std::time::Instant::now();
+        assert!(parse(&doc).is_err(), "copies kept for anchors count against the budget");
+        assert!(started.elapsed().as_secs() < 5);
     }
 
     #[test]
