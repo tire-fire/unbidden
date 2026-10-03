@@ -35,6 +35,9 @@ pub struct Ctx<'a> {
     pub users: &'a [User],
     unreadable: Vec<String>,
     truncated: Vec<String>,
+    /// Links out of a home the root refused, with where they led: each is
+    /// an entry of its own unless the collector made one for that path.
+    left_homes: Vec<(PathBuf, PathBuf)>,
 }
 
 /// What a bounded read found. The reasons a path was not read are different
@@ -145,11 +148,18 @@ impl<'a> Ctx<'a> {
     /// a limit, since any account can plant one and none may use it to make
     /// a collector Partial.
     pub fn note_left_home(&mut self, rel: &Path, target: &Path) {
+        self.remember_left_home(rel, target);
         self.note_limited(format!(
             "{}: leads out of its owner's home to {}, not followed",
             rel.display(),
             target.display()
         ));
+    }
+
+    fn remember_left_home(&mut self, rel: &Path, target: &Path) {
+        if self.left_homes.len() < MAX_LEFT_HOMES && !self.left_homes.iter().any(|(seen, _)| seen == rel) {
+            self.left_homes.push((rel.to_path_buf(), target.to_path_buf()));
+        }
     }
 
     pub fn dir(&mut self, rel: impl AsRef<Path>) -> Vec<DirEnt> {
@@ -182,6 +192,9 @@ impl<'a> Ctx<'a> {
         // a file that is not a regular one. Any account can cause it, so it
         // is a limit on what was read and never a failure to read.
         if let Some(refusal) = crate::root::refusal(e) {
+            if let crate::root::Refusal::LeavesHome { target, .. } = refusal {
+                self.remember_left_home(path.as_ref(), target);
+            }
             self.note_limited(refusal.to_string());
             return;
         }
@@ -385,6 +398,9 @@ pub fn inferred() -> String {
     "inferred".to_string()
 }
 
+/// Links out of a home one collector reports as entries of their own.
+const MAX_LEFT_HOMES: usize = 256;
+
 /// The JSON contract of §10. Bump only for additive change; a reader must
 /// tolerate fields it does not know.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -412,13 +428,28 @@ pub fn run(root: &Root, opts: &Options, collectors: &[Box<dyn Collector>]) -> Sc
                     let mut cx = Ctx {
                         root,
                         users,
-                        unreadable: Vec::new(),
+                        unreadable: Vec::new(), left_homes: Vec::new(),
                         truncated: Vec::new(),
                     };
                     if c.deep_only() && !opts.deep {
                         return (skipped(c.name(), "needs --deep"), Vec::new());
                     }
-                    let collected = catch_unwind(AssertUnwindSafe(|| c.collect(&mut cx)));
+                    let mut collected = catch_unwind(AssertUnwindSafe(|| c.collect(&mut cx)));
+                    // A file an account linked out of its home cannot be read,
+                    // and a collector that gave up on it has no entry to say
+                    // so: without one the link hides whatever the file was for.
+                    if let Ok(entries) = &mut collected {
+                        for (rel, target) in std::mem::take(&mut cx.left_homes) {
+                            let abs = root.abs(&rel);
+                            if entries.iter().any(|e| e.source == abs) {
+                                continue;
+                            }
+                            let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            let mut e = cx.entry(Kind::UnfollowedLink, &rel, name);
+                            e.note("not_followed", format!("leads out of its owner's home to {}", target.display()));
+                            entries.push(e);
+                        }
+                    }
                     let unreadable = cx.unreadable;
                     let truncated = cx.truncated;
                     match collected {
@@ -652,7 +683,7 @@ mod tests {
         let mut cx = Ctx {
             root: &root,
             users: &users,
-            unreadable: Vec::new(),
+            unreadable: Vec::new(), left_homes: Vec::new(),
             truncated: Vec::new(),
         };
 
@@ -685,7 +716,7 @@ mod tests {
         let mut cx = Ctx {
             root: &root,
             users: &users,
-            unreadable: Vec::new(),
+            unreadable: Vec::new(), left_homes: Vec::new(),
             truncated: Vec::new(),
         };
 
@@ -698,6 +729,33 @@ mod tests {
         assert!(cx.read("etc/cron.daily").is_none());
         assert!(cx.unreadable.is_empty());
 
+    }
+
+    #[test]
+    fn a_file_linked_out_of_a_home_is_an_entry_not_a_silence() {
+        // alice links her authorized_keys and an autostart file out of her
+        // home. Neither can be read, and neither may simply vanish.
+        let dir = crate::testing::Tree::new("homelinks");
+        for d in ["etc", "home/alice/.ssh", "home/alice/.config/autostart", "srv/alice"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/bash\n").unwrap();
+        std::fs::write(dir.join("srv/alice/keys"), b"ssh-ed25519 AAAA alice\n").unwrap();
+        std::fs::write(dir.join("srv/alice/evil.desktop"), b"[Desktop Entry]\nExec=/tmp/x\n").unwrap();
+        std::os::unix::fs::symlink("/srv/alice/keys", dir.join("home/alice/.ssh/authorized_keys")).unwrap();
+        std::os::unix::fs::symlink("/srv/alice/evil.desktop", dir.join("home/alice/.config/autostart/evil.desktop")).unwrap();
+
+        let root = Root::at(&dir).unwrap();
+        let scan = run(&root, &Options { deep: false }, &crate::collect::all());
+        let sources: Vec<_> = scan
+            .entries
+            .iter()
+            .filter(|e| e.kind == Kind::UnfollowedLink)
+            .map(|e| e.source.clone())
+            .collect();
+        assert!(sources.contains(&dir.join("home/alice/.ssh/authorized_keys")), "{sources:?}");
+        assert!(sources.contains(&dir.join("home/alice/.config/autostart/evil.desktop")), "{sources:?}");
+        assert!(scan.entries.iter().all(|e| !e.raw.values().any(|v| v.contains("/tmp/x"))), "the target was not read");
     }
 
     #[test]
@@ -753,7 +811,7 @@ mod tests {
         std::fs::write(dir.join("etc/passwd"), "alice:x:1000:1000::/home/alice:/bin/sh\n").unwrap();
         let root = Root::at(&dir).unwrap();
         let users: Vec<User> = Vec::new();
-        let mut cx = Ctx { root: &root, users: &users, unreadable: Vec::new(), truncated: Vec::new() };
+        let mut cx = Ctx { root: &root, users: &users, unreadable: Vec::new(), left_homes: Vec::new(), truncated: Vec::new() };
         let err = |e: rustix::io::Errno| std::io::Error::from_raw_os_error(e.raw_os_error());
 
         cx.note_failed("home/alice/.ssh/authorized_keys", &err(rustix::io::Errno::LOOP));
@@ -765,7 +823,7 @@ mod tests {
         std::fs::create_dir_all(dir.join("dev")).unwrap();
         std::fs::write(dir.join("dev/null"), b"").unwrap();
         let sshd = vec![User { name: "sshd".into(), uid: Some(22), home: PathBuf::from("/dev/null"), shell: None, source: "passwd" }];
-        let mut homed = Ctx { root: &root, users: &sshd, unreadable: Vec::new(), truncated: Vec::new() };
+        let mut homed = Ctx { root: &root, users: &sshd, unreadable: Vec::new(), left_homes: Vec::new(), truncated: Vec::new() };
         homed.note_failed("dev/null/.ssh/authorized_keys", &err(rustix::io::Errno::NOTDIR));
         homed.note_failed("/dev/null/.config/autostart", &err(rustix::io::Errno::NOTDIR));
         assert_eq!((homed.truncated.len(), homed.unreadable.len()), (0, 0));
@@ -793,7 +851,7 @@ mod tests {
         let mut cx = Ctx {
             root: &root,
             users: &users,
-            unreadable: Vec::new(),
+            unreadable: Vec::new(), left_homes: Vec::new(),
             truncated: Vec::new(),
         };
         let e = cx.entry(Kind::Cron, "etc/cron.d/job", "job");
@@ -821,7 +879,7 @@ mod tests {
         let mut cx = Ctx {
             root: &root,
             users: &users,
-            unreadable: Vec::new(),
+            unreadable: Vec::new(), left_homes: Vec::new(),
             truncated: Vec::new(),
         };
 

@@ -82,6 +82,9 @@ pub(crate) fn list_written(root: &Root, package: &str) -> Option<(String, std::t
 /// would then read clean. A package that names no regular file says nothing.
 /// One whose files were all left in place by an upgrade reads as touched too,
 /// which is why this is a note and not a verdict.
+/// Touching any one listed file as well defeats it, and a root attacker who
+/// knows the check can touch them all: it dates an honest host, it does not
+/// defend against a root that is hiding.
 pub(crate) fn list_touched(root: &Root, list: &str, listed: std::time::SystemTime) -> bool {
     list_touched_by(root, list, listed, INSTALL_WINDOW)
 }
