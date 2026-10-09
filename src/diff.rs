@@ -376,6 +376,7 @@ mod tests {
                 truncated: Vec::new(),
             }],
             enrichment_failures: Vec::new(),
+            package_databases: None,
         }
     }
 

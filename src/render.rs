@@ -312,6 +312,12 @@ fn banners(w: &mut impl Write, scan: &Scan) -> io::Result<()> {
     for failure in &scan.header.enrichment_failures {
         writeln!(w, "! Enrichment failed, flags may be missing: {}", visible(failure, false))?;
     }
+    if scan.header.package_databases.as_ref().is_some_and(Vec::is_empty) {
+        writeln!(
+            w,
+            "! No package database the tool reads was found (dpkg, rpm, apk, pacman), so no file can be told apart as packaged or not and nothing is hidden for being packaged."
+        )?;
+    }
     if !partial.is_empty() {
         let list: Vec<String> = partial.iter().map(|(n, c)| format!("{n} ({c} paths)")).collect();
         writeln!(w, "! Incomplete collectors: {}. See the JSON header for the paths.", list.join(", "))?;
@@ -324,6 +330,7 @@ fn banners(w: &mut impl Write, scan: &Scan) -> io::Result<()> {
         || !partial.is_empty()
         || !scan.header.privileged
         || !scan.header.enrichment_failures.is_empty()
+        || scan.header.package_databases.as_ref().is_some_and(Vec::is_empty)
     {
         writeln!(w)?;
     }
@@ -410,6 +417,7 @@ mod tests {
                 enablement: crate::scan::inferred(),
                 collectors: Vec::new(),
                 enrichment_failures: Vec::new(),
+                package_databases: None,
             },
             entries,
         }
@@ -641,6 +649,21 @@ mod tests {
         table(&mut out, &scan, &Filters::default(), &TableOpts { all: false, width: 120 }).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("! Enrichment failed, flags may be missing: provenance: rpm database: bad header"));
+    }
+
+    #[test]
+    fn a_root_with_no_package_database_says_nothing_is_hidden_for_being_packaged() {
+        let mut scan = scan_of(vec![entry("a.service", Provenance::Unknown, &[])]);
+        let shown = |scan: &Scan| {
+            let mut out = Vec::new();
+            table(&mut out, scan, &Filters::default(), &TableOpts { all: false, width: 120 }).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        assert!(!shown(&scan).contains("No package database"), "a scan enrichment has not run on says nothing");
+        scan.header.package_databases = Some(vec!["pacman".into()]);
+        assert!(!shown(&scan).contains("No package database"));
+        scan.header.package_databases = Some(Vec::new());
+        assert!(shown(&scan).contains("! No package database the tool reads was found"));
     }
 }
 

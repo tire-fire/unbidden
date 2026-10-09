@@ -392,6 +392,12 @@ pub struct Header {
     /// carrying any of these is not comparable with one that carries none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enrichment_failures: Vec<String>,
+    /// The package databases enrichment found (dpkg, rpm, apk, pacman).
+    /// `Some` and empty means the root has none the tool can read, so no
+    /// file could be called packaged or unpackaged. `None` means enrichment
+    /// has not run, or the scan predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_databases: Option<Vec<String>>,
 }
 
 pub fn inferred() -> String {
@@ -570,6 +576,7 @@ fn header(root: &Root, opts: &Options, collectors: Vec<CollectorStatus>) -> Head
         enablement: inferred(),
         collectors,
         enrichment_failures: Vec::new(),
+        package_databases: None,
     }
 }
 

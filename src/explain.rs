@@ -235,6 +235,7 @@ mod tests {
                 enablement: crate::scan::inferred(),
                 collectors: Vec::new(),
                 enrichment_failures: Vec::new(),
+                package_databases: None,
             },
             entries,
         }

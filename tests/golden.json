@@ -1577,6 +1577,9 @@
     "hostname": "golden",
     "kernel": "<normalised>",
     "live": false,
+    "package_databases": [
+      "dpkg"
+    ],
     "privileged": "<normalised>",
     "root": "<ROOT>/",
     "scan_time": "<normalised>",

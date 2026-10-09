@@ -505,7 +505,7 @@ fn digest_text(text: &str) -> Option<String> {
 
 /// RFC 1952: the fixed header, the optional fields the flags announce, then
 /// a raw deflate stream; the trailer is not consulted.
-fn gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
+pub(super) fn gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
     let [0x1f, 0x8b, 8, flags, rest @ ..] = bytes else { return None };
     let mut i = 6usize.min(rest.len());
     if flags & 4 != 0 {

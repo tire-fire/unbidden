@@ -54,6 +54,7 @@ pub fn enrich(root: &Root, scan: &mut Scan) {
     let answers = match resolution {
         Some(r) => {
             failed.extend(r.failures.into_iter().map(|f| format!("provenance: {f}")));
+            scan.header.package_databases = Some(r.databases.iter().map(|d| d.to_string()).collect());
             r.answers
         }
         None => provenance::Answers::new(),

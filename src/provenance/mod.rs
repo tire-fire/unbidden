@@ -13,6 +13,7 @@
 pub mod apk;
 pub mod dpkg;
 pub mod generated;
+pub mod pacman;
 pub mod reproduced;
 pub mod rpm;
 
@@ -62,6 +63,9 @@ pub struct Resolution {
     /// not read all of it. §3 treats every parsed file as hostile, and a
     /// package database is a file.
     pub failures: Vec<String>,
+    /// The databases a backend found on the root, whether or not it read all
+    /// of one. Empty when the root has none of the kinds the tool knows.
+    pub databases: Vec<&'static str>,
 }
 
 /// Every path some package claims, from whichever databases the host has.
@@ -69,6 +73,7 @@ pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
     let mut out = dpkg::packaged_files(root);
     out.extend(rpm::packaged_files(root));
     out.extend(apk::packaged_files(root));
+    out.extend(pacman::packaged_files(root));
     out
 }
 
@@ -82,12 +87,12 @@ pub fn packaged_files(root: &Root) -> BTreeSet<PathBuf> {
 /// read whole answers for less, so a producer then judges by location and
 /// evidence alone, and what neither claims is Unknown rather than Unpackaged.
 pub fn resolve(root: &Root, wanted: &BTreeSet<PathBuf>) -> Resolution {
-    resolve_with(root, wanted, &[("dpkg", dpkg::resolve), ("rpm", rpm::resolve), ("apk", apk::resolve)])
+    resolve_with(root, wanted, &[("dpkg", dpkg::resolve), ("rpm", rpm::resolve), ("apk", apk::resolve), ("pacman", pacman::resolve)])
 }
 
 type Backend = fn(&Root, &BTreeSet<PathBuf>) -> Outcome;
 
-fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Backend)]) -> Resolution {
+fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&'static str, Backend)]) -> Resolution {
     let mut out = Answers::new();
     // What a reproduction reads is asked about too, so its verdict is known
     // below.
@@ -101,14 +106,17 @@ fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Back
     // the database is there, and what it would have said is unknown.
     let mut backend_ran = false;
     let mut backend_failed = false;
+    let mut databases = Vec::new();
     for (name, backend) in backends {
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| backend(root, wanted))) {
             Ok(Outcome::Complete(answers)) => {
                 out.extend(answers);
+                databases.push(*name);
                 backend_ran = true;
             }
             Ok(Outcome::Incomplete(answers, why)) => {
                 out.extend(answers);
+                databases.push(*name);
                 failures.push(format!("{name} database {NOT_READ_WHOLE}: {why}"));
                 backend_failed = true;
             }
@@ -140,7 +148,7 @@ fn resolve_with(root: &Root, wanted: &BTreeSet<PathBuf>, backends: &[(&str, Back
     for p in wanted {
         out.entry(p.clone()).or_insert_with(|| verdict.clone());
     }
-    Resolution { answers: out, failures }
+    Resolution { answers: out, failures, databases }
 }
 
 /// Aliased paths under merged /usr. Debian, Ubuntu, Mint and Fedora ship /lib
