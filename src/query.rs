@@ -284,6 +284,54 @@ mod tests {
         assert_eq!(hits("sshd -kind:systemd", &all), Vec::<String>::new());
     }
 
+    /// The table both implementations answer: `tests/vectors/query.json` is
+    /// also run against `src/report/query.js` by `tests/query_vectors.js`.
+    #[test]
+    fn the_rust_query_agrees_with_the_shared_vectors() {
+        use crate::entry::{Enablement, Trigger};
+        let v: serde_json::Value = serde_json::from_str(include_str!("../tests/vectors/query.json")).unwrap();
+        let s = |x: &serde_json::Value| x.as_str().unwrap_or_default().to_string();
+        let entries: Vec<Entry> = v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                let mut e = Entry::new(Kind::parse(&s(&r["kind"])).unwrap(), s(&r["source"]), s(&r["name"]));
+                e.id = s(&r["id"]);
+                e.command = r["command"].as_str().map(|c| c.as_bytes().to_vec());
+                e.target_path = r["target"].as_str().map(Into::into);
+                e.enabled = Enablement::parse(&s(&r["enabled"])).unwrap();
+                e.trigger = Trigger::parse(&s(&r["trigger"])).unwrap();
+                e.principal = r["user"].as_str().map(str::to_string);
+                e.collector = r["collector"].as_str().map(str::to_string);
+                for f in r["flags"].as_array().unwrap() {
+                    e.flag(Flag::parse(f.as_str().unwrap()).unwrap());
+                }
+                for (k, val) in r["notes"].as_object().unwrap() {
+                    e.note(k, val.as_str().unwrap());
+                }
+                let words: Vec<&str> = r["prov"].as_array().unwrap().iter().map(|w| w.as_str().unwrap()).collect();
+                e.provenance = match words.as_slice() {
+                    ["packaged", w] => Provenance::Packaged {
+                        package: s(&r["pkg"]),
+                        version: s(&r["version"]),
+                        integrity: if *w == "intact" { Integrity::Intact } else { Integrity::Modified },
+                    },
+                    ["unpackaged"] => Provenance::Unpackaged,
+                    _ => Provenance::Unknown,
+                };
+                e
+            })
+            .collect();
+        for case in v["cases"].as_array().unwrap() {
+            let want: Vec<String> = case["hits"].as_array().unwrap().iter().map(s).collect();
+            assert_eq!(hits(case["q"].as_str().unwrap(), &entries), want, "query {:?}", case["q"]);
+        }
+        for t in v["toggles"].as_array().unwrap() {
+            assert_eq!(toggle_choice(&s(&t["query"]), &s(&t["field"]), &s(&t["value"])), s(&t["result"]), "{t}");
+        }
+    }
+
     #[test]
     fn a_picker_edits_the_query_text() {
         assert_eq!(toggle_choice("", "kind", "cron"), "kind:cron");

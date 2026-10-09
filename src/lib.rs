@@ -8,6 +8,7 @@ pub mod provenance;
 mod pyyaml;
 pub mod query;
 pub mod render;
+pub mod report;
 pub mod root;
 pub mod scan;
 #[cfg(test)]

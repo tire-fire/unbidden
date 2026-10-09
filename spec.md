@@ -471,9 +471,8 @@ explain dumps everything known about a single entry including the raw source tex
 JSON
 Newline-delimited: the header on the first line, then one Entry per line, so output streams and survives truncation. --pretty gives the snapshot form of §9, indented, for humans reading it directly. With --against, each line is the entry plus its delta.
 The schema is a compatibility contract from 0.1 onward: additive changes only, version recorded in the header. This is the primary interface — the TUI and the human table are views over it, and any fact visible in either must be present here.
-TUI
-ratatui. Kinds on the left, entry list centre, detail pane right. Filter by flag, toggle suppression, mark entries reviewed, view the backing file.
-Explicitly a v1.1 target. The CLI and JSON have to be right first: a TUI built early risks bending the record shape to fit the widget rather than the reverse.
+Browsing
+Added in 0.5, after a stock Arch laptop's scan ran to 2,364 rows and a table of that length is unreadable. Two views over a finished scan, neither of which changes the record: unbidden tui, a full-screen list in the terminal, and unbidden report, one HTML file. Both run a scan or read one saved with --save, and both take the same query language (src/query.rs; the report's script, src/report/query.js, is held to it by tests/vectors/query.json, which both test suites run): words that must appear anywhere in an entry, field:value words (kind, flag, enabled, trigger, prov, pkg, collector, user, name, src, cmd, id, note), - to negate, | to accept either value, quotes for a value with a blank. The terminal UI adds pickers whose counts are those of the rest of the query and whose choices edit the query text, so the text stays the one source of truth, and Enter shows the entry as explain does, source text included. It is hand-rolled over termios from the rustix already linked, not ratatui: a viewer needs a list, a prompt and a pane, and a terminal library is a dependency the static binary and its audit would carry for them. The report loads nothing, shows every scan string with textContent and never as markup, and embeds its data in a JSON block with <, > and & escaped, since a file name is hostile input in a browser as much as in a terminal. The terminal UI draws only text that went through the same escaping as the table (§3).
 11. Designing for offline roots
 Decision from scoping: live host only in v1, but nothing may foreclose offline analysis of a mounted image or chroot. Retrofitting this later means touching every collector, so the constraints go in now.
 The Root abstraction
@@ -517,8 +516,8 @@ clap
 JSON
 serde_json
 
-TUI (v1.1)
-ratatui
+Terminal UI
+hand-rolled over termios (rustix), no terminal library
 
 RPM database
 hand-rolled header parser

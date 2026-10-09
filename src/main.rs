@@ -40,6 +40,28 @@ enum Command {
     /// Browse a scan in the terminal: type to filter, pick kinds and flags
     /// with counts, Enter for the whole entry. `?` inside lists the keys.
     Tui(TuiArgs),
+    /// Write a scan as one HTML file that filters in the browser, with the
+    /// same query language as `tui`. Self-contained: it loads nothing.
+    Report(ReportArgs),
+}
+
+#[derive(Args)]
+struct ReportArgs {
+    /// Also run the collectors that need a whole-filesystem traversal.
+    #[arg(long)]
+    deep: bool,
+
+    /// Report a scan saved with --save instead of scanning now.
+    #[arg(long, value_name = "PATH")]
+    from: Option<PathBuf>,
+
+    /// Write the report here instead of to standard output.
+    #[arg(short, long, value_name = "PATH")]
+    output: Option<PathBuf>,
+
+    /// Scan a mounted image or chroot instead of the running system.
+    #[arg(long, value_name = "PATH", default_value = "/")]
+    root: PathBuf,
 }
 
 #[derive(Args)]
@@ -129,6 +151,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Some(Command::Explain(args)) => run_explain(args),
         Some(Command::Tui(args)) => run_tui(args),
+        Some(Command::Report(args)) => run_report(args),
         Some(Command::Scan(args)) => run_scan(args),
         None => run_scan(cli.scan),
     };
@@ -206,6 +229,25 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
         // A consumer that stops reading is not an error worth a message.
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         Err(e) => Err(e.to_string()),
+    }
+}
+
+fn run_report(args: ReportArgs) -> Result<(), String> {
+    let scan = match &args.from {
+        Some(path) => load(path)?,
+        None => collect_scan(&open_root(&args.root)?, args.deep),
+    };
+    match &args.output {
+        Some(path) => {
+            let file = std::fs::File::create(path).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            unbidden::report::write(&mut BufWriter::new(file), &scan).map_err(|e| e.to_string())?;
+            eprintln!("report written to {}", path.display());
+            Ok(())
+        }
+        None => match unbidden::report::write(&mut BufWriter::new(io::stdout().lock()), &scan) {
+            Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+            other => other.map_err(|e| e.to_string()),
+        },
     }
 }
 

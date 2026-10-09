@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>unbidden report</title>
+<style>/*CSS*/</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <div id="when"></div>
+  <div id="notices"></div>
+</header>
+<main>
+  <aside id="facets" aria-label="filters"></aside>
+  <section>
+    <div class="bar">
+      <input id="q" type="search" placeholder='filter: curl   kind:cron|at_job   -flag:unpackaged   prov:unpackaged   ( / to focus )' autocomplete="off" spellcheck="false">
+      <button class="plain" id="clear" type="button">clear</button>
+      <label><input id="showHidden" type="checkbox"> show the <span id="hiddenCount"></span> packaged and intact</label>
+      <span id="count"></span>
+    </div>
+    <table>
+      <colgroup><col style="width:9em"><col style="width:12em"><col style="width:7em"><col style="width:20%"><col style="width:14em"><col></colgroup>
+      <thead><tr><th>ID</th><th data-sort="kind">KIND</th><th data-sort="enabled">ENABLED</th><th data-sort="name">NAME</th><th data-sort="flags">FLAGS</th><th data-sort="command">COMMAND</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p id="empty" hidden>Nothing matches. Clear the filter, or turn on the packaged and intact entries.</p>
+    <button class="plain" id="more" type="button" hidden></button>
+  </section>
+</main>
+<script type="application/json" id="data">/*DATA*/</script>
+<script>/*QUERY*/</script>
+<script>/*APP*/</script>
+</body>
+</html>

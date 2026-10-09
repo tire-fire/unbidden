@@ -117,6 +117,37 @@ rewrites its own `ExecStart` shows up as one changed row telling you which
 fields moved, instead of a removal and an addition you have to notice are the
 same thing.
 
+## Browsing a big scan
+
+A desktop scan can run to thousands of rows. Two ways to narrow it without
+rerunning anything:
+
+```sh
+unbidden tui                      # full-screen list in the terminal
+unbidden report -o scan.html      # one HTML file, filters in the browser
+unbidden --save scan.json         # then, any time:
+unbidden tui --from scan.json
+```
+
+Both take the same query. Type words to search, or narrow by field:
+
+```
+curl                      anything that mentions curl, in any field or note
+kind:cron|at_job          a kind (by prefix); | accepts either
+-flag:unpackaged          a leading - negates
+prov:unpackaged           packaged intact modified unpackaged unknown generated reproduced
+flag:none                 entries with no flag
+pkg: user: src: cmd: name: id: collector: trigger: enabled: note:
+cmd:"curl -s"             a value with a blank is quoted
+```
+
+In the terminal, `f` `k` `e` `p` `t` `F` open a picker with counts (Space
+adds a value to the query), `a` shows what is packaged and intact, `s` sorts,
+Enter shows the whole entry with the text it came from, `?` lists the keys.
+The report does the same with clickable facets, and keeps the query in the
+page address so a filtered view can be shared. It loads nothing from the
+network, and every name and command in it is shown as text, never as markup.
+
 ## Limits
 
 It doesn't execute anything on the host it scans. `rpm`, `dpkg` and

