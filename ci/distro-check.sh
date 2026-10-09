@@ -34,6 +34,7 @@ case "$ID ${ID_LIKE:-}" in
     *debian*|*ubuntu*)        FAMILY=dpkg ;;
     *fedora*|*rhel*|*centos*) FAMILY=rpm ;;
     *alpine*)                 FAMILY=apk ;;
+    *arch*)                   FAMILY=pacman ;;
     *)                        FAMILY=none ;;
 esac
 
@@ -152,6 +153,8 @@ owner_of() {
         apk)  for p in $(apk_spellings "$1"); do
                   apk info -W "$p" 2>/dev/null | sed -n 's/^.* is owned by \(.*\)-[^-]*-r[0-9]*$/\1/p'
               done | sort -u ;;
+        # pacman -Qqo prints the owning package's name alone.
+        pacman) pacman -Qqo "$1" 2>/dev/null ;;
         dpkg)
             # dpkg records whichever spelling the package shipped, so a
             # merged-usr path is asked about both ways.
@@ -165,6 +168,9 @@ verify_failed() {
     case "$FAMILY" in
         rpm)  rpm -Vf "$1" 2>/dev/null | grep -E "^..5.* $1\$|^....L.* $1\$" ;;
         dpkg) dpkg --verify "$2" 2>/dev/null | grep -E "^..5.* $1\$" ;;
+        # -Qkk checks the mtree: size, mode, mtime and sha256. Only the digest
+        # is a change of contents; an mtime moves for harmless reasons.
+        pacman) pacman -Qkk "$2" 2>&1 | grep -F "$1 (" | grep -i "checksum" ;;
         # apk audit reports a protected path's changes, --system the rest's.
         # Neither reports an edited regular file under /etc/init.d, whose
         # protection covers links only, so an edit there passes this referee
@@ -184,6 +190,7 @@ case "$FAMILY" in
     rpm)  referee=rpm ;;
     dpkg) referee=dpkg-query ;;
     apk)  referee=apk ;;
+    pacman) referee=pacman ;;
     *)    referee="" ;;
 esac
 if [ -n "$referee" ] && command -v "$referee" >/dev/null 2>&1; then
@@ -534,6 +541,15 @@ case "$table$explained" in
 esac
 echo "$table" | grep -q '\\x1b\[2K' || fail "the control sequence was not shown escaped: $table"
 note "terminal control sequences in a command are shown, not obeyed"
+
+# --- a pacman hook ----------------------------------------------------------
+# libalpm runs every .hook in /etc/pacman.d/hooks as root around a
+# transaction; the check plants one and requires it unpackaged and gone again
+# once removed.
+if [ "$FAMILY" = pacman ]; then
+    printf '[Trigger]\nOperation = Install\nType = Package\nTarget = *\n\n[Action]\nWhen = PostTransaction\nExec = /tmp/not-a-real-payload\n' |
+        plant_check /etc/pacman.d/hooks/unbidden-check.hook pkg_hook '"name":"pacman:unbidden-check.hook"'
+fi
 
 # --- a home that reaches outside itself ----------------------------------
 # Any account can link its own ~/.bashrc at /etc/shadow. The link must be

@@ -283,6 +283,9 @@ jobs:
             prep: apk add -q openrc busybox-openrc &&
           - image: public.ecr.aws/docker/library/alpine:3.22
             prep: apk add -q openrc busybox-openrc &&
+          # §1: Arch is rolling, so the official image is whatever is
+          # current; the check runs against it as pulled.
+          - image: archlinux:latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

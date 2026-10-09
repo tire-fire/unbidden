@@ -759,3 +759,17 @@ path = "fuzz_targets/apk_repositories.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "pacman_files"
+path = "fuzz_targets/pacman_files.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "pacman_mtree"
+path = "fuzz_targets/pacman_mtree.rs"
+test = false
+doc = false
+bench = false

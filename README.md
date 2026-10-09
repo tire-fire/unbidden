@@ -142,6 +142,7 @@ or SSSD account with nothing on local disk won't be picked up.
 | Linux Mint | 21.x, 22.x, LMDE | dpkg | Cinnamon |
 | Fedora | current, current-1 | rpm (sqlite) | |
 | Alpine | 3.22, current-1, current | apk | OpenRC, BusyBox |
+| Arch Linux | current | pacman | |
 
 Anything else works on a best-effort basis. With no package database it reports
 provenance as unknown rather than calling every file on the box unpackaged.
@@ -157,7 +158,7 @@ mutation pass that takes a synthetic tree apart 120 ways, and a lint that
 keeps every module off the filesystem except through the scan root. Every
 parser has a `cargo-fuzz` target.
 
-CI runs the release binary in all twelve supported images and checks its
+CI runs the release binary in all thirteen supported images and checks its
 verdicts against the image's own `rpm`, `dpkg` or `apk`: who owns each file, and
 whether it is intact. It boots real GNOME and Cinnamon sessions. It also
 plants every mechanism [PANIX](https://github.com/Aegrah/PANIX) supports that

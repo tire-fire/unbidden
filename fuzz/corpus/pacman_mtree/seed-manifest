@@ -1,0 +1,6 @@
+#mtree
+/set type=file uid=0 gid=0 mode=644
+./etc time=1.0 mode=755 type=dir
+./etc/crontab time=1.0 size=24 sha256digest=ff254b62ced71502a303794b0f9b6a7b794b1a6580108394a021f14ff691ec3e
+./etc/link time=1.0 type=link link=crontab
+./etc/with\040space time=1.0 mode=4755 size=1
