@@ -20,7 +20,15 @@
 //! kernel install, as root, /etc/dkms/framework.conf and framework.conf.d/
 //! *.conf are sourced, and each registered module's dkms.conf is sourced
 //! with its PRE_BUILD, POST_BUILD, PRE_INSTALL, POST_INSTALL, POST_ADD and
-//! POST_REMOVE scripts run.
+//! POST_REMOVE scripts run. mkinitcpio 42 (Arch): at every build, as root,
+//! /etc/mkinitcpio.conf and the `*.conf` of /etc/mkinitcpio.conf.d after it
+//! are sourced as one shell file, and each name its `HOOKS` array lists has
+//! its `install` script, from /etc/initcpio/install or else /usr/lib/initcpio/
+//! install, sourced, and its boot-time `hooks` script packed into the image
+//! to run before the root filesystem mounts. Every executable in
+//! /etc/initcpio/post and /usr/lib/initcpio/post runs on the finished image,
+//! a name in /etc replacing the same name in /usr/lib, and a preset in
+//! /etc/mkinitcpio.d is sourced when one is built.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -40,6 +48,7 @@ impl Collector for Initramfs {
     fn collect(&self, cx: &mut Ctx) -> Vec<Entry> {
         let mut out = Vec::new();
         initramfs_tools(cx, &mut out);
+        mkinitcpio(cx, &mut out);
         dracut(cx, &mut out);
         dkms(cx, &mut out);
         out
@@ -186,6 +195,135 @@ fn initramfs_tools(cx: &mut Ctx, out: &mut Vec<Entry>) {
     }
 }
 
+/// The names the last `HOOKS=(...)` of these shell fragments lists, `+=`
+/// appending to what came before. Comments are skipped and quotes stripped;
+/// only the plain array and the older quoted-string spelling are read, so a
+/// configuration that builds the array any other way yields what it can.
+fn hooks_array(configs: &[Vec<u8>]) -> Option<Vec<String>> {
+    let mut hooks: Option<Vec<String>> = None;
+    for text in configs {
+        let text = String::from_utf8_lossy(text);
+        let mut rest: &str = &text;
+        while let Some(at) = rest.find("HOOKS") {
+            let line_start = rest[..at].rfind('\n').map_or(0, |n| n + 1);
+            let before = &rest[line_start..at];
+            let after = &rest[at + 5..];
+            rest = after;
+            if !before.trim().is_empty() {
+                continue;
+            }
+            let (append, body) = match after.strip_prefix("+=") {
+                Some(b) => (true, b),
+                None => match after.strip_prefix('=') {
+                    Some(b) => (false, b),
+                    None => continue,
+                },
+            };
+            let (open, close) = match body.chars().next() {
+                Some('(') => ('(', ')'),
+                Some('"') => ('"', '"'),
+                Some('\'') => ('\'', '\''),
+                _ => continue,
+            };
+            let inner = &body[open.len_utf8()..];
+            let Some(end) = inner.find(close) else { continue };
+            let names: Vec<String> = inner[..end]
+                .lines()
+                .flat_map(|l| l.split('#').next().unwrap_or("").split_whitespace().map(|w| w.trim_matches(|c| c == '"' || c == '\'').to_string()).collect::<Vec<_>>())
+                .filter(|w| !w.is_empty())
+                .collect();
+            if append {
+                hooks.get_or_insert_with(Vec::new).extend(names);
+            } else {
+                hooks = Some(names);
+            }
+        }
+    }
+    hooks
+}
+
+fn mkinitcpio(cx: &mut Ctx, out: &mut Vec<Entry>) {
+    let installed = cx.root.exists("usr/bin/mkinitcpio");
+    let mut confs: Vec<PathBuf> = vec![PathBuf::from("etc/mkinitcpio.conf")];
+    let mut dropins: Vec<PathBuf> =
+        sorted_files(cx, Path::new("etc/mkinitcpio.conf.d")).into_iter().filter(|r| file_name(r).ends_with(".conf")).collect();
+    dropins.sort();
+    confs.extend(dropins);
+    let mut texts = Vec::new();
+    for rel in confs {
+        let Some(bytes) = cx.read_capped(&rel, CAP) else { continue };
+        let mut e = entry(cx, &rel, format!("mkinitcpio:conf:{}", file_name(&rel)), "mkinitcpio", Trigger::PackageOp, installed);
+        e.note("runs_when", "every initramfs build: sourced as shell");
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            let t = line.trim();
+            for key in ["MODULES", "BINARIES", "FILES"] {
+                if let Some(v) = t.strip_prefix(key).and_then(|r| r.strip_prefix("=").or_else(|| r.strip_prefix("+="))) {
+                    e.note(&key.to_ascii_lowercase(), v.trim().trim_matches(|c| c == '(' || c == ')').trim());
+                }
+            }
+        }
+        texts.push(bytes);
+        out.push(e);
+    }
+    let active = hooks_array(&texts);
+
+    for rel in sorted_files(cx, Path::new("etc/mkinitcpio.d")).into_iter().filter(|r| file_name(r).ends_with(".preset")) {
+        let mut e = entry(cx, &rel, format!("mkinitcpio:preset:{}", file_name(&rel)), "mkinitcpio", Trigger::PackageOp, installed);
+        e.note("runs_when", "when the preset's images are built (every kernel install): sourced as shell");
+        out.push(e);
+    }
+
+    // The install script of a hook is sourced at build time; its boot-time
+    // counterpart is packed into the image. Both are chosen by name from
+    // HOOKS, /etc before /usr/lib.
+    for (kind, label, trigger, dirs) in [
+        ("install", "build", Trigger::PackageOp, ["etc/initcpio/install", "usr/lib/initcpio/install"]),
+        ("hooks", "boot", Trigger::Boot, ["etc/initcpio/hooks", "usr/lib/initcpio/hooks"]),
+    ] {
+        for (rel, shadowed_by) in super::replaceable(cx, &dirs, "") {
+            let name = file_name(&rel);
+            let Ok(meta) = cx.root.stat_follow(&rel) else { continue };
+            if !meta.is_file {
+                continue;
+            }
+            let mut e = entry(cx, &rel, format!("mkinitcpio:{kind}:{name}"), "mkinitcpio", trigger, installed);
+            e.note("runs_when", if label == "build" { "every initramfs build, when HOOKS lists it: sourced as shell" } else { "at boot, as root, before the root filesystem mounts, when HOOKS lists it" });
+            if kind == "hooks" {
+                // Runs under the image's own busybox, so a `#!/usr/bin/ash`
+                // line names a file that need not exist on this host.
+                e.note("interpreter_in_image", "true");
+            }
+            if let Some(by) = shadowed_by {
+                e.enabled = Enablement::Disabled;
+                e.note(crate::entry::key::SHADOWED_BY, cx.root.abs(&by).display().to_string());
+            } else if let Some(list) = &active {
+                if !list.contains(&name) {
+                    e.enabled = Enablement::Disabled;
+                    e.note("not_run", "not in HOOKS");
+                }
+            }
+            out.push(e);
+        }
+    }
+
+    for (rel, shadowed_by) in super::replaceable(cx, &["etc/initcpio/post", "usr/lib/initcpio/post"], "") {
+        let Ok(meta) = cx.root.stat_follow(&rel) else { continue };
+        if !meta.is_file {
+            continue;
+        }
+        let mut e = entry(cx, &rel, format!("mkinitcpio:post:{}", file_name(&rel)), "mkinitcpio", Trigger::PackageOp, installed);
+        e.note("runs_when", "after every initramfs image is built, with the image as its argument");
+        if let Some(by) = shadowed_by {
+            e.enabled = Enablement::Disabled;
+            e.note(crate::entry::key::SHADOWED_BY, cx.root.abs(&by).display().to_string());
+        } else if meta.mode & 0o111 == 0 {
+            e.enabled = Enablement::Disabled;
+            e.note("not_run", "not executable");
+        }
+        out.push(e);
+    }
+}
+
 fn dracut(cx: &mut Ctx, out: &mut Vec<Entry>) {
     let installed = cx.root.exists("usr/bin/dracut");
     // Configuration, sourced as shell; a name in /etc hides the same name
@@ -325,6 +463,53 @@ mod tests {
         let root = Root::at(dir).unwrap();
         let collectors: Vec<Box<dyn Collector>> = vec![Box::new(Initramfs)];
         crate::scan::run(&root, &Options { deep: false }, &collectors)
+    }
+
+    #[test]
+    fn hooks_array_reads_the_last_assignment_and_appends() {
+        let one = |t: &str| hooks_array(&[t.as_bytes().to_vec()]);
+        assert_eq!(one("HOOKS=(base udev # c\n  autodetect)\n").unwrap(), ["base", "udev", "autodetect"]);
+        assert_eq!(one("HOOKS=(a)\nHOOKS=(b c)\n").unwrap(), ["b", "c"]);
+        assert_eq!(one("HOOKS=(a)\nHOOKS+=(b)\n").unwrap(), ["a", "b"]);
+        assert_eq!(one("HOOKS=\"base udev\"\n").unwrap(), ["base", "udev"]);
+        assert_eq!(one("# HOOKS=(commented)\nMODULES=()\n"), None, "a commented line is not an assignment");
+        assert_eq!(hooks_array(&[b"HOOKS=(a)\n".to_vec(), b"HOOKS+=(b)\n".to_vec()]).unwrap(), ["a", "b"], "a drop-in appends to the file");
+    }
+
+    #[test]
+    fn mkinitcpio_runs_the_hooks_its_config_lists() {
+        let d = crate::testing::Tree::new("mkinitcpio");
+        put(&d, "usr/bin/mkinitcpio", b"", 0o755);
+        put(&d, "etc/mkinitcpio.conf", b"MODULES=(nvidia)\nHOOKS=(base udev)\n", 0o644);
+        put(&d, "etc/mkinitcpio.conf.d/10-extra.conf", b"HOOKS+=(evil)\nFILES=(/etc/keyfile)\n", 0o644);
+        put(&d, "etc/mkinitcpio.conf.d/skipped.txt", b"HOOKS=(never)\n", 0o644);
+        put(&d, "etc/mkinitcpio.d/linux.preset", b"PRESETS=('default')\n", 0o644);
+        for dir in ["usr/lib/initcpio/install", "usr/lib/initcpio/hooks"] {
+            put(&d, &format!("{dir}/udev"), b"build() { :; }\n", 0o644);
+            put(&d, &format!("{dir}/resume"), b"build() { :; }\n", 0o644);
+        }
+        put(&d, "etc/initcpio/install/evil", b"build() { /tmp/x; }\n", 0o644);
+        put(&d, "etc/initcpio/install/udev", b"build() { /tmp/y; }\n", 0o644);
+        put(&d, "etc/initcpio/post/10-sign", b"#!/bin/sh\n/tmp/sign\n", 0o755);
+        put(&d, "usr/lib/initcpio/post/10-sign", b"#!/bin/sh\n", 0o755);
+        put(&d, "usr/lib/initcpio/post/20-off", b"#!/bin/sh\n", 0o644);
+        let s = scan(&d);
+        let get = |name: &str, src: &str| s.entries.iter().find(|e| e.name == name && e.source.ends_with(src)).unwrap_or_else(|| panic!("{name} {src}"));
+        let st = |e: &Entry| e.enabled;
+        assert_eq!(st(get("mkinitcpio:install:evil", "etc/initcpio/install/evil")), Enablement::Enabled, "HOOKS+= in a drop-in lists it");
+        assert_eq!(st(get("mkinitcpio:install:udev", "etc/initcpio/install/udev")), Enablement::Enabled);
+        assert_eq!(st(get("mkinitcpio:install:udev", "usr/lib/initcpio/install/udev")), Enablement::Disabled, "an /etc hook replaces it");
+        let resume = get("mkinitcpio:hooks:resume", "usr/lib/initcpio/hooks/resume");
+        assert_eq!(resume.enabled, Enablement::Disabled);
+        assert_eq!(resume.raw["not_run"], "not in HOOKS");
+        assert_eq!(st(get("mkinitcpio:hooks:udev", "usr/lib/initcpio/hooks/udev")), Enablement::Enabled);
+        assert_eq!(get("mkinitcpio:hooks:udev", "hooks/udev").trigger, Trigger::Boot);
+        assert_eq!(st(get("mkinitcpio:post:10-sign", "etc/initcpio/post/10-sign")), Enablement::Enabled);
+        assert_eq!(st(get("mkinitcpio:post:10-sign", "usr/lib/initcpio/post/10-sign")), Enablement::Disabled);
+        assert_eq!(st(get("mkinitcpio:post:20-off", "post/20-off")), Enablement::Disabled, "not executable");
+        assert_eq!(get("mkinitcpio:conf:10-extra.conf", "10-extra.conf").raw["files"], "/etc/keyfile");
+        assert!(s.entries.iter().any(|e| e.name == "mkinitcpio:preset:linux.preset"));
+        assert!(s.entries.iter().all(|e| e.name != "mkinitcpio:conf:skipped.txt"));
     }
 
     #[test]

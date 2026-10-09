@@ -1631,6 +1631,11 @@ fn interpreter_chain(root: &Root, entries: &[Entry]) -> Vec<Entry> {
     let mut seen_declared: BTreeSet<(String, String)> = BTreeSet::new();
 
     for carrier in entries {
+        // A script the initramfs runs under its own interpreter has no
+        // interpreter here to follow.
+        if carrier.raw.contains_key("interpreter_in_image") {
+            continue;
+        }
         let script = match &carrier.target_path {
             Some(target) => root.rel(target),
             None => root.rel(&carrier.source),
