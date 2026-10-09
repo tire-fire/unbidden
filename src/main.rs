@@ -37,6 +37,28 @@ enum Command {
     Scan(ScanArgs),
     /// Everything known about one entry, including the text it came from.
     Explain(ExplainArgs),
+    /// Browse a scan in the terminal: type to filter, pick kinds and flags
+    /// with counts, Enter for the whole entry. `?` inside lists the keys.
+    Tui(TuiArgs),
+}
+
+#[derive(Args)]
+struct TuiArgs {
+    /// Start with the packaged, intact entries shown too.
+    #[arg(long)]
+    all: bool,
+
+    /// Also run the collectors that need a whole-filesystem traversal.
+    #[arg(long)]
+    deep: bool,
+
+    /// Browse a scan saved with --save instead of scanning now.
+    #[arg(long, value_name = "PATH")]
+    from: Option<PathBuf>,
+
+    /// Scan a mounted image or chroot instead of the running system.
+    #[arg(long, value_name = "PATH", default_value = "/")]
+    root: PathBuf,
 }
 
 #[derive(Args, Clone)]
@@ -106,6 +128,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Explain(args)) => run_explain(args),
+        Some(Command::Tui(args)) => run_tui(args),
         Some(Command::Scan(args)) => run_scan(args),
         None => run_scan(cli.scan),
     };
@@ -184,6 +207,15 @@ fn run_scan(args: ScanArgs) -> Result<(), String> {
         Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+fn run_tui(args: TuiArgs) -> Result<(), String> {
+    let root = open_root(&args.root)?;
+    let scan = match &args.from {
+        Some(path) => load(path)?,
+        None => collect_scan(&root, args.deep),
+    };
+    unbidden::tui::run(&scan, &root, args.all).map_err(|e| e.to_string())
 }
 
 fn run_explain(args: ExplainArgs) -> Result<(), String> {

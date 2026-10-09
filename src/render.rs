@@ -342,7 +342,7 @@ fn banners(w: &mut impl Write, scan: &Scan) -> io::Result<()> {
 /// is a note about how an answer was reached, not a finding about the host.
 /// Leading with it once hid `packaged-modified`, which is the single
 /// highest-signal thing this tool reports.
-fn flags_text(e: &Entry) -> String {
+pub(crate) fn flags_text(e: &Entry) -> String {
     let mut flags: Vec<&str> = e.flags.iter().map(|f| f.as_str()).collect();
     flags.sort_by_key(|f| *f == Flag::DegradedEnablement.as_str());
     flags.join(",")
@@ -352,7 +352,7 @@ fn width_of(lens: impl Iterator<Item = usize>, min: usize, max: usize) -> usize 
     lens.max().unwrap_or(min).clamp(min, max)
 }
 
-fn clip(s: &str, w: usize) -> String {
+pub(crate) fn clip(s: &str, w: usize) -> String {
     if s.chars().count() <= w {
         return s.to_string();
     }
