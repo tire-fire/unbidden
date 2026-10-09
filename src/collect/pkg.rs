@@ -39,6 +39,7 @@ impl Collector for PkgHooks {
         out.extend(libdnf5_actions(cx));
         out.extend(rpm(cx));
         out.extend(apk_hooks(cx));
+        out.extend(pacman_hooks(cx));
         out.extend(kernel_hooks(cx));
         out.extend(dpkg_cfg(cx));
         out.extend(hook_dirs(cx));
@@ -47,6 +48,149 @@ impl Collector for PkgHooks {
         out.extend(dbus(cx));
         out
     }
+}
+
+// ---------------------------------------------------------------- pacman ----
+
+const PACMAN_CONF: &str = "etc/pacman.conf";
+const PACMAN_HOOK_DIR: &str = "etc/pacman.d/hooks";
+const LIBALPM_HOOK_DIR: &str = "usr/share/libalpm/hooks";
+
+/// pacman's own configuration and the libalpm hooks it runs, as root, around
+/// every transaction. A hook is a `.hook` file (the suffix exactly, a leading
+/// dot allowed) in the `HookDir` directories of pacman.conf, /etc/pacman.d/hooks
+/// when none is given, and always /usr/share/libalpm/hooks last. A same-named
+/// file in an earlier directory replaces a later one, and a link to /dev/null
+/// disables it. Measured on pacman 7.1: a `.hidden.hook` runs, `x.hook.disabled`
+/// and `x.HOOK` do not, and `/etc` over `/usr/share` wins. Its `[Action]` names
+/// when it runs and `Exec`, the command. pacman.conf's `XferCommand` replaces
+/// the built-in downloader with a command run for every download.
+fn pacman_hooks(cx: &mut Ctx) -> Vec<Entry> {
+    let mut out = Vec::new();
+    let conf = cx.read_capped(PACMAN_CONF, 256 * 1024);
+    let mut dirs: Vec<String> = Vec::new();
+    if let Some(bytes) = &conf {
+        for line in crate::text::ini(bytes) {
+            if line.section == "options" && line.key == "HookDir" {
+                let dir = lossy(&line.value);
+                if let Some(rel) = dir.strip_prefix('/') {
+                    dirs.push(rel.trim_end_matches('/').to_string());
+                }
+            }
+        }
+    }
+    if dirs.is_empty() {
+        dirs.push(PACMAN_HOOK_DIR.to_string());
+    }
+    dirs.push(LIBALPM_HOOK_DIR.to_string());
+    let dir_refs: Vec<&str> = dirs.iter().map(String::as_str).collect();
+    let installed = cx.root.exists("usr/bin/pacman");
+
+    if let Some(bytes) = &conf {
+        for line in crate::text::ini(bytes) {
+            if line.section == "options" && line.key == "XferCommand" {
+                let mut e = cx.entry(Kind::PkgHook, PACMAN_CONF, "pacman:XferCommand");
+                e.trigger = Trigger::PackageOp;
+                e.principal = Some("root".into());
+                e.enabled = if installed { Enablement::Enabled } else { Enablement::Disabled };
+                e.note("manager", "pacman");
+                e.note("runs_when", "every download pacman makes");
+                set_command(&mut e, &line.value);
+                out.push(e);
+            }
+        }
+    }
+
+    for (rel, shadowed_by) in super::replaceable(cx, &dir_refs, ".hook") {
+        let name = rel.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let masked = cx.root.read_link(&rel).is_ok_and(|t| t == Path::new("/dev/null"));
+        let Some(bytes) = cx.read_capped(&rel, 64 * 1024) else {
+            if masked {
+                let mut e = cx.entry(Kind::PkgHook, &rel, format!("pacman:{name}"));
+                e.trigger = Trigger::PackageOp;
+                e.enabled = Enablement::Masked;
+                e.note("manager", "pacman");
+                out.push(e);
+            }
+            continue;
+        };
+        let (mut when, mut exec, mut description) = (String::new(), None, String::new());
+        let (mut operations, mut types, mut targets) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut abort, mut needs_targets) = (false, false);
+        for (section, key, raw) in alpm_hook_lines(&bytes) {
+            let value = lossy(&raw);
+            match (section.as_str(), key.as_str()) {
+                ("Action", "When") => when = value,
+                ("Action", "Exec") => exec = Some(raw.clone()),
+                ("Action", "Description") => description = value,
+                ("Action", "AbortOnFail") => abort = true,
+                ("Action", "NeedsTargets") => needs_targets = true,
+                ("Trigger", "Operation") => operations.push(value),
+                ("Trigger", "Type") => types.push(value),
+                ("Trigger", "Target") => targets.push(value),
+                _ => {}
+            }
+        }
+        let Some(exec) = exec else { continue };
+        let mut e = cx.entry(Kind::PkgHook, &rel, format!("pacman:{name}"));
+        e.trigger = Trigger::PackageOp;
+        e.principal = Some("root".into());
+        e.note("manager", "pacman");
+        e.note("when", when);
+        if !description.is_empty() {
+            e.note("description", description);
+        }
+        for (key, values) in [("operations", &mut operations), ("types", &mut types), ("targets", &mut targets)] {
+            values.sort();
+            values.dedup();
+            e.note(key, values.join(", "));
+        }
+        if abort {
+            e.note("abort_on_fail", "true");
+        }
+        if needs_targets {
+            e.note("needs_targets", "true");
+        }
+        set_command(&mut e, &exec);
+        e.enabled = if !installed {
+            e.note("not_run", "pacman is not installed");
+            Enablement::Disabled
+        } else if masked {
+            Enablement::Masked
+        } else if let Some(by) = shadowed_by {
+            e.note(key::SHADOWED_BY, cx.root.abs(&by).display().to_string());
+            Enablement::Disabled
+        } else {
+            Enablement::Enabled
+        };
+        out.push(e);
+    }
+    out
+}
+
+/// A libalpm hook's `(section, key, value)` lines. `AbortOnFail` and
+/// `NeedsTargets` are bare keys with no `=`, which the shared ini reader
+/// drops, so a hook has its own: `#` lines are comments, `[Name]` opens a
+/// section, a key is cut at the first `=` and both sides are trimmed.
+fn alpm_hook_lines(bytes: &[u8]) -> Vec<(String, String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut section = String::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        let line = line.trim_ascii();
+        if line.is_empty() || line[0] == b'#' {
+            continue;
+        }
+        if line[0] == b'[' && line.last() == Some(&b']') {
+            section = lossy(&line[1..line.len() - 1]);
+            continue;
+        }
+        let (key, value) = match line.iter().position(|b| *b == b'=') {
+            Some(eq) => (line[..eq].trim_ascii(), line[eq + 1..].trim_ascii()),
+            None => (line, &line[line.len()..]),
+        };
+        out.push((section.clone(), lossy(key), value.to_vec()));
+    }
+    out
 }
 
 /// The directories a kernel package's maintainer scripts hand to run-parts
@@ -1799,6 +1943,45 @@ mod tests {
         }
         let s = scan(&dir);
         assert!(s.entries.iter().any(|e| e.raw.get("not_followed").is_some_and(|w| w.contains("already read"))));
+    }
+
+    #[test]
+    fn libalpm_hooks_run_by_pacmans_rules() {
+        let hook = |when: &str, exec: &str| format!("[Trigger]\nOperation = Install\nOperation = Upgrade\nType = Package\nTarget = *\n\n[Action]\nDescription = d\nWhen = {when}\nExec = {exec}\nAbortOnFail\n");
+        let dir = tree("pacman");
+        put(&dir, "usr/bin/pacman", b"");
+        put(&dir, "etc/pacman.conf", b"[options]\nXferCommand = /usr/local/bin/fetch %u %o\n");
+        put(&dir, "etc/pacman.d/hooks/10-a.hook", hook("PostTransaction", "/opt/etc-a").as_bytes());
+        put(&dir, "usr/share/libalpm/hooks/10-a.hook", hook("PostTransaction", "/opt/usr-a").as_bytes());
+        put(&dir, "usr/share/libalpm/hooks/20-b.hook", hook("PreTransaction", "/opt/usr-b").as_bytes());
+        std::os::unix::fs::symlink("/dev/null", dir.join("etc/pacman.d/hooks/20-b.hook")).unwrap();
+        put(&dir, "etc/pacman.d/hooks/.dot.hook", hook("PostTransaction", "/opt/dot").as_bytes());
+        put(&dir, "etc/pacman.d/hooks/30-c.hook.disabled", hook("PostTransaction", "/opt/never").as_bytes());
+        put(&dir, "etc/pacman.d/hooks/40-d.HOOK", hook("PostTransaction", "/opt/never").as_bytes());
+        let s = scan(&dir);
+        let by = |name: &str, source: &str| {
+            s.entries.iter().find(|e| e.name == name && e.source.ends_with(source)).unwrap_or_else(|| panic!("{name} {source}"))
+        };
+        let etc_a = by("pacman:10-a.hook", "etc/pacman.d/hooks/10-a.hook");
+        assert_eq!((etc_a.enabled, etc_a.principal.as_deref()), (Enablement::Enabled, Some("root")));
+        assert_eq!(etc_a.command.as_deref(), Some(b"/opt/etc-a".as_slice()));
+        assert_eq!(etc_a.raw["when"], "PostTransaction");
+        assert_eq!(etc_a.raw["operations"], "Install, Upgrade");
+        assert_eq!(etc_a.raw["abort_on_fail"], "true");
+        assert_eq!(by("pacman:10-a.hook", "libalpm/hooks/10-a.hook").enabled, Enablement::Disabled, "an /etc hook of the name replaces it");
+        assert_eq!(by("pacman:20-b.hook", "etc/pacman.d/hooks/20-b.hook").enabled, Enablement::Masked);
+        assert_eq!(by("pacman:20-b.hook", "libalpm/hooks/20-b.hook").enabled, Enablement::Disabled);
+        assert_eq!(by("pacman:.dot.hook", ".dot.hook").enabled, Enablement::Enabled, "a dotfile hook runs");
+        assert!(s.entries.iter().all(|e| e.command.as_deref() != Some(b"/opt/never".as_slice())));
+        assert_eq!(by("pacman:XferCommand", "etc/pacman.conf").command.as_deref(), Some(b"/usr/local/bin/fetch %u %o".as_slice()));
+
+        // HookDir replaces the /etc default; the libalpm directory is always read.
+        put(&dir, "etc/pacman.conf", b"[options]\nHookDir = /opt/hooks/\n");
+        put(&dir, "opt/hooks/10-opt.hook", hook("PostTransaction", "/opt/opt").as_bytes());
+        let s = scan(&dir);
+        assert!(s.entries.iter().any(|e| e.command.as_deref() == Some(b"/opt/opt".as_slice()) && e.enabled == Enablement::Enabled));
+        assert!(s.entries.iter().all(|e| e.command.as_deref() != Some(b"/opt/etc-a".as_slice())), "/etc/pacman.d/hooks is not read once HookDir is set");
+        assert!(s.entries.iter().any(|e| e.command.as_deref() == Some(b"/opt/usr-a".as_slice()) && e.enabled == Enablement::Enabled));
     }
 
     #[test]
