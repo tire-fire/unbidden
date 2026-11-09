@@ -14,6 +14,15 @@ short="${2:?seconds for every other target}"
 bin=fuzz/target/x86_64-unknown-linux-gnu/release
 logs=$(mktemp -d)
 
+# Since cc 1.9 the bundled C (SQLite, tree-sitter) is built with
+# -fsanitize=address too. SQLite has two function-local `static const aiOff[]`
+# tables with the same contents; they end up at one address, and ASan's
+# default ODR check (level 2) reports that as a violation in every target
+# before any input is run. Neither table has external linkage, so there is no
+# ODR to violate. Level 1 still reports a same-named global whose size
+# differs, the real bug. A caller's own ASAN_OPTIONS come later and win.
+export ASAN_OPTIONS="detect_odr_violation=1${ASAN_OPTIONS:+:$ASAN_OPTIONS}"
+
 # -timeout turns a hang into a reported crash rather than a job that runs
 # until GitHub kills it; the two memory limits are how "no unbounded memory"
 # gets checked at all.
